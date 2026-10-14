@@ -37,10 +37,14 @@ export const actions = {
   },
   up: {
     keys: ["pageUp"],
-    description: "履歴を開く／上へ",
+    description: "会話を上へスクロール",
     command: "/history",
   },
-  down: { keys: ["pageDown"], description: "下へ", command: "/history" },
+  down: {
+    keys: ["pageDown"],
+    description: "会話を下へスクロール",
+    command: "/history",
+  },
 } satisfies Record<
   string,
   { keys: KeyId[]; description: string; command: string }

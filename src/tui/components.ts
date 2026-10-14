@@ -4,6 +4,7 @@ import {
   Input,
   Markdown,
   ScrollView,
+  VStack,
   SelectList,
   Text,
   stripTerminalSequences,
@@ -328,14 +329,34 @@ export class ResponsiveOverlay implements Component, Focusable {
 
 export class ContentColumn extends Container {
   render(width: number): string[] {
-    const inner = Math.max(1, Math.min(100, width - 4));
-    const padding = " ".repeat(Math.max(0, Math.floor((width - inner) / 2)));
+    const inner = Math.max(1, width - 2);
+    const padding = width > 2 ? " " : "";
     return super.render(inner).map((line) => padding + line);
   }
 }
 
+export class WorkbenchLayout extends VStack {
+  readonly scroll: ScrollView;
+  constructor(content: Component[], controls: Component[]) {
+    const body = new ContentColumn();
+    const footer = new ContentColumn();
+    for (const child of content) body.addChild(child);
+    for (const child of controls) footer.addChild(child);
+    const scroll = new ScrollView(body, {
+      follow: "end",
+      primary: true,
+      scrollbar: "hidden",
+    });
+    super([
+      { component: scroll, basis: 0, grow: 1, minSize: 1 },
+      { component: footer, basis: "auto", shrink: 0 },
+    ]);
+    this.scroll = scroll;
+  }
+}
+
 // ScrollView owns follow/scroll state and Pi owns all wrapping/width calculations.
-// Main-screen dialogs clip rendered rows, preserving native terminal scrollback.
+// Dialogs clip rendered rows independently of the main conversation viewport.
 export class Reader implements Component {
   readonly scroll: ScrollView;
   readonly content = markdown("");

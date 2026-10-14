@@ -1,7 +1,7 @@
 import {
   CombinedAutocompleteProvider,
   ProcessTerminal,
-  TuiMainScreen,
+  TuiAltScreen,
   Text,
   matchesKey,
   getKeybindings,
@@ -23,7 +23,7 @@ import {
   safeText,
   theme,
   Picker,
-  ContentColumn,
+  WorkbenchLayout,
   terminalTheme,
   ResponsiveOverlay,
 } from "./components.js";
@@ -42,7 +42,10 @@ import {
 
 export class TerminalApp {
   readonly terminal = new ProcessTerminal();
-  readonly tui = new TuiMainScreen(this.terminal, true);
+  readonly tui = new TuiAltScreen(this.terminal, true, undefined, {
+    copyOnSelect: false,
+    scrollToEndIndicator: () => theme.accent("↓ 最新へ"),
+  });
   readonly input = editor(this.tui);
   readonly transcript = new ConversationView();
   readonly progress = new Text("起動中…", 0, 0);
@@ -50,6 +53,7 @@ export class TerminalApp {
   readonly notification = new Text("", 0, 0);
   readonly status = new Text("", 0, 0);
   readonly refs = new Text("", 0, 0);
+  readonly layout: WorkbenchLayout;
   app?: Application;
   private reader?: Reader;
   private cancelDialog?: () => void;
@@ -69,18 +73,11 @@ export class TerminalApp {
   private restored = false;
   private earlyExit = false;
   constructor(readonly home?: string) {
-    const column = new ContentColumn();
-    for (const child of [
-      this.transcript,
-      this.progress,
-      this.activity,
-      this.notification,
-      this.refs,
-      this.input,
-      this.status,
-    ])
-      column.addChild(child);
-    this.tui.addChild(column);
+    this.layout = new WorkbenchLayout(
+      [this.transcript, this.progress, this.activity, this.notification],
+      [this.refs, this.input, this.status],
+    );
+    this.tui.setLayoutRoot(this.layout);
     this.tui.setFocus(this.input);
     this.input.setAutocompleteProvider(
       new CombinedAutocompleteProvider(commands, process.cwd(), null),
@@ -168,10 +165,6 @@ export class TerminalApp {
     }
     if (action === "tools") {
       this.dispatch("tools");
-      return { consume: true };
-    }
-    if (action === "up") {
-      this.dispatch("history");
       return { consume: true };
     }
     if (action === "next") {
@@ -377,6 +370,8 @@ export class TerminalApp {
       this.activity.clear();
       if (event.type === "run_started") this.notice = "";
       if (event.type === "session") {
+        this.layout.scroll.scrollToEnd();
+        this.tui.resetTextSelection();
         this.input.setText(this.app.session.draft);
         for (const message of this.app
           .history()
@@ -434,7 +429,7 @@ export class TerminalApp {
     this.activity.busy = app.busy;
     const streams = [...this.stream].slice(-2);
     this.activity.previewing = streams.length > 0;
-    const width = Math.max(10, Math.min(100, this.terminal.columns - 4));
+    const width = Math.max(1, this.terminal.columns - 2);
     // Model labels stay outside clipped previews; full responses remain in history.
     const preview = streams
       .map(([task, text]) =>

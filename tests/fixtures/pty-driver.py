@@ -103,6 +103,7 @@ try:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         proc.send_signal(signal.SIGWINCH)
         send("\x1b[5~")
+        send("/history\r")
         wait_for("PgUp/PgDn")
         send("\x1b")
         send("\x1b")
@@ -188,6 +189,8 @@ try:
     assert restored[3] & termios.ECHO, "echo remained disabled"
     assert b"\x1b[?2004l" in output, "bracketed paste not restored"
     assert b"\x1b[?25h" in output, "cursor not restored"
+    assert b"\x1b[?1049h" in output, "fullscreen was not entered"
+    assert b"\x1b[?1049l" in output, "main screen was not restored"
     assert b"\x1b]52;c;ZXhmaWw=" not in output, "untrusted clipboard escape reached terminal"
     assert proc.returncode == (1 if scenario == "exception" else 0), proc.returncode
     print(json.dumps({"readyMs":ready_ms,"idleRssKiB":rss,"conversationRssKiB":conversation_rss,"bytes":len(output),"scenario":scenario,"restored":True}))

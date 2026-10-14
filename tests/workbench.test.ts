@@ -3,6 +3,9 @@ import test from "node:test";
 import {
   visibleWidth,
   TuiMainScreen,
+  TuiAltScreen,
+  Text,
+  type Terminal,
   ProcessTerminal,
   CURSOR_MARKER,
 } from "@earendil-works/pi-tui";
@@ -14,6 +17,7 @@ import {
   editor,
   frame,
   ResponsiveOverlay,
+  WorkbenchLayout,
 } from "../src/tui/components.js";
 import {
   connectionProblems,
@@ -21,6 +25,88 @@ import {
   doctorSummary,
 } from "../src/tui/guidance.js";
 import { testConfig } from "./helpers.js";
+
+test("fullscreen uses the viewport width and pins controls while scrolling and resizing", async () => {
+  let columns = 157;
+  let rows = 51;
+  let resize = () => {};
+  let input = (_data: string) => {};
+  const noop = () => {};
+  const terminal: Terminal = {
+    get columns() {
+      return columns;
+    },
+    get rows() {
+      return rows;
+    },
+    kittyProtocolActive: false,
+    start(onInput, onResize) {
+      input = onInput;
+      resize = onResize;
+    },
+    stop: noop,
+    drainInput: async () => {},
+    write: noop,
+    moveBy: noop,
+    hideCursor: noop,
+    showCursor: noop,
+    clearLine: noop,
+    clearFromCursor: noop,
+    clearScreen: noop,
+    setTitle: noop,
+    setProgress: noop,
+    setProgramStatus: noop,
+  };
+  const tui = new TuiAltScreen(terminal, true);
+  const composer = editor(tui);
+  composer.setText("日本語の下書き");
+  const content = new Text("はじめの会話", 0, 0);
+  const ruler = {
+    render: (width: number) => ["─".repeat(width)],
+    invalidate: noop,
+  };
+  const layout = new WorkbenchLayout(
+    [content],
+    [ruler, composer, new Text("操作案内", 0, 0)],
+  );
+  tui.setLayoutRoot(layout);
+  tui.setFocus(composer);
+  const frame = async () => {
+    tui.requestRender();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const lines = tui.getScreenLines();
+    assert.equal(lines.length, terminal.rows);
+    for (const line of lines) assert.ok(visibleWidth(line) <= terminal.columns);
+    assert.match(safeText(lines.at(-1)!), /操作案内/);
+    assert.match(safeText(lines.join("\n")), /日本語の下書き/);
+    const border = lines.find((line) => line.includes("─"))!;
+    assert.equal(visibleWidth(safeText(border).trim()), terminal.columns - 2);
+    return safeText(lines.join("\n"));
+  };
+  tui.start();
+  try {
+    assert.match(await frame(), /はじめの会話/);
+    content.setText(
+      Array.from({ length: 150 }, (_, i) => `会話行 ${i}`).join("\n"),
+    );
+    assert.match(await frame(), /会話行 149/);
+    input("\x1b[5~");
+    assert.doesNotMatch(await frame(), /会話行 149/);
+    assert.equal(layout.scroll.isFollowingEnd, false);
+    content.setText(content.render(100).join("\n") + "\n新しい応答");
+    assert.doesNotMatch(await frame(), /新しい応答/);
+    layout.scroll.scrollToEnd();
+    assert.match(await frame(), /新しい応答/);
+    for (const nextColumns of [59, 80, 120, 157]) {
+      columns = nextColumns;
+      rows = nextColumns === 59 ? 29 : 51;
+      resize();
+      assert.match(await frame(), /新しい応答/);
+    }
+  } finally {
+    tui.stop();
+  }
+});
 
 test("compact activity prioritizes actual tools and uncertain results on narrow terminals", () => {
   const activity = new ActivityView();
