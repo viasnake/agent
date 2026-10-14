@@ -99,7 +99,7 @@ export function markdown(text: string): Markdown {
 export class Composer extends Editor {
   heading = "依頼を書く";
   caption = "";
-  placeholder = "依頼を入力…  @ ファイル  / コマンド";
+  placeholder = "@ ファイル  / コマンド";
   override renderTopBorder(width: number, hidden: number): string {
     return hidden
       ? super.renderTopBorder(width, hidden)
@@ -172,6 +172,8 @@ export function frame(
 
 // A searchable picker keeps draft text and focus in the composer intact.
 export class Picker implements Component, Focusable {
+  footer = "↑↓ 選択  Enter 決定  Esc 戻る";
+  extra: Component | undefined;
   readonly input = new Input({
     prompt: "/ ",
     placeholder: "検索…",
@@ -212,6 +214,16 @@ export class Picker implements Component, Focusable {
     this.list.invalidate();
     this.input.invalidate();
   }
+  restore(query: string, value?: string): void {
+    this.input.setValue("");
+    this.handleInput(query);
+    if (value) {
+      const index = this.filteredChoices.findIndex(
+        (item) => item.value === value,
+      );
+      if (index >= 0) this.list.setSelectedIndex(index);
+    }
+  }
   handleInput(data: string): void {
     if (
       !this.searchable ||
@@ -247,7 +259,7 @@ export class Picker implements Component, Focusable {
         : 0;
     const maxVisible = Math.max(
       1,
-      Math.min(6, Math.floor((rows - 9 - titleRows) / 2)),
+      Math.min(9, rows - 11 - titleRows - (this.extra ? 2 : 0)),
     );
     if (maxVisible !== this.maxVisible) {
       const selected = this.list.getSelectedItem();
@@ -272,7 +284,7 @@ export class Picker implements Component, Focusable {
       [
         ...(this.searchable ? [...this.input.render(inner), ""] : []),
         ...(items.length
-          ? items.flatMap((item) => {
+          ? items.map((item) => {
               const active = item === selected;
               const label = truncateToWidth(
                 `${active ? "›" : " "} ${item.label}`,
@@ -280,23 +292,22 @@ export class Picker implements Component, Focusable {
                 "…",
                 true,
               );
-              return [
-                active ? theme.selected(label) : label,
-                theme.muted(
-                  truncateToWidth(`  ${item.description ?? ""}`, inner),
-                ),
-              ];
+              return active ? theme.selected(label) : label;
             })
           : [
               theme.muted("一致する項目がありません"),
               "検索語を短くするか、Esc で戻れます。",
             ].map((line) => truncateToWidth(line, inner))),
+        ...(selected?.description
+          ? [theme.muted(truncateToWidth(selected.description, inner))]
+          : []),
+        ...(this.extra ? this.extra.render(inner) : []),
         ...(this.filteredChoices.length > maxVisible
           ? [theme.muted(`${index + 1} / ${this.filteredChoices.length} 件`)]
           : []),
         "",
       ],
-      inner < 44 ? "Esc 戻る · ↑↓ · Enter" : "Esc 戻る   ↑↓ 選択   Enter 決定",
+      this.footer,
       width,
     );
   }
@@ -335,14 +346,46 @@ export class ContentColumn extends Container {
   }
 }
 
+export class ConversationScroll extends ScrollView {
+  onOlder?: (remaining: number) => void;
+  private pendingTop?: number;
+  scrollAfterLayout(top: number): void {
+    this.pendingTop = Math.max(0, top);
+  }
+  preserveAfterPrepend(lines: number, remaining = 0): void {
+    this.pendingTop = Math.max(0, this.scrollTop + lines + remaining);
+  }
+  override scrollBy(lines: number): number {
+    const remaining = super.scrollBy(lines);
+    if (remaining < 0 && this.scrollTop === 0) this.onOlder?.(remaining);
+    return remaining;
+  }
+  override updateLayout(
+    height: number,
+    viewport: number,
+    request: () => void,
+  ): void {
+    super.updateLayout(height, viewport, request);
+    if (this.pendingTop !== undefined) {
+      const top = this.pendingTop;
+      this.pendingTop = undefined;
+      this.scrollTo(top, { disableFollow: true });
+    }
+  }
+  override scrollToEnd(): void {
+    this.pendingTop = undefined;
+    super.scrollToEnd();
+  }
+}
+
 export class WorkbenchLayout extends VStack {
-  readonly scroll: ScrollView;
+  readonly scroll: ConversationScroll;
   constructor(content: Component[], controls: Component[]) {
     const body = new ContentColumn();
     const footer = new ContentColumn();
     for (const child of content) body.addChild(child);
     for (const child of controls) footer.addChild(child);
-    const scroll = new ScrollView(body, {
+    const scroll = new ConversationScroll(body, {
       follow: "end",
       primary: true,
       scrollbar: "hidden",

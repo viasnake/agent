@@ -51,7 +51,7 @@ def send(text):
     read_for(.15)
 
 try:
-    wait_for("接続設定あり")
+    wait_for("Ctrl+P")
     ready_ms = (time.monotonic()-started)*1000
     rss = None
     conversation_rss = None
@@ -85,9 +85,10 @@ try:
         send("\r")
         wait_for("PTY 応答")
         wait_for("作業への追加指示")
+        mark = len(output)
         send("短く答えて\r")
         send("次の質問\x1b\r")
-        wait_for("完了 · 続き", after=0)
+        wait_for("依頼を書く", after=mark)
         read_for(3)
         with open(requests) as trace:
             records = [json.loads(line) for line in trace]
@@ -100,23 +101,24 @@ try:
         # Resize while a long stream is active; history remains usable and Esc stops it.
         send("long-output\r")
         wait_for("全角")
+        mark = len(output)
+        send("/quit\r")
+        wait_for("作業を中断し", after=mark)
+        send("\x1b")
+        assert proc.poll() is None, "canceling busy quit ended the process"
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         proc.send_signal(signal.SIGWINCH)
         send("\x1b[5~")
         send("/history\r")
-        wait_for("PgUp/PgDn")
-        send("\x1b")
         send("\x1b")
         wait_for("中断 ·")
-        # Ctrl+D inside a draft must edit, not exit. A quit cancellation retains input.
+        # Ctrl+D inside a draft edits; idle quit saves without another dialog.
         send("保存する下書き")
         send("\x04")
         assert proc.poll() is None
         send("\x03")
         send("\x04")
-        wait_for("保存して終了")
-        send("\x1b")
-        assert proc.poll() is None
+        proc.wait(timeout=10)
     elif scenario == "coding":
         for request in ["fix-code-first", "fix-code-second"]:
             mark = len(output)
@@ -166,16 +168,16 @@ try:
         wait_for("+third")
         send("\x1b")
     elif scenario == "tmux":
+        mark = len(output)
         send("日本語の質問\r")
-        wait_for("完了 · 続き")
+        wait_for("PTY 応答", after=mark)
+        wait_for("依頼を書く", after=mark)
         send("/help\r")
         wait_for("PgUp/PgDn")
         send("\x1b")
         # tmux's legacy Escape disambiguation timer must expire before another key.
         read_for(.8)
         send("/quit\r")
-        wait_for("保存して終了")
-        send("\x1b[B\r")
         proc.wait(timeout=10)
     elif scenario == "exception":
         # An explicitly injected process exception checks the shared restoration path.

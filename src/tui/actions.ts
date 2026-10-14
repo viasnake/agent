@@ -27,12 +27,12 @@ export const actions = {
   },
   interrupt: {
     keys: ["ctrl+c"],
-    description: "入力を下書き保存／中断／終了確認",
+    description: "入力を下書き保存／中断／保存して終了",
     command: "/quit",
   },
   eof: {
     keys: ["ctrl+d"],
-    description: "空入力のみ終了確認（入力中は文字削除）",
+    description: "空入力で保存して終了（入力中は文字削除）",
     command: "/quit",
   },
   up: {
@@ -78,6 +78,7 @@ export const commands = [
   ["stop", "現在の作業を中断"],
   ["quit", "終了"],
   ["history", "会話履歴"],
+  ["expand", "長文を会話内で展開"],
   ["tools", "ツール結果"],
   ["reconcile", "未確定操作の照合"],
   ["kind", "自動判定・依頼の種類"],

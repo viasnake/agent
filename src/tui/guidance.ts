@@ -20,7 +20,7 @@ export function connectionProblems(config: Config, context: Context): string[] {
       connection = config.connections[name];
     if (!connection) return `接続 ${name} は未登録です。`;
     if (!connection.enabled)
-      return `接続 ${name} は無効です。/settings → 登録済みの接続 → ${name} → enabled を確認してください。`;
+      return `接続 ${name} は無効です。/settings で「${name} enabled」を検索して確認してください。`;
     if (
       (context.localOnly || context.dataClass === "restricted") &&
       connection.type !== "local"
@@ -46,17 +46,7 @@ export function connectionProblems(config: Config, context: Context): string[] {
 
 export function setupSummary(config: Config, context: Context): string[] {
   const problems = connectionProblems(config, context);
-  return problems.length
-    ? [
-        "接続の準備が必要です",
-        "1  /settings で接続・モデルを登録",
-        "2  送信区分・予算を確認して接続を有効化",
-        "3  /probe で疎通を確認（利用枠を消費）",
-      ]
-    : [
-        "接続設定あり · 疎通は /probe で確認",
-        "コード変更の前に /settings で必須検査、/doctor で隔離環境を確認。",
-      ];
+  return problems.length ? ["接続の準備が必要です → /settings"] : [];
 }
 
 export function failureGuidance(

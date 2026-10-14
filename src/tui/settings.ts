@@ -1,9 +1,19 @@
 import type { Application } from "../application.js";
-import type { Config } from "../config.js";
+import { validateConfig } from "../config.js";
 import { AgentError } from "../types.js";
 import { catalog } from "../interactive-services.js";
+import type {
+  SettingsEdit,
+  SettingsField,
+  SettingsPosition,
+} from "./settings-editor.js";
 
 export interface SettingsUi {
+  edit(
+    title: string,
+    fields: SettingsField[],
+    position: SettingsPosition,
+  ): Promise<SettingsEdit | undefined>;
   choose(
     title: string,
     choices: { value: string; label: string; description?: string }[],
@@ -18,63 +28,192 @@ export class SettingsDialog {
     readonly ui: SettingsUi,
   ) {}
   async open(): Promise<void> {
-    const app = this.app;
-    const selected = await this.ui.choose("設定", [
+    const position: SettingsPosition = { query: "" };
+    while (true) {
+      const fields = this.fields();
+      const edit = await this.ui.edit(
+        "設定 · 検索して直接編集",
+        fields,
+        position,
+      );
+      if (!edit) return;
+      try {
+        position.notice = "";
+        if (edit.text === undefined) {
+          await this.add(edit.value);
+          position.notice =
+            "登録内容は一覧に反映されます。送信許可・予算を確認して接続を有効化し、/probe で疎通を確認してください（利用枠を消費）。";
+        } else await this.saveField(edit.value, edit.text);
+      } catch (error) {
+        position.notice = (
+          error instanceof Error ? error.message : String(error)
+        ).slice(0, 300);
+        this.ui.notify(position.notice);
+      }
+    }
+  }
+  private fields(): SettingsField[] {
+    const result: SettingsField[] = [
       {
         value: "connection",
-        label: "接続を追加",
-        description: "01 · 提供元・認証方法を登録（初期状態は無効）",
-      },
-      {
-        value: "connections",
-        label: "登録済みの接続",
-        description: `${Object.keys(app.config.connections).length} 件 · 有効化・送信許可・予算を編集`,
+        label: "+ 接続を追加",
+        description: "接続 → モデルの順に登録。接続は無効で作成します。",
       },
       {
         value: "model",
-        label: "モデルを追加",
-        description: "02 · モデル ID を入力、または SDK カタログから選択",
+        label: "+ モデルを追加",
+        description: "登録済み接続にモデルを追加（tools は無効）",
       },
-      {
-        value: "check",
-        label: "検査コマンドを追加",
-        description: "03 · コード変更後に必要な検査を設定",
-      },
-      {
-        value: "session",
-        label: "この会話の設定",
-        description: "必須検査・送信区分・ローカル限定",
-      },
-      {
-        value: "config",
-        label: "詳細設定",
-        description: "接続・モデル・権限・上限・隔離実行を編集",
-      },
-    ]);
-    const config = structuredClone(app.config);
-    if (selected === "connections") {
-      if (!Object.keys(config.connections).length) {
-        this.ui.notify(
-          "接続がありません。/settings → 接続を追加 から登録してください。",
-        );
+      { value: "check", label: "+ 検査コマンドを追加" },
+    ];
+    const labels: Record<string, string> = {
+      connections: "接続",
+      models: "モデル",
+      limits: "予算・上限",
+      execution: "隔離実行",
+      checks: "検査",
+      session: "この会話",
+      defaults: "既定値",
+      routing: "振り分け",
+      web: "Web",
+      mcp: "MCP",
+      retentionDays: "保存日数",
+      enabled: "有効",
+      allowedData: "送信許可",
+      dataClass: "送信区分",
+      localOnly: "ローカル限定",
+      includeUntracked: "未追跡ファイルを含む",
+      maxApiUsd: "API総予算 (USD)",
+      maxRequestUsd: "要求予算 (USD)",
+      tools: "ツール使用",
+    };
+    const visit = (node: unknown, path: string[]) => {
+      if (node && typeof node === "object" && !Array.isArray(node)) {
+        for (const [key, value] of Object.entries(node)) {
+          if (path.length || key !== "schemaVersion")
+            visit(value, [...path, key]);
+        }
+        const optional =
+          path[0] === "connections" && path.length === 2
+            ? ["secretEnv", "accountEnv", "endpoint"]
+            : path.join(".") === "execution"
+              ? ["image"]
+              : path.join(".") === "routing"
+                ? ["classifier"]
+                : [];
+        for (const key of optional)
+          if (!(key in node)) visit("", [...path, key]);
         return;
       }
-      const name = await this.ui.choose(
-        "登録済みの接続",
-        Object.entries(config.connections).map(([value, connection]) => ({
-          value,
-          label: value,
-          description: `${connection.enabled ? "有効" : "無効"} · ${connection.type} · ${connection.allowedData.join(", ")}`,
-        })),
-      );
-      if (name)
-        await this.editConfig(
-          config,
-          ["connections", name],
-          config.connections[name],
+      result.push({
+        value: JSON.stringify(path),
+        label: path.map((key) => labels[key] ?? key).join(" / "),
+        description: `${path.join(".")}${Array.isArray(node) ? " · カンマ区切り" : ""}${path.at(-1)?.endsWith("Env") ? " · 環境変数名のみ（キーの値は入力しない）" : ""}`,
+        current:
+          typeof node === "boolean"
+            ? node
+            : Array.isArray(node)
+              ? node.join(", ")
+              : String(node ?? ""),
+      });
+    };
+    visit(
+      {
+        checks: this.app.session.checks,
+        dataClass: this.app.session.dataClass,
+        localOnly: this.app.session.localOnly,
+        includeUntracked: this.app.session.includeUntracked,
+      },
+      ["session"],
+    );
+    visit(this.app.config, []);
+    return result;
+  }
+  private async saveField(key: string, text: string): Promise<void> {
+    const path = JSON.parse(key) as string[];
+    const session = path[0] === "session";
+    const root = structuredClone(session ? this.app.session : this.app.config);
+    const keys = session ? path.slice(1) : path;
+    let target = root as unknown as Record<string, unknown>;
+    for (const key of keys.slice(0, -1))
+      target = target[key] as Record<string, unknown>;
+    const field = keys.at(-1)!;
+    const before = target[field];
+    const value = Array.isArray(before)
+      ? text
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : typeof before === "boolean"
+        ? text === "true"
+        : typeof before === "number"
+          ? Number(text)
+          : text;
+    if (JSON.stringify(before) === JSON.stringify(value)) return;
+    if (session) {
+      if (field === "dataClass") {
+        const levels = ["public", "private", "restricted"];
+        if (!levels.includes(text))
+          throw new AgentError(
+            "CONFIG",
+            "送信区分は public / private / restricted です。",
+          );
+        if (
+          this.app.session.latestRunId &&
+          levels.indexOf(text) < levels.indexOf(this.app.session.dataClass)
+        )
+          throw new AgentError(
+            "DISCLOSURE_DENIED",
+            "既存会話の送信範囲は広げられません。新しい会話を使ってください。",
+          );
+      }
+      if (
+        field === "localOnly" &&
+        before &&
+        !value &&
+        this.app.session.latestRunId
+      )
+        throw new AgentError(
+          "DISCLOSURE_DENIED",
+          "送信範囲を広げる場合は新しい会話を使ってください。",
         );
-      return;
+      if (
+        field === "checks" &&
+        (value as string[]).some((name) => !this.app.config.checks[name])
+      )
+        throw new AgentError(
+          "CONFIG",
+          "未登録の検査があります。先に検査コマンドを追加してください。",
+        );
     }
+    if (text === "" && before === undefined) return;
+    const optional =
+      (keys.length === 3 &&
+        keys[0] === "connections" &&
+        ["secretEnv", "accountEnv", "endpoint"].includes(field)) ||
+      keys.join(".") === "execution.image" ||
+      keys.join(".") === "routing.classifier";
+    if (!session && optional && text === "") delete target[field];
+    else target[field] = value;
+    const validated = session ? undefined : validateConfig(root);
+    if (
+      path.join(".") !== "retentionDays" &&
+      !(await this.ui.confirm(
+        `${path.join(".")}\n${JSON.stringify(before ?? "")} → ${JSON.stringify(value)}\n次の依頼から適用します。`,
+      ))
+    )
+      return;
+    if (session) {
+      Object.assign(this.app.session, { [field]: value });
+      this.app.save();
+    } else await this.app.saveConfiguration(validated);
+  }
+  private async add(
+    selected: string,
+    preferredConnection?: string,
+  ): Promise<void> {
+    const app = this.app;
+    const config = structuredClone(app.config);
     if (selected === "connection") {
       const type = await this.ui.choose(
         "接続の種類",
@@ -139,16 +278,23 @@ export class SettingsDialog {
       this.ui.notify(
         "接続を追加しました。編集画面で送信区分・予算を確認して有効にしてください。",
       );
+      await this.add("model", name);
       return;
     }
     if (selected === "model") {
-      const connection = await this.ui.choose(
-        "接続",
-        Object.keys(config.connections).map((value) => ({
-          value,
-          label: value,
-        })),
-      );
+      if (!Object.keys(config.connections).length) {
+        await this.add("connection");
+        return;
+      }
+      const connection =
+        preferredConnection ??
+        (await this.ui.choose(
+          "接続",
+          Object.keys(config.connections).map((value) => ({
+            value,
+            label: value,
+          })),
+        ));
       if (!connection) return;
       const name = await this.ui.prompt("モデルの呼び名");
       if (!name) return;
@@ -222,133 +368,5 @@ export class SettingsDialog {
       }
       return;
     }
-    if (selected === "session") {
-      const field = await this.ui.choose(
-        "この会話の設定",
-        ["checks", "dataClass", "localOnly", "includeUntracked"].map(
-          (value) => ({
-            value,
-            label: `${value}: ${JSON.stringify(app.session[value as "checks"])}`,
-          }),
-        ),
-      );
-      if (!field) return;
-      if (field === "dataClass") {
-        const value = await this.ui.choose(
-          "データ送信区分",
-          ["public", "private", "restricted"].map((value) => ({
-            value,
-            label: value,
-          })),
-        );
-        if (!value) return;
-        if (
-          app.session.latestRunId &&
-          ["public", "private", "restricted"].indexOf(value) <
-            ["public", "private", "restricted"].indexOf(app.session.dataClass)
-        )
-          throw new AgentError(
-            "DISCLOSURE_DENIED",
-            "既存会話の送信範囲は広げられません。新しい会話を作成してください。",
-          );
-        app.session.dataClass = value as typeof app.session.dataClass;
-      } else if (field === "checks") {
-        const name = await this.ui.choose(
-          "検査を切り替え",
-          Object.keys(config.checks).map((value) => ({
-            value,
-            label: `${app.session.checks.includes(value) ? "[x]" : "[ ]"} ${value}`,
-          })),
-        );
-        if (name)
-          app.session.checks = app.session.checks.includes(name)
-            ? app.session.checks.filter((c) => c !== name)
-            : [...app.session.checks, name];
-      } else if (field === "localOnly") {
-        if (app.session.localOnly && app.session.latestRunId)
-          throw new AgentError(
-            "DISCLOSURE_DENIED",
-            "送信範囲を広げる場合は新しい会話を使ってください。",
-          );
-        app.session.localOnly = !app.session.localOnly;
-      } else app.session.includeUntracked = !app.session.includeUntracked;
-      app.save();
-      return;
-    }
-    if (selected === "config") await this.editConfig(config, [], config);
-  }
-  private async editConfig(
-    root: Config,
-    path: string[],
-    node: unknown,
-  ): Promise<void> {
-    if (node && typeof node === "object" && !Array.isArray(node)) {
-      const optional =
-        path.join(".") === "execution"
-          ? ["image"]
-          : path.join(".") === "routing"
-            ? ["classifier"]
-            : path.length === 2 && path[0] === "connections"
-              ? ["secretEnv", "accountEnv", "endpoint"]
-              : [];
-      const selected = await this.ui.choose(
-        `設定 ${path.join(".") || "全般"}`,
-        [
-          ...Object.entries(node),
-          ...optional
-            .filter((key) => !(key in node))
-            .map((key) => [key, ""] as const),
-        ].map(([value, v]) => ({
-          value,
-          label: value,
-          description:
-            typeof v === "object"
-              ? Array.isArray(v)
-                ? JSON.stringify(v)
-                : "項目を開く"
-              : String(v),
-        })),
-      );
-      if (selected)
-        await this.editConfig(
-          root,
-          [...path, selected],
-          (node as Record<string, unknown>)[selected],
-        );
-      return;
-    }
-    const value =
-      typeof node === "boolean"
-        ? await this.ui.choose(path.join("."), [
-            { value: "false", label: "false" },
-            { value: "true", label: "true" },
-          ])
-        : await this.ui.prompt(
-            `${path.join(".")}${Array.isArray(node) ? "（カンマ区切り）" : ""}`,
-            Array.isArray(node) ? node.join(", ") : String(node ?? ""),
-          );
-    if (value === undefined) return;
-    let target: Record<string, unknown> = root as unknown as Record<
-      string,
-      unknown
-    >;
-    for (const key of path.slice(0, -1))
-      target = target[key] as Record<string, unknown>;
-    target[path.at(-1)!] = Array.isArray(node)
-      ? value
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : typeof node === "number"
-        ? Number(value)
-        : typeof node === "boolean"
-          ? value === "true"
-          : value;
-    if (
-      await this.ui.confirm(
-        `${path.join(".")} を ${value} に変更しますか？\n次の依頼から適用されます。`,
-      )
-    )
-      await this.app.saveConfiguration(root);
   }
 }

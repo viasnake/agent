@@ -18,6 +18,7 @@ import {
   frame,
   ResponsiveOverlay,
   WorkbenchLayout,
+  ConversationScroll,
 } from "../src/tui/components.js";
 import {
   connectionProblems,
@@ -302,7 +303,7 @@ test("conversation layout handles resize, CJK, long messages and color-free term
       lines.join("\n").replaceAll("\x1b[0m", ""),
       /\x1b|secret/,
     );
-    assert.match(lines.join("\n"), /\/history/);
+    assert.match(lines.join("\n"), /\/expand/);
     assert.match(lines.join("\n"), /é/);
   }
   assert.equal(theme.accent("実行中"), "実行中");
@@ -355,7 +356,7 @@ test("model guidance identifies disabled connections without loosening policy", 
   );
   assert.match(
     failureGuidance("NO_MODEL: unavailable", config, context),
-    /登録済みの接続.*enabled/,
+    /接続 local は無効です。\/settings で「local enabled」を検索して確認してください。/,
   );
   assert.equal(config.connections.local!.enabled, false);
   config.connections.local!.enabled = true;
@@ -397,12 +398,51 @@ test("doctor summarizes failures with next actions rather than only JSON", () =>
   assert.doesNotMatch(report, /起動環境に設定あり/);
 });
 
-test("welcome shows preparation steps and an explicit draft restoration action", () => {
+test("welcome shows only necessary setup and draft restoration", () => {
   const view = new ConversationView();
   view.setup = ["接続の準備が必要です", "1  /settings で接続を登録"];
   view.recent = "/continue 前回の会話へ · 下書きあり";
   const text = safeText(view.render(80).join("\n"));
-  assert.match(text, /LOCAL AGENT/);
+  assert.doesNotMatch(text, /LOCAL AGENT|何をつくりますか|Ctrl\+P/);
   assert.match(text, /接続の準備/);
   assert.match(text, /\/continue.*下書きあり/);
+});
+
+test("conversation keeps a full history page and expands long UTF-8 messages in place", () => {
+  const view = new ConversationView();
+  const messages = Array.from({ length: 30 }, (_, index) => ({
+    seq: index + 1,
+    role: "user",
+    text: `発言-${index + 1}`,
+    run_id: null,
+    at: index,
+  }));
+  messages[29]!.text = "日本語".repeat(900) + "本文末尾";
+  view.setMessages(messages);
+  const before = safeText(view.render(80).join("\n"));
+  assert.match(before, /発言-1 *\n/);
+  assert.match(before, /日本語/);
+  assert.doesNotMatch(before, /本文末尾|�/);
+  assert.equal(view.expand(30), true);
+  view.setMessages(messages);
+  assert.match(safeText(view.render(80).join("\n")), /本文末尾/);
+  assert.equal(view.expand(30), false);
+});
+
+test("history prepend preserves the reading anchor without following the tail", () => {
+  const scroll = new ConversationScroll(new Text(""), { follow: "end" });
+  scroll.updateLayout(100, 20, () => {});
+  scroll.scrollToStart();
+  let reads = 0;
+  scroll.onOlder = (remaining) => {
+    reads++;
+    scroll.preserveAfterPrepend(200, remaining);
+  };
+  scroll.scrollBy(-20);
+  scroll.updateLayout(300, 20, () => {});
+  assert.equal(reads, 1);
+  assert.equal(scroll.scrollTop, 180);
+  assert.equal(scroll.isFollowingEnd, false);
+  scroll.scrollBy(20);
+  assert.equal(reads, 1);
 });
