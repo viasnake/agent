@@ -51,7 +51,7 @@ def send(text):
     read_for(.15)
 
 try:
-    wait_for("準備できました")
+    wait_for("接続設定あり")
     ready_ms = (time.monotonic()-started)*1000
     rss = None
     conversation_rss = None

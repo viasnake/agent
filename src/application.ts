@@ -653,7 +653,7 @@ export class Application extends EventEmitter {
       await release();
     }
   }
-  async doctor(): Promise<Record<string, unknown>> {
+  async doctor() {
     const directory = await mkdtemp(join(this.paths.home, "doctor-"));
     try {
       const sandbox =

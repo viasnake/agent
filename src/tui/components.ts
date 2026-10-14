@@ -96,10 +96,13 @@ export function markdown(text: string): Markdown {
   return new Markdown(safeText(text), 0, 0, markdownTheme);
 }
 export class Composer extends Editor {
+  heading = "依頼を書く";
   caption = "";
   placeholder = "依頼を入力…  @ ファイル  / コマンド";
   override renderTopBorder(width: number, hidden: number): string {
-    return hidden ? super.renderTopBorder(width, hidden) : " ".repeat(width);
+    return hidden
+      ? super.renderTopBorder(width, hidden)
+      : truncateToWidth(`  ${theme.strong(this.heading)}`, width, "", true);
   }
   override renderBottomBorder(width: number, hidden: number): string {
     return hidden
@@ -241,7 +244,10 @@ export class Picker implements Component, Focusable {
       this.title.includes("\n") || visibleWidth(this.title) + 2 > inner
         ? new Text(this.title, 0, 0).render(inner).length + 1
         : 0;
-    const maxVisible = Math.max(1, Math.min(8, rows - 9 - titleRows));
+    const maxVisible = Math.max(
+      1,
+      Math.min(6, Math.floor((rows - 9 - titleRows) / 2)),
+    );
     if (maxVisible !== this.maxVisible) {
       const selected = this.list.getSelectedItem();
       this.maxVisible = maxVisible;
@@ -250,16 +256,73 @@ export class Picker implements Component, Focusable {
         selected ? this.filteredChoices.indexOf(selected) : 0,
       );
     }
+    const selected = this.list.getSelectedItem();
+    const index = selected ? this.filteredChoices.indexOf(selected) : 0;
+    const start = Math.max(
+      0,
+      Math.min(
+        index - Math.floor(maxVisible / 2),
+        this.filteredChoices.length - maxVisible,
+      ),
+    );
+    const items = this.filteredChoices.slice(start, start + maxVisible);
     return frame(
       this.title,
       [
         ...(this.searchable ? [...this.input.render(inner), ""] : []),
-        ...this.list.render(inner),
+        ...(items.length
+          ? items.flatMap((item) => {
+              const active = item === selected;
+              const label = truncateToWidth(
+                `${active ? "›" : " "} ${item.label}`,
+                inner,
+                "…",
+                true,
+              );
+              return [
+                active ? theme.selected(label) : label,
+                theme.muted(
+                  truncateToWidth(`  ${item.description ?? ""}`, inner),
+                ),
+              ];
+            })
+          : [
+              theme.muted("一致する項目がありません"),
+              "検索語を短くするか、Esc で戻れます。",
+            ].map((line) => truncateToWidth(line, inner))),
+        ...(this.filteredChoices.length > maxVisible
+          ? [theme.muted(`${index + 1} / ${this.filteredChoices.length} 件`)]
+          : []),
         "",
       ],
-      "↑↓ 選択   Enter 決定   Esc 戻る",
+      inner < 44 ? "Esc 戻る · ↑↓ · Enter" : "Esc 戻る   ↑↓ 選択   Enter 決定",
       width,
     );
+  }
+}
+
+// Percentage sizing is resolved by Pi on every render, including terminal resize.
+export class ResponsiveOverlay implements Component, Focusable {
+  constructor(
+    readonly content: Component & Partial<Focusable>,
+    readonly maxWidth = 88,
+  ) {}
+  get focused(): boolean {
+    return this.content.focused ?? false;
+  }
+  set focused(value: boolean) {
+    this.content.focused = value;
+  }
+  handleInput(data: string): void {
+    this.content.handleInput?.(data);
+  }
+  invalidate(): void {
+    this.content.invalidate();
+  }
+  render(width: number): string[] {
+    const inner = Math.min(width, this.maxWidth);
+    const padding = " ".repeat(Math.max(0, Math.floor((width - inner) / 2)));
+    return this.content.render(inner).map((line) => padding + line);
   }
 }
 
@@ -346,7 +409,9 @@ export class Dialog extends Container implements Focusable {
     return frame(
       this.title,
       super.render(Math.max(1, width - 4)),
-      "Enter 決定   Ctrl+J 改行   Esc 戻る",
+      width < 48
+        ? "Esc 戻る · Enter 決定"
+        : "Esc 戻る   Enter 決定   Ctrl+J 改行",
       width,
     );
   }

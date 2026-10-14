@@ -20,13 +20,61 @@ export class SettingsDialog {
   async open(): Promise<void> {
     const app = this.app;
     const selected = await this.ui.choose("設定", [
-      { value: "connection", label: "接続を追加" },
-      { value: "model", label: "モデルを追加（SDK カタログ参照可）" },
-      { value: "check", label: "検査コマンドを追加" },
-      { value: "config", label: "接続・モデル・権限・上限を編集" },
-      { value: "session", label: "この会話の検査・送信区分を編集" },
+      {
+        value: "connection",
+        label: "接続を追加",
+        description: "01 · 提供元・認証方法を登録（初期状態は無効）",
+      },
+      {
+        value: "connections",
+        label: "登録済みの接続",
+        description: `${Object.keys(app.config.connections).length} 件 · 有効化・送信許可・予算を編集`,
+      },
+      {
+        value: "model",
+        label: "モデルを追加",
+        description: "02 · モデル ID を入力、または SDK カタログから選択",
+      },
+      {
+        value: "check",
+        label: "検査コマンドを追加",
+        description: "03 · コード変更後に必要な検査を設定",
+      },
+      {
+        value: "session",
+        label: "この会話の設定",
+        description: "必須検査・送信区分・ローカル限定",
+      },
+      {
+        value: "config",
+        label: "詳細設定",
+        description: "接続・モデル・権限・上限・隔離実行を編集",
+      },
     ]);
     const config = structuredClone(app.config);
+    if (selected === "connections") {
+      if (!Object.keys(config.connections).length) {
+        this.ui.notify(
+          "接続がありません。/settings → 接続を追加 から登録してください。",
+        );
+        return;
+      }
+      const name = await this.ui.choose(
+        "登録済みの接続",
+        Object.entries(config.connections).map(([value, connection]) => ({
+          value,
+          label: value,
+          description: `${connection.enabled ? "有効" : "無効"} · ${connection.type} · ${connection.allowedData.join(", ")}`,
+        })),
+      );
+      if (name)
+        await this.editConfig(
+          config,
+          ["connections", name],
+          config.connections[name],
+        );
+      return;
+    }
     if (selected === "connection") {
       const type = await this.ui.choose(
         "接続の種類",

@@ -1,9 +1,11 @@
 import {
   truncateToWidth,
+  Text,
   type Component,
   type Markdown,
 } from "@earendil-works/pi-tui";
 import type { ConversationMessage } from "../conversations.js";
+import { basename } from "node:path";
 import type { Role, Run, RunState } from "../types.js";
 import { markdown, safeText, theme } from "./components.js";
 
@@ -56,6 +58,8 @@ export function taskDetails(run: Run): string {
 export class ConversationView implements Component {
   name = "新しい会話";
   workspace = process.cwd();
+  setup: string[] = [];
+  recent = "";
   private messages: { source: string; role: string; body: Markdown }[] = [];
   setMessages(messages: ConversationMessage[]): void {
     // Streaming updates do not rebuild unchanged Markdown components.
@@ -78,33 +82,51 @@ export class ConversationView implements Component {
     for (const message of this.messages) message.body.invalidate();
   }
   render(width: number): string[] {
+    const fit = (text: string) => truncateToWidth(text, width);
     const lines = [
-      truncateToWidth(
-        `${theme.strong("agent")}  ${theme.muted(lineText(this.workspace))}`,
-        width,
+      "",
+      fit(
+        `${theme.accent("▰")} ${theme.strong("LOCAL AGENT")}  ${theme.muted("/  " + lineText(basename(this.workspace)))}`,
       ),
+      fit(
+        `${theme.strong(lineText(this.name))}  ${theme.muted("· 作業コピーで検査 → 確認して適用")}`,
+      ),
+      theme.muted("─".repeat(width)),
     ];
     if (!this.messages.length)
       return [
         ...lines,
         "",
         "",
-        ...markdown(
-          "**何から始めますか？**\n\nコードの変更、調査、レビューを同じ会話で。\n変更は作業コピーで検査し、確認してから反映します。",
+        fit(theme.strong("何をつくりますか？")),
+        ...new Text(
+          "コードの変更も、調査も、レビューも。この会話から。",
+          0,
+          0,
         ).render(width),
         "",
-        theme.muted(
-          truncateToWidth("Ctrl+P 操作を探す    @ ファイルを添付", width),
+        ...this.setup.flatMap((line) => new Text(line, 0, 0).render(width)),
+        ...(this.recent
+          ? ["", ...new Text(this.recent, 0, 0).render(width)]
+          : []),
+        "",
+        fit(
+          `${theme.accent("/settings")} 接続を設定   ${theme.accent("/sessions")} 会話を開く`,
         ),
+        fit(theme.muted("@ ファイルを添付   Ctrl+P すべての操作")),
         "",
       ];
     for (const message of this.messages) {
       const body = message.body.render(Math.max(1, width - 2));
       lines.push(
         "",
-        ...body.map((line, index) => {
-          const prefix =
-            index === 0 ? (message.role === "user" ? "› " : "• ") : "  ";
+        fit(
+          message.role === "user"
+            ? theme.accent("あなた")
+            : theme.strong("AGENT"),
+        ),
+        ...body.map((line) => {
+          const prefix = message.role === "user" ? "▎ " : "  ";
           const content = prefix + line;
           return message.role === "user"
             ? theme.panel(truncateToWidth(content, width, "", true))

@@ -13,7 +13,14 @@ import {
   Picker,
   editor,
   frame,
+  ResponsiveOverlay,
 } from "../src/tui/components.js";
+import {
+  connectionProblems,
+  failureGuidance,
+  doctorSummary,
+} from "../src/tui/guidance.js";
+import { testConfig } from "./helpers.js";
 
 test("compact activity prioritizes actual tools and uncertain results on narrow terminals", () => {
   const activity = new ActivityView();
@@ -216,4 +223,90 @@ test("conversation layout handles resize, CJK, long messages and color-free term
   process.env.NO_COLOR = "";
   process.env.TERM = "dumb";
   assert.equal(theme.error("失敗"), "失敗");
+});
+
+test("open overlays resize without reopening and retain search and focus", () => {
+  const picker = new Picker(
+    "操作",
+    [
+      {
+        value: "settings",
+        label: "接続を設定",
+        description: "送信許可・予算を編集",
+      },
+    ],
+    true,
+    24,
+  );
+  const overlay = new ResponsiveOverlay(picker);
+  overlay.focused = true;
+  overlay.handleInput("接続");
+  for (const width of [36, 120, 48, 88]) {
+    const lines = overlay.render(width);
+    assert.equal(
+      Math.max(...lines.map(visibleWidth)),
+      Math.min(width, 88) + Math.max(0, Math.floor((width - 88) / 2)),
+    );
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    assert.match(safeText(lines.join("\n")), /Esc 戻る/);
+    assert.match(safeText(lines.join("\n")), /送信許可/);
+  }
+  assert.equal(picker.input.getValue(), "接続");
+  assert.equal(picker.focused, true);
+});
+
+test("model guidance identifies disabled connections without loosening policy", () => {
+  const config = testConfig();
+  const context = {
+    model: "worker",
+    dataClass: "private" as const,
+    localOnly: false,
+  };
+  config.connections.local!.enabled = false;
+  assert.match(
+    failureGuidance("NO_MODEL: unavailable", config, context),
+    /接続 local は無効/,
+  );
+  assert.match(
+    failureGuidance("NO_MODEL: unavailable", config, context),
+    /登録済みの接続.*enabled/,
+  );
+  assert.equal(config.connections.local!.enabled, false);
+  config.connections.local!.enabled = true;
+  config.connections.local!.allowedData = ["public"];
+  assert.match(
+    connectionProblems(config, context).join(),
+    /private の送信を許可していません/,
+  );
+  config.connections.local!.allowedData.push("private");
+  assert.deepEqual(connectionProblems(config, context), []);
+  assert.match(
+    failureGuidance("NO_MODEL: unavailable", config, context),
+    /用途・担当・tools/,
+  );
+});
+
+test("doctor summarizes failures with next actions rather than only JSON", () => {
+  const report = doctorSummary({
+    node: "v24",
+    platform: "linux",
+    sandbox: { ok: false, detail: "spawn bwrap ENOENT" },
+    connections: [],
+    inference: "未実行",
+    isolation: "ネットワークなし",
+  });
+  assert.match(report, /モデルは呼び出していません/);
+  assert.match(report, /隔離環境: 要対応/);
+  assert.match(report, /Bubblewrap.*Podman/);
+  assert.match(report, /接続がありません/);
+});
+
+test("welcome shows preparation steps and an explicit draft restoration action", () => {
+  const view = new ConversationView();
+  view.setup = ["接続の準備が必要です", "1  /settings で接続を登録"];
+  view.recent = "/continue 前回の会話へ · 下書きあり";
+  const text = safeText(view.render(80).join("\n"));
+  assert.match(text, /LOCAL AGENT/);
+  assert.match(text, /接続の準備/);
+  assert.match(text, /\/continue.*下書きあり/);
 });
