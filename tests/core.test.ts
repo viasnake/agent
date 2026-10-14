@@ -157,6 +157,52 @@ test("successful writing requires a real nonempty artifact and records usage", a
     await f.cleanup();
   }
 });
+test("artifacts retain save order and deduplicate inherited sources", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const parent = await f.harness.create({
+      kind: "research",
+      objective: "source",
+    });
+    const owner = f.store.claim(parent.id);
+    const source = await f.store.artifact(
+      owner,
+      "source",
+      "source",
+      "evidence",
+    );
+    f.store.release(owner);
+    const created = await f.harness.create({
+      kind: "writing",
+      objective: "outputs",
+    });
+    const run = f.store.claim(created.id);
+    f.store.inheritSources(parent.id, run.id);
+    const outputs = [];
+    for (const id of ["c", "b", "a"]) {
+      const artifact = await f.store.artifact(run, id, "report", id);
+      const renamed = { ...artifact, id };
+      f.store.db
+        .prepare("UPDATE artifacts SET id=?,payload=? WHERE id=?")
+        .run(id, JSON.stringify(renamed), artifact.id);
+      outputs.push(renamed);
+    }
+    f.store.db
+      .prepare("INSERT INTO source_links VALUES (?,?)")
+      .run(run.id, "b");
+    f.store.release(run);
+    const reopened = new Store(f.p);
+    try {
+      assert.deepEqual(reopened.artifacts(run.id), [source, ...outputs]);
+      assert.equal(reopened.artifacts(run.id).at(-1)?.id, "a");
+      assert.deepEqual(reopened.artifacts(parent.id), [source]);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
 test("an invented artifact never produces a successful run", async () => {
   const f = await fixture(
     new ScriptedRuntime(async () => completed(["nonexistent.md"])),
