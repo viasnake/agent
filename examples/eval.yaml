@@ -1,0 +1,17 @@
+name: japanese-writing-comparison
+cases:
+  - id: single
+    objective: 公開用のお知らせを Markdown で作成してください。メンテナンスは 11月1日 02:00–03:00、対象は検索機能です。事実を追加しないでください。
+    kind: writing
+    mode: single
+    model: general
+    dataClass: public
+    mustKeep: [11月1日, "02:00–03:00", 検索機能]
+  - id: reviewed
+    objective: 公開用のお知らせを Markdown で作成してください。メンテナンスは 11月1日 02:00–03:00、対象は検索機能です。事実を追加しないでください。
+    kind: writing
+    mode: reviewed
+    model: general
+    reviewer: analysis
+    dataClass: public
+    mustKeep: [11月1日, "02:00–03:00", 検索機能]

@@ -1,0 +1,116 @@
+# Optional template; /settings also creates and edits the trusted configuration.
+# Enable only the connections you intend to use. Secret values stay in environment variables.
+schemaVersion: 1
+retentionDays: 30
+
+defaults:
+  dataClass: private
+  mode: single
+
+connections:
+  chatgpt:
+    type: chatgpt
+    enabled: false
+    account: personal-chatgpt
+    billing: subscription
+    allowedData: [public]
+  gemini:
+    type: gemini
+    enabled: false
+    account: personal-google
+    billing: api
+    secretEnv: GEMINI_API_KEY
+    allowedData: [public]
+    maxRequestUsd: 0
+  sarashina:
+    type: sarashina
+    enabled: false
+    account: personal-sarashina
+    billing: beta
+    secretEnv: SARASHINA_API_KEY
+    allowedData: [public]
+    requestsPerMinute: 6
+  local:
+    type: local
+    enabled: false
+    account: local-inference
+    billing: local
+    endpoint: http://127.0.0.1:8080/v1
+    allowedData: [public, private, restricted]
+  clef:
+    type: clef
+    enabled: false
+    account: personal-cloudflare
+    billing: api
+    secretEnv: CLOUDFLARE_API_TOKEN
+    accountEnv: CLOUDFLARE_ACCOUNT_ID
+    allowedData: [public]
+    maxRequestUsd: 0
+
+models:
+  general:
+    connection: chatgpt
+    id: REPLACE_WITH_ACCOUNT_MODEL_ID
+    roles: [lead, worker]
+    kinds: [coding, research, writing]
+    tools: false
+    priority: 20
+    contextWindow: 32000
+    maxOutputTokens: 4096
+  analysis:
+    connection: gemini
+    id: REPLACE_WITH_GEMINI_MODEL_ID
+    roles: [lead, worker, reviewer]
+    kinds: [coding, research, writing]
+    tools: false
+    priority: 10
+  japanese:
+    connection: sarashina
+    id: sarashina3-mini
+    roles: [worker, reviewer]
+    kinds: [writing, research]
+    tools: false
+  offline:
+    connection: local
+    id: REPLACE_WITH_LOCAL_MODEL_ID
+    roles: [lead, worker, reviewer]
+    kinds: [coding, research, writing]
+    tools: false
+
+limits:
+  maxRequests: 60
+  maxApiUsd: 0
+  maxSeconds: 1800
+  maxAgents: 3
+  maxTasks: 8
+  maxRepairs: 2
+  maxInputBytes: 120000
+  requestTimeoutSeconds: 180
+
+execution:
+  # Defaults to bubblewrap on Linux and podman on macOS.
+  # backend: podman
+  # image: registry.example/agent-runtime@sha256:REPLACE_WITH_DIGEST
+  # Add only trusted language installations needed inside the sandbox.
+  # Example: [/opt/node/24]
+  runtimePaths: []
+  commandTimeoutSeconds: 120
+
+# Check commands are trusted, fixed inputs. Keep their implementations protected too.
+# Replace these paths with the real test files of the target repository.
+checks: {}
+# checks:
+#   unit:
+#     command: npm test
+#     protectedPaths: [package.json, tests]
+
+routing:
+  mode: rules
+# mode: shadow records a classifier choice without changing the selected model.
+# classifier: clef
+
+web:
+  allowedHosts: []
+  allowedData: [public]
+
+mcp: {}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.test-dist/
+*.tgz
+.env
+.env.*
+*.sqlite*
+.agent/
+.agents/
+.codex/
+.aws/
