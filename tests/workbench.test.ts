@@ -291,14 +291,24 @@ test("doctor summarizes failures with next actions rather than only JSON", () =>
     node: "v24",
     platform: "linux",
     sandbox: { ok: false, detail: "spawn bwrap ENOENT" },
-    connections: [],
+    connections: [
+      {
+        name: "local",
+        type: "local",
+        enabled: false,
+        allowedData: ["private"],
+        credential: "present",
+        budget: "subscription/local",
+      },
+    ],
     inference: "未実行",
     isolation: "ネットワークなし",
   });
   assert.match(report, /モデルは呼び出していません/);
   assert.match(report, /隔離環境: 要対応/);
   assert.match(report, /Bubblewrap.*Podman/);
-  assert.match(report, /接続がありません/);
+  assert.match(report, /ローカル接続（認証の疎通は未確認）/);
+  assert.doesNotMatch(report, /起動環境に設定あり/);
 });
 
 test("welcome shows preparation steps and an explicit draft restoration action", () => {

@@ -103,7 +103,7 @@ export function doctorSummary(
       ? report.connections.flatMap((c) => [
           `### ${safeText(c.name)} · ${c.enabled ? "有効" : "無効"}`,
           `${c.type} · 送信許可: ${c.allowedData.join(", ")}`,
-          `認証: ${c.credential === "present" ? "起動環境に設定あり（疎通は未確認）" : c.credential.startsWith("missing:") ? `未設定 (${safeText(c.credential.slice(8))})` : c.credential}`,
+          `認証: ${c.type === "local" ? "ローカル接続（認証の疎通は未確認）" : c.credential === "present" ? "起動環境に設定あり（疎通は未確認）" : c.credential.startsWith("missing:") ? `未設定 (${safeText(c.credential.slice(8))})` : c.credential}`,
           `予算: ${c.budget === false ? "要設定" : c.budget === true ? "設定あり" : "従量 API 対象外"}`,
         ])
       : ["接続がありません。/settings → 接続を追加 から登録してください。"]),

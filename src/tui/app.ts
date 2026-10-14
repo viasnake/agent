@@ -382,9 +382,12 @@ export class TerminalApp {
           .history()
           .filter((m) => m.role === "user"))
           this.input.addToHistory(message.text);
-        this.notice = this.app.interrupted()
-          ? "前の作業は未完了です。/tasks で確認し /resume で明示再開できます。"
-          : "会話を開きました。待機入力は /queue で確認できます。";
+        const run = this.app.currentRun();
+        this.notice = run?.reason
+          ? failureGuidance(run.reason, this.app.config, this.app.session)
+          : this.app.interrupted()
+            ? "前の作業は未完了です。/tasks で確認し /resume で明示再開できます。"
+            : "会話を開きました。待機入力は /queue で確認できます。";
       }
     } else if (event.type === "run_finished") {
       this.stream.clear();
@@ -594,6 +597,7 @@ export class TerminalApp {
     return new Promise((resolve) => {
       const dialog = new Dialog(safeText(title));
       const control = editor(this.tui);
+      control.heading = "入力";
       control.placeholder = "入力…";
       control.setText(safeText(value));
       const cancel = () => finish();
@@ -699,10 +703,9 @@ export class TerminalApp {
             `作業場所: ${app.session.workspace}`,
             `送信区分: ${app.session.dataClass} · ${app.session.localOnly ? "ローカルのみ" : "許可した接続を使用"}`,
             `状態: ${run ? runLabels[run.state] : "未実行"}`,
-            this.notice,
             run?.reason
               ? failureGuidance(run.reason, app.config, app.session)
-              : "",
+              : this.notice,
             ...(run?.reason ? ["\n技術詳細", safeText(run.reason)] : []),
             "",
             `要求: ${view.usage?.requests ?? 0}/${app.config.limits.maxRequests}`,
