@@ -276,7 +276,7 @@ export class TerminalApp {
   private restore(): void {
     if (this.restored) return;
     this.restored = true;
-    this.tui.stop();
+    this.tui.stop({ preserveScreen: true });
   }
   private async shutdown(): Promise<void> {
     if (this.closing) return;
