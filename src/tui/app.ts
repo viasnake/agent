@@ -957,6 +957,9 @@ export class TerminalApp {
           choose: (title, choices) => this.choose(title, choices, true),
           prompt: this.prompt.bind(this),
           confirm: this.confirm.bind(this),
+          run: async (command) => {
+            await this.command(command);
+          },
           notify: (text) => {
             this.notice = text;
           },

@@ -61,6 +61,9 @@ export class SettingsEditor implements Component, Focusable {
       else {
         this.editing = field;
         this.input.setValue(safeText(field.current));
+        // ctrl+e（tui.editor.cursorLineEnd）でカーソルを行末へ。
+        // 位置0のままだと追記が先頭追記になる。
+        this.input.handleInput("\x05");
         this.picker.focused = false;
         this.input.focused = true;
         this.picker.extra = this.input;

@@ -11,7 +11,7 @@ import { safeText } from "../src/tui/components.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { testConfig } from "./helpers.js";
 
-test("settings cancel does not leak changes, supports consecutive edits and rejects invalid values", async () => {
+test("pending edits apply in one batch when closing confirms them", async () => {
   let config = testConfig();
   const edits: SettingsEdit[] = [
     {
@@ -23,7 +23,9 @@ test("settings cancel does not leak changes, supports consecutive edits and reje
     { value: JSON.stringify(["limits", "maxApiUsd"]), text: "5" },
   ];
   let confirms = 0,
-    saves = 0;
+    saves = 0,
+    first = true;
+  let confirmTitle = "";
   const errors: string[] = [];
   const app = {
     get config() {
@@ -42,26 +44,182 @@ test("settings cancel does not leak changes, supports consecutive edits and reje
   } as unknown as Application;
   const ui: SettingsUi = {
     edit: async (_title, fields) => {
-      assert.ok(
-        fields.some(
-          (field) =>
-            field.value === JSON.stringify(["connections", "local", "enabled"]),
-        ),
-      );
+      if (first) {
+        first = false;
+        assert.ok(
+          fields.some(
+            (field) =>
+              field.value ===
+              JSON.stringify(["connections", "local", "enabled"]),
+          ),
+        );
+      }
       return edits.shift();
     },
     choose: async () => undefined,
     prompt: async () => undefined,
-    confirm: async () => ++confirms !== 1,
+    confirm: async (title) => {
+      confirms++;
+      confirmTitle = title;
+      return true;
+    },
     notify: (text) => errors.push(text),
   };
   await new SettingsDialog(app, ui).open();
-  assert.equal(config.connections.local!.enabled, true);
+  assert.equal(config.connections.local!.enabled, false);
   assert.equal(config.retentionDays, 50);
   assert.equal(config.limits.maxApiUsd, 5);
-  assert.equal(saves, 2);
-  assert.equal(confirms, 2);
+  assert.equal(saves, 1);
+  assert.equal(confirms, 1);
   assert.equal(errors.length, 1);
+  assert.match(confirmTitle, /connections\.local\.enabled: true → false/);
+  assert.match(confirmTitle, /retentionDays: 30 → 50/);
+  assert.match(confirmTitle, /limits\.maxApiUsd: 0 → 5/);
+});
+
+test("declining the close confirmation discards every pending edit", async () => {
+  let config = testConfig();
+  const edits: SettingsEdit[] = [
+    { value: JSON.stringify(["retentionDays"]), text: "50" },
+    { value: JSON.stringify(["limits", "maxApiUsd"]), text: "5" },
+  ];
+  let confirms = 0,
+    saves = 0;
+  const notices: string[] = [];
+  const app = {
+    get config() {
+      return config;
+    },
+    session: {
+      checks: [],
+      dataClass: "private",
+      localOnly: false,
+      includeUntracked: false,
+    },
+    async saveConfiguration(raw: unknown) {
+      config = validateConfig(raw);
+      saves++;
+    },
+  } as unknown as Application;
+  await new SettingsDialog(app, {
+    edit: async () => edits.shift(),
+    choose: async () => undefined,
+    prompt: async () => undefined,
+    confirm: async () => {
+      confirms++;
+      return false;
+    },
+    notify: (text) => notices.push(text),
+  }).open();
+  assert.equal(config.retentionDays, 30);
+  assert.equal(config.limits.maxApiUsd, 0);
+  assert.equal(saves, 0);
+  assert.equal(confirms, 1);
+  assert.equal(notices.length, 1);
+});
+
+test("edits reverted to their saved value close without confirmation", async () => {
+  let config = testConfig();
+  const edits: SettingsEdit[] = [
+    {
+      value: JSON.stringify(["connections", "local", "enabled"]),
+      text: "false",
+    },
+    {
+      value: JSON.stringify(["connections", "local", "enabled"]),
+      text: "true",
+    },
+  ];
+  let confirms = 0,
+    saves = 0;
+  const app = {
+    get config() {
+      return config;
+    },
+    session: {
+      checks: [],
+      dataClass: "private",
+      localOnly: false,
+      includeUntracked: false,
+    },
+    async saveConfiguration(raw: unknown) {
+      config = validateConfig(raw);
+      saves++;
+    },
+  } as unknown as Application;
+  await new SettingsDialog(app, {
+    edit: async () => edits.shift(),
+    choose: async () => undefined,
+    prompt: async () => undefined,
+    confirm: async () => {
+      confirms++;
+      return true;
+    },
+    notify: () => {},
+  }).open();
+  assert.equal(config.connections.local!.enabled, true);
+  assert.equal(saves, 0);
+  assert.equal(confirms, 0);
+});
+
+test("added checks join pending config and session changes", async () => {
+  let config = testConfig();
+  const session = {
+    checks: [] as string[],
+    dataClass: "private",
+    localOnly: false,
+    includeUntracked: false,
+  };
+  const prompts = ["lint", "npm run lint", "src/**"];
+  const edits: SettingsEdit[] = [{ value: "check" }];
+  let confirms = 0,
+    saves = 0,
+    sessionSaves = 0,
+    editCalls = 0;
+  let confirmTitle = "";
+  const app = {
+    get config() {
+      return config;
+    },
+    session,
+    async saveConfiguration(raw: unknown) {
+      config = validateConfig(raw);
+      saves++;
+    },
+    save() {
+      sessionSaves++;
+    },
+  } as unknown as Application;
+  await new SettingsDialog(app, {
+    edit: async (_title, fields) => {
+      // After the check is staged the list shows it marked as pending.
+      if (++editCalls > 1)
+        assert.ok(
+          fields.some(
+            (field) =>
+              field.value === JSON.stringify(["checks", "lint", "command"]) &&
+              field.description?.includes("保留"),
+          ),
+        );
+      return edits.shift();
+    },
+    choose: async () => undefined,
+    prompt: async () => prompts.shift(),
+    confirm: async (title) => {
+      confirms++;
+      confirmTitle = title;
+      return true;
+    },
+    notify: () => {},
+  }).open();
+  assert.equal(config.checks.lint!.command, "npm run lint");
+  assert.deepEqual(config.checks.lint!.protectedPaths, ["src/**"]);
+  assert.deepEqual(session.checks, ["lint"]);
+  assert.equal(saves, 1);
+  assert.equal(sessionSaves, 1);
+  assert.equal(confirms, 1);
+  assert.match(confirmTitle, /checks\.lint:/);
+  assert.match(confirmTitle, /session\.checks:/);
 });
 
 test("existing session cannot broaden disclosure or drop local-only protection", async () => {
@@ -96,6 +254,47 @@ test("existing session cannot broaden disclosure or drop local-only protection",
   assert.equal(errors.length, 2);
   assert.equal(session.dataClass, "restricted");
   assert.equal(session.localOnly, true);
+});
+
+test("session field edits save separately from config edits", async () => {
+  let config = testConfig();
+  const session = {
+    checks: [] as string[],
+    dataClass: "private",
+    localOnly: false,
+    includeUntracked: false,
+  };
+  const edits: SettingsEdit[] = [
+    { value: JSON.stringify(["retentionDays"]), text: "90" },
+    { value: JSON.stringify(["session", "dataClass"]), text: "restricted" },
+    { value: JSON.stringify(["session", "checks"]), text: "" },
+  ];
+  let saves = 0,
+    sessionSaves = 0;
+  const app = {
+    get config() {
+      return config;
+    },
+    session,
+    async saveConfiguration(raw: unknown) {
+      config = validateConfig(raw);
+      saves++;
+    },
+    save() {
+      sessionSaves++;
+    },
+  } as unknown as Application;
+  await new SettingsDialog(app, {
+    edit: async () => edits.shift(),
+    choose: async () => undefined,
+    prompt: async () => undefined,
+    confirm: async () => true,
+    notify: () => {},
+  }).open();
+  assert.equal(config.retentionDays, 90);
+  assert.equal(session.dataClass, "restricted");
+  assert.equal(saves, 1);
+  assert.equal(sessionSaves, 1);
 });
 
 test("settings inline edit retains search, cancels one level and fits narrow CJK terminals", () => {
