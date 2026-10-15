@@ -13,6 +13,7 @@ import signal
 import socket
 import struct
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -95,13 +96,18 @@ def _boot_identity() -> tuple[str, bytes]:
 def _ready(env_id: str) -> dict[str, Any]:
     workspace = Path("/workspace")
     writable = workspace.is_dir() and os.access(workspace, os.W_OK)
-    marker = workspace / ".local-agent-runner-check"
-    try:
-        marker.write_text("ready\n", encoding="ascii")
-        marker.unlink()
-        writable = writable and True
-    except OSError:
-        writable = False
+    if writable:
+        try:
+            descriptor, marker = tempfile.mkstemp(
+                prefix=".local-agent-runner-check-", dir=workspace
+            )
+            try:
+                os.write(descriptor, b"ready\n")
+            finally:
+                os.close(descriptor)
+                os.unlink(marker)
+        except OSError:
+            writable = False
     return {
         "ok": True,
         "version": VERSION,
@@ -170,7 +176,8 @@ def _execute(payload: dict[str, Any]) -> dict[str, Any]:
             start_new_session=True,
         )
     except OSError as error:
-        return {"ok": True, "code": 127, "stdout": "", "stderr": str(error), "truncated": False}
+        message, limited = _decode_limited(str(error).encode("utf-8", "replace"), limit)
+        return {"ok": True, "code": 127, "stdout": "", "stderr": message, "truncated": limited}
     assert child.stdout is not None and child.stderr is not None
     selector = selectors.DefaultSelector()
     selector.register(child.stdout, selectors.EVENT_READ, "stdout")
@@ -244,6 +251,10 @@ def _execute(payload: dict[str, Any]) -> dict[str, Any]:
             except ProcessLookupError:
                 pass
             child.wait()
+        if child.stdout is not None:
+            child.stdout.close()
+        if child.stderr is not None:
+            child.stderr.close()
     stdout_text, stdout_limited = _decode_limited(bytes(stdout), limit)
     remaining = max(0, limit - len(stdout_text.encode("utf-8")))
     stderr_text, stderr_limited = _decode_limited(bytes(stderr), remaining)
@@ -295,7 +306,13 @@ def _session(channel: socket.socket, env_id: str, secret: bytes) -> None:
     payload = envelope.get("payload")
     if not isinstance(payload, dict):
         raise RunnerError("invalid request payload")
-    result = _ready(env_id) if payload.get("op") == "ready" and set(payload) == {"op"} else _execute(payload)
+    if set(payload) == {"op"} and payload.get("op") == "ready":
+        result: dict[str, Any] = _ready(env_id)
+    elif set(payload) == {"op"} and payload.get("op") == "sync":
+        os.sync()
+        result = {"ok": True, "synced": True}
+    else:
+        result = _execute(payload)
     response = {"payload": result, "nonce": nonce, "guest_nonce": guest_nonce}
     response["mac"] = hmac.new(secret, _canonical(response), hashlib.sha256).hexdigest()
     _frame_send(channel, response)

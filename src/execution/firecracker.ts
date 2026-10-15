@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { AgentError } from "../types.js";
 import type { ProcessResult } from "../process.js";
 import { runProcess } from "../process.js";
@@ -126,6 +125,7 @@ async function invokeHelper(
   request: HelperRequest,
   signal?: AbortSignal,
 ): Promise<HelperResponse> {
+  requireHostSupport();
   const input = JSON.stringify(request);
   if (Buffer.byteLength(input, "utf8") > REQUEST_MAX_BYTES)
     invalid("Helper request is too large");
@@ -144,14 +144,35 @@ async function invokeHelper(
     });
   } catch (error) {
     if (error instanceof AgentError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    if (/ENOENT|not found/i.test(message))
+      throw new AgentError(
+        "FIRECRACKER_HELPER",
+        "sudo or the fixed Firecracker helper is unavailable",
+      );
     throw new AgentError(
       "FIRECRACKER_HELPER",
-      `Could not invoke the privileged helper: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `Could not invoke the privileged helper: ${message}`,
     );
   }
-  if (result.truncated || !result.stdout.trim())
+  if (!result.stdout.trim()) {
+    const stderr = result.stderr.trim();
+    if (/not found|No such file|command not found/i.test(stderr))
+      throw new AgentError(
+        "FIRECRACKER_HELPER",
+        `The privileged helper is not installed at ${FIRECRACKER_HELPER}`,
+      );
+    if (/sudo|password|not allowed|may not run/i.test(stderr))
+      throw new AgentError(
+        "FIRECRACKER_HELPER",
+        "sudo did not permit the fixed helper without a password",
+      );
+    throw new AgentError(
+      "FIRECRACKER_PROTOCOL",
+      "The helper response was incomplete",
+    );
+  }
+  if (result.truncated)
     throw new AgentError(
       "FIRECRACKER_PROTOCOL",
       "The helper response was incomplete",
@@ -260,6 +281,25 @@ function processShape(value: unknown, maxOutputBytes: number): ProcessResult {
 export class FirecrackerEnvironment implements ExecutionEnvironment {
   constructor(private readonly invoke: HelperInvoker = invokeHelper) {}
 
+  private lifecycle(
+    value: unknown,
+    id: string,
+    states: readonly EnvironmentInfo["state"][],
+  ): EnvironmentInfo {
+    const info = infoShape(value);
+    if (info.id !== id)
+      throw new AgentError(
+        "FIRECRACKER_PROTOCOL",
+        "The helper replied about a different environment",
+      );
+    if (!states.includes(info.state))
+      throw new AgentError(
+        "FIRECRACKER_PROTOCOL",
+        `Unexpected environment state: ${info.state}`,
+      );
+    return info;
+  }
+
   async diagnose(signal?: AbortSignal): Promise<EnvironmentDiagnosis> {
     return diagnosisShape(
       resultOf(await this.invoke({ op: "diagnose" }, signal)),
@@ -271,18 +311,29 @@ export class FirecrackerEnvironment implements ExecutionEnvironment {
       resultOf(await this.invoke({ op: "create" }, signal)),
     );
     validId(info.id);
+    if (info.state !== "stopped")
+      throw new AgentError(
+        "FIRECRACKER_PROTOCOL",
+        `Unexpected environment state: ${info.state}`,
+      );
     return info;
   }
 
   async start(id: string, signal?: AbortSignal): Promise<EnvironmentInfo> {
-    return infoShape(
-      resultOf(await this.invoke({ op: "start", id: validId(id) }, signal)),
+    const requested = validId(id);
+    return this.lifecycle(
+      resultOf(await this.invoke({ op: "start", id: requested }, signal)),
+      requested,
+      ["ready"],
     );
   }
 
   async status(id: string, signal?: AbortSignal): Promise<EnvironmentInfo> {
-    return infoShape(
-      resultOf(await this.invoke({ op: "status", id: validId(id) }, signal)),
+    const requested = validId(id);
+    return this.lifecycle(
+      resultOf(await this.invoke({ op: "status", id: requested }, signal)),
+      requested,
+      ["stopped", "starting", "ready", "failed"],
     );
   }
 
@@ -304,8 +355,11 @@ export class FirecrackerEnvironment implements ExecutionEnvironment {
   }
 
   async stop(id: string, signal?: AbortSignal): Promise<EnvironmentInfo> {
-    return infoShape(
-      resultOf(await this.invoke({ op: "stop", id: validId(id) }, signal)),
+    const requested = validId(id);
+    return this.lifecycle(
+      resultOf(await this.invoke({ op: "stop", id: requested }, signal)),
+      requested,
+      ["stopped"],
     );
   }
 
@@ -318,6 +372,15 @@ export class FirecrackerEnvironment implements ExecutionEnvironment {
   }
 }
 
-export function newEnvironmentId(): string {
-  return randomUUID();
+export function requireHostSupport(): void {
+  if (process.platform !== "linux")
+    throw new AgentError(
+      "FIRECRACKER_HOST",
+      "Firecracker environments require a Linux host with KVM",
+    );
+  if (typeof process.getuid === "function" && process.getuid() === 0)
+    throw new AgentError(
+      "FIRECRACKER_HOST",
+      "Run the agent as a non-root account; the helper is invoked through sudo",
+    );
 }

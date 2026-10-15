@@ -33,6 +33,9 @@ NIC/TAP を付けない初期構成では、依存取得も公開 Web アクセ�
 専用 network namespace とホスト側 cgroup・固定長ディスク・同時実行・時間・通信量制限を使う。
 起動・接続・実行の不明な結果を成功とみなさず、別バックエンドにもフォールバックしない。
 セットアップは明示的な管理者操作であり、KVM/Proxmox の特権設定を自動修復しない。
+guest RAM とは別に固定 VMM overhead を host memory cap へ加える（初期値 256 MiB）。
+停止前は認証済み Guest Runner `sync` を完了し、persistent inode を jail 内へ hard link
+する。disk の host-side mount、extract、start/stop 間の全体コピーは行わない。
 
 ## 現在の実行経路の分類
 

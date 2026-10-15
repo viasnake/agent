@@ -27,7 +27,7 @@ Firecracker 環境は既存の TUI、Pi、Harness、SQLite、通常の sandbox �
 2. まず非特権の dry run で固定先を確認します。
 
    ```sh
-   python3 -I scripts/firecracker/install.py --dry-run
+   python3 -I scripts/firecracker/install.py --user ubuntu --dry-run
    ```
 
 3. レビューした setup files を root 専用の staging directory に置き、そこから
@@ -50,7 +50,7 @@ Firecracker 環境は既存の TUI、Pi、Harness、SQLite、通常の sandbox �
    root-owned・非 writable であることを確認してから、次の明示操作を実行します。
 
    ```sh
-   sudo -n python3 -I /root/local-agent-firecracker-setup/install.py /root/local-agent-firecracker-setup/assets
+   sudo -n python3 -I /root/local-agent-firecracker-setup/install.py --user ubuntu /root/local-agent-firecracker-setup/assets
    ```
 
    `unsquashfs` で trusted squashfs を一度展開し、SSH host key、authorized keys、
@@ -60,16 +60,25 @@ Firecracker 環境は既存の TUI、Pi、Harness、SQLite、通常の sandbox �
    root-owned `/etc/local-agent/firecracker.json` には変換後 digest、バージョン、
    fixed limits、専用 VMM UID pool が記録されます。
 
-4. 管理者が `/etc/sudoers.d/local-agent-firecracker` を確認し、fixed helper だけを
-   NOPASSWD で許可します。runtime の `sudo` は `-n`、`-I` 相当の isolated Python、
+4. helper は `/usr/local/libexec/local-agent-firecracker` という executable file、
+   Firecracker と jailer は `/usr/local/lib/local-agent-firecracker/firecracker` と
+   `jailer` に配置されます。installer は既存の deployment/state を上書きせず、
+   destination の root ownership・symlink・writable ancestor を事前検査します。
+   `--user` で指定した一つの非 root account だけに sudoers を限定し、`visudo -cf`
+   の検証後に atomic install します。runtime の `sudo` は `-n`、isolated Python、
    fixed absolute helper のみを使い、caller の path、uid、image、jailer flags は
    受け取りません。管理者が先に cgroup v2 の CPU/memory/pids と empty network
-   namespace の要件を確認してください。
+   namespace の要件を確認してください。guest RAM の `memory_mib` に加えて固定
+   `vmm_overhead_mib`（初期値 256 MiB）を host cgroup の `memory.max` に計上するため、
+   初期設定の host memory cap は 2304 MiB です（guest 2048 + VMM overhead 256）。
 
 Helper は root-owned metadata、per-environment flock、global allocation lock を
 使います。環境は所有者の `SUDO_UID` だけが操作でき、VMM は Agent/root ではない
-pool UID に降格します。停止時は cgroup v2 の `cgroup.kill` で確実に回収し、disk
-を保持します。destroy だけが disk、network namespace、metadata を消します。
+pool UID に降格します。停止前には Guest Runner の認証済み `sync`（`os.sync`）を
+必ず完了し、失敗時は回収しても clean success を返しません。persistent disk は
+固定 inode のまま jail 内から hard link で開き、停止時に全体コピーしません。
+停止時は cgroup v2 の `cgroup.kill` で確実に回収し、disk を保持します。destroy
+だけが disk、network namespace、metadata を消します。
 
 ## CLI とプロトコル
 
@@ -98,10 +107,11 @@ VM に公開しません。
 
 ## Proxmox / KVM diagnostics
 
-`doctor` は KVM access、fixed assets/digests、cgroup v2、`ip`、network policy を
-分けて報告します。`/dev/kvm` が `root:kvm 0660` で caller が kvm group に入って
-いなくても、KVM check は root helper の access を検査するため caller の直接 access
-は不要です。
+`doctor` は KVM access、`KVM_GET_API_VERSION == 12`、`KVM_CREATE_VM`、CPU の
+`vmx`/`svm` と nested virtualization、fixed assets/digests、cgroup v2、`ip`、
+network policy を分けて報告します。`/dev/kvm` が `root:kvm 0660` で caller が kvm
+group に入っていなくても、KVM check は root helper の access を検査するため caller
+の直接 access は不要です。診断は CPU、cgroup、NIC/TAP を自動修復しません。
 Proxmox の nested virtualization が無効、`vmx/ept` が無い、cgroup controller の
 delegation が無い場合も修正を自動適用しません。管理者がこの VM の host policy を
 確認してから再診断してください。

@@ -48,6 +48,9 @@ jobs:
       - run: npm run format:check
       - run: npm run check
       - run: npm run build
+      - if: runner.os == 'Linux'
+        name: Run the Firecracker helper and guest runner unit tests
+        run: python3 -m unittest discover -s tests/firecracker -p 'test_*.py'
       - run: npm test
         env:
           AGENT_REQUIRE_SANDBOX: ${{ runner.os == 'Linux' && '1' || '0' }}

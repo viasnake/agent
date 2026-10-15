@@ -128,6 +128,27 @@ test("malformed helper failures are not reported as successful execution", async
   );
 });
 
+test("lifecycle responses must preserve the requested ID and state contract", async () => {
+  const wrongId = "123e4567-e89b-12d3-a456-426614174001";
+  const environment = new FirecrackerEnvironment(async (request) => ({
+    ok: true,
+    result:
+      request.op === "start"
+        ? { ...info, id: wrongId, state: "ready" }
+        : { ...info, id, state: "starting" },
+  }));
+  await assert.rejects(
+    environment.start(id),
+    (error: unknown) =>
+      error instanceof AgentError && error.code === "FIRECRACKER_PROTOCOL",
+  );
+  await assert.rejects(
+    environment.stop(id),
+    (error: unknown) =>
+      error instanceof AgentError && error.code === "FIRECRACKER_PROTOCOL",
+  );
+});
+
 test("environment CLI rejects invalid IDs without loading configuration or falling back", async () => {
   const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
   const result = await runProcess(

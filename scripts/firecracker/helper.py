@@ -10,6 +10,7 @@ import json
 import os
 import pwd
 import re
+import select
 import secrets
 import shutil
 import signal
@@ -24,6 +25,10 @@ from pathlib import Path
 from typing import Any, Iterator
 
 CONFIG_PATH = Path("/etc/local-agent/firecracker.json")
+FIXED_STATE_DIR = Path("/var/lib/local-agent-firecracker/state")
+FIXED_JAILER_DIR = Path("/var/lib/local-agent-firecracker/jailer")
+FIXED_CGROUP_PARENT = "local-agent-firecracker"
+FIXED_VMM_UIDS = [2000, 2001, 2002, 2003]
 MAX_REQUEST_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_FRAME_BYTES = 8 * 1024 * 1024
@@ -43,6 +48,9 @@ ALLOWED_REQUEST_KEYS = {
     "destroy": {"op", "id"},
 }
 ACTIVE: list[tuple[dict[str, Any], str]] = []
+CLEANED: set[str] = set()
+WATCHDOG_SECONDS = 15 * 60
+LOCK_WAIT_SECONDS = 120
 
 
 class HelperError(Exception):
@@ -137,7 +145,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_config(*, verify_base_rootfs: bool = True) -> dict[str, Any]:
+def load_config(*, verify_installation: bool = True) -> dict[str, Any]:
     _safe_path(CONFIG_PATH, expect_file=True)
     if CONFIG_PATH.stat().st_mode & 0o077:
         raise HelperError("INSTALLATION", "Configuration must not be accessible to other users")
@@ -148,6 +156,7 @@ def load_config(*, verify_base_rootfs: bool = True) -> dict[str, Any]:
     if not _record(config) or config.get("version") != 1:
         raise HelperError("INSTALLATION", "Unsupported configuration version")
     required = {
+        "version",
         "firecracker_version",
         "jailer_version",
         "firecracker",
@@ -166,8 +175,9 @@ def load_config(*, verify_base_rootfs: bool = True) -> dict[str, Any]:
     if config["firecracker_version"] != "1.16.2" or config["jailer_version"] != "1.16.2":
         raise HelperError("INSTALLATION", "Firecracker and jailer versions are not pinned")
     paths = [Path(config[key]) for key in ("firecracker", "jailer", "kernel", "base_rootfs")]
-    for path in paths:
-        _safe_path(path, expect_file=True)
+    if verify_installation:
+        for path in paths:
+            _safe_path(path, expect_file=True)
     for key in ("state_dir", "jailer_dir"):
         path = Path(config[key])
         _safe_path(path)
@@ -185,7 +195,16 @@ def load_config(*, verify_base_rootfs: bool = True) -> dict[str, Any]:
     ):
         raise HelperError("INSTALLATION", "Invalid VMM UID pool")
     limits = config["limits"]
-    if not _record(limits) or set(limits) != {"max_vms", "vcpu_count", "memory_mib", "disk_bytes", "start_ms", "exec_ms", "output_bytes"}:
+    if not _record(limits) or set(limits) != {
+        "max_vms",
+        "vcpu_count",
+        "memory_mib",
+        "vmm_overhead_mib",
+        "disk_bytes",
+        "start_ms",
+        "exec_ms",
+        "output_bytes",
+    }:
         raise HelperError("INSTALLATION", "Invalid fixed limits")
     for value in limits.values():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -194,6 +213,7 @@ def load_config(*, verify_base_rootfs: bool = True) -> dict[str, Any]:
         "max_vms": 64,
         "vcpu_count": 16,
         "memory_mib": 65_536,
+        "vmm_overhead_mib": 4_096,
         "disk_bytes": 64 * 1024 * 1024 * 1024,
         "start_ms": 120_000,
         "exec_ms": 600_000,
@@ -214,15 +234,14 @@ def load_config(*, verify_base_rootfs: bool = True) -> dict[str, Any]:
     for value in pins.values():
         if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
             raise HelperError("INSTALLATION", "Digest pins must be lowercase SHA256 values")
-    for key, path in zip(("firecracker", "jailer", "kernel", "base_rootfs"), paths):
-        if key == "base_rootfs" and not verify_base_rootfs:
-            continue
-        if _sha256(path) != pins[key]:
-            raise HelperError("INSTALLATION", f"Digest mismatch for {key}")
-    if not Path(config["firecracker"]).name.startswith("firecracker"):
-        raise HelperError("INSTALLATION", "Firecracker binary name must be pinned")
-    if not Path(config["jailer"]).name.startswith("jailer"):
-        raise HelperError("INSTALLATION", "Jailer binary name must be pinned")
+    if verify_installation:
+        for key, path in zip(("firecracker", "jailer", "kernel", "base_rootfs"), paths):
+            if _sha256(path) != pins[key]:
+                raise HelperError("INSTALLATION", f"Digest mismatch for {key}")
+        if Path(config["firecracker"]).name != "firecracker":
+            raise HelperError("INSTALLATION", "Firecracker binary name must be pinned")
+        if Path(config["jailer"]).name != "jailer":
+            raise HelperError("INSTALLATION", "Jailer binary name must be pinned")
     return config
 
 
@@ -316,6 +335,16 @@ def _read_metadata(config: dict[str, Any], env_id: str) -> dict[str, Any]:
     return metadata
 
 
+def _shutdown_config() -> dict[str, Any]:
+    return {
+        "state_dir": str(FIXED_STATE_DIR),
+        "jailer_dir": str(FIXED_JAILER_DIR),
+        "cgroup_parent": FIXED_CGROUP_PARENT,
+        "vmm_uids": FIXED_VMM_UIDS,
+        "limits": {"exec_ms": 600_000, "output_bytes": 1_048_576},
+    }
+
+
 @contextmanager
 def _lock(path: Path, *, create_parent: bool = True) -> Iterator[None]:
     if create_parent:
@@ -325,7 +354,15 @@ def _lock(path: Path, *, create_parent: bool = True) -> Iterator[None]:
     except FileNotFoundError as exc:
         raise HelperError("NOT_FOUND", "Environment does not exist") from exc
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise HelperError("BUSY", "Another operation holds this environment lock") from None
+                time.sleep(0.05)
         yield
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -368,8 +405,8 @@ def _checks(config: dict[str, Any] | None) -> list[dict[str, Any]]:
         checks.append({"name": "cgroup-v2", "ok": True, "detail": str(cgroup)})
     except HelperError as error:
         checks.append({"name": "cgroup-v2", "ok": False, "detail": str(error)})
-    kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
-    checks.append({"name": "kvm", "ok": kvm, "detail": "/dev/kvm is accessible to root"})
+    checks.append(_kvm_check())
+    checks.append(_cpu_check())
     ip = Path("/usr/sbin/ip").is_file()
     checks.append({"name": "network-namespace-tool", "ok": ip, "detail": "fixed ip utility is installed" if ip else "install iproute2"})
     checks.append({"name": "network-policy", "ok": True, "detail": "VMs receive an empty network namespace and no NIC/TAP"})
@@ -379,6 +416,53 @@ def _checks(config: dict[str, Any] | None) -> list[dict[str, Any]]:
 def _diagnose(config: dict[str, Any]) -> dict[str, Any]:
     checks = _checks(config)
     return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
+
+def _kvm_check() -> dict[str, Any]:
+    try:
+        descriptor = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+    except OSError as error:
+        return {"name": "kvm", "ok": False, "detail": f"cannot open /dev/kvm: {error.strerror}"}
+    try:
+        version = fcntl.ioctl(descriptor, 0xAE00, 0)
+        if version != 12:
+            return {"name": "kvm", "ok": False, "detail": f"unsupported KVM API version: {version}"}
+        vm = fcntl.ioctl(descriptor, 0xAE01, 0)
+    except OSError as error:
+        return {"name": "kvm", "ok": False, "detail": f"KVM ioctl failed: {error.strerror}"}
+    finally:
+        os.close(descriptor)
+    try:
+        os.close(vm)
+    except OSError:
+        pass
+    return {"name": "kvm", "ok": True, "detail": "KVM_GET_API_VERSION is 12 and KVM_CREATE_VM succeeded"}
+
+
+def _cpu_check() -> dict[str, Any]:
+    try:
+        flags = set()
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("flags"):
+                flags = set(line.partition(":")[2].split())
+                break
+    except OSError as error:
+        return {"name": "cpu-virtualization", "ok": False, "detail": f"cannot read /proc/cpuinfo: {error.strerror}"}
+    nested = "unknown"
+    for module in ("kvm_intel", "kvm_amd"):
+        parameter = Path(f"/sys/module/{module}/parameters/nested")
+        if parameter.is_file():
+            try:
+                nested = f"{module}={parameter.read_text(encoding='ascii').strip()}"
+            except OSError:
+                nested = f"{module}=unreadable"
+            break
+    supported = bool({"vmx", "svm"} & flags)
+    return {
+        "name": "cpu-virtualization",
+        "ok": supported,
+        "detail": f"hardware virtualization {'present' if supported else 'absent'}; nested {nested}",
+    }
 
 
 def _ensure_cgroup_parent(config: dict[str, Any]) -> Path:
@@ -458,39 +542,90 @@ def _kill_cgroup(config: dict[str, Any], env_id: str) -> None:
     raise HelperError("CLEANUP_UNKNOWN", "VM cgroup did not become empty")
 
 
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise HelperError("TIMEOUT", "The host deadline for this operation expired")
+    return remaining
+
+
+def _read_acknowledgement(channel: socket.socket, deadline: float) -> None:
+    acknowledgement = b""
+    while not acknowledgement.endswith(b"\n"):
+        if len(acknowledgement) >= 64:
+            raise HelperError("TRANSPORT", "Guest vsock acknowledgement was too long")
+        channel.settimeout(_remaining(deadline))
+        block = channel.recv(1)
+        if not block:
+            raise HelperError("TRANSPORT", "Guest closed the vsock control connection")
+        acknowledgement += block
+    match = re.fullmatch(rb"OK (\d{1,10})\n", acknowledgement)
+    if match is None or not 0 <= int(match.group(1)) <= 0xFFFFFFFF:
+        raise HelperError("TRANSPORT", "Guest vsock acknowledgement was invalid")
+
+
 def _connect_vsock(path: Path, deadline: float) -> socket.socket:
-    while time.monotonic() < deadline:
+    while True:
+        remaining = _remaining(deadline)
         channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        channel.settimeout(max(0.1, deadline - time.monotonic()))
         try:
-            channel.connect(path)
-            channel.sendall(b"CONNECT 5000\n")
-            acknowledgement = b""
-            while not acknowledgement.endswith(b"\n") and len(acknowledgement) <= 64:
-                acknowledgement += channel.recv(1)
-            if acknowledgement != b"OK 5000\n":
-                raise HelperError("TRANSPORT", "Guest vsock acknowledgement was invalid")
+            channel.settimeout(remaining)
+            channel.connect(os.fspath(path))
+            _send_all(channel, b"CONNECT 5000\n", deadline)
+            _read_acknowledgement(channel, deadline)
             return channel
-        except (FileNotFoundError, ConnectionRefusedError, TimeoutError, OSError):
+        except HelperError:
             channel.close()
+            raise
+        except OSError:
+            channel.close()
+            if deadline - time.monotonic() <= 0.05:
+                raise HelperError("READINESS", "Guest Runner did not accept a vsock connection") from None
             time.sleep(0.05)
-    raise HelperError("READINESS", "Guest Runner did not accept a vsock connection")
 
 
-def _frame_send(channel: socket.socket, value: dict[str, Any]) -> None:
+def _wait_writable(channel: socket.socket, deadline: float | None) -> None:
+    if deadline is None:
+        return
+    readable, writable, _ = select.select([], [channel], [], _remaining(deadline))
+    if not writable:
+        raise HelperError("TIMEOUT", "The host deadline for a guest write expired")
+
+
+def _send_all(channel: socket.socket, value: bytes, deadline: float | None) -> None:
+    if deadline is None:
+        channel.sendall(value)
+        return
+    channel.setblocking(False)
+    sent = 0
+    while sent < len(value):
+        _wait_writable(channel, deadline)
+        try:
+            sent += channel.send(value[sent:])
+        except BlockingIOError:
+            continue
+
+
+def _frame_send(
+    channel: socket.socket, value: dict[str, Any], deadline: float | None = None
+) -> None:
     encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
     if not encoded or len(encoded) > MAX_FRAME_BYTES:
         raise HelperError("PROTOCOL", "Guest frame is too large")
-    channel.sendall(struct.pack("!I", len(encoded)) + encoded)
+    _send_all(channel, struct.pack("!I", len(encoded)) + encoded, deadline)
 
 
-def _frame_recv(channel: socket.socket) -> dict[str, Any]:
-    header = _recv_exact(channel, 4)
+def _frame_recv(
+    channel: socket.socket, deadline: float | None = None
+) -> dict[str, Any]:
+    header = _recv_exact(channel, 4, deadline)
     size = struct.unpack("!I", header)[0]
     if size == 0 or size > MAX_FRAME_BYTES:
         raise HelperError("PROTOCOL", "Guest frame length is invalid")
     try:
-        value = json.loads(_recv_exact(channel, size), object_pairs_hook=_unique_object)
+        value = json.loads(
+            _recv_exact(channel, size, deadline), object_pairs_hook=_unique_object
+        )
     except (UnicodeDecodeError, ValueError) as exc:
         raise HelperError("PROTOCOL", "Guest frame is not JSON") from exc
     if not _record(value):
@@ -498,10 +633,21 @@ def _frame_recv(channel: socket.socket) -> dict[str, Any]:
     return value
 
 
-def _recv_exact(channel: socket.socket, size: int) -> bytes:
+def _recv_exact(
+    channel: socket.socket, size: int, deadline: float | None = None
+) -> bytes:
     chunks = bytearray()
+    if deadline is not None:
+        channel.setblocking(False)
     while len(chunks) < size:
-        block = channel.recv(size - len(chunks))
+        if deadline is not None:
+            readable, _, _ = select.select([channel], [], [], _remaining(deadline))
+            if not readable:
+                raise HelperError("TIMEOUT", "The host deadline for a guest read expired")
+        try:
+            block = channel.recv(size - len(chunks))
+        except BlockingIOError:
+            continue
         if not block:
             raise HelperError("TRANSPORT", "Guest closed the authenticated channel")
         chunks.extend(block)
@@ -513,16 +659,18 @@ def _canonical(value: dict[str, Any]) -> bytes:
 
 
 def _authenticated_request(metadata: dict[str, Any], payload: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
-    channel = _connect_vsock(
-        Path(metadata["jail_root"]) / "run" / "vsock.sock",
-        time.monotonic() + min(timeout_ms, 605_000) / 1000,
-    )
+    deadline = time.monotonic() + min(timeout_ms, 605_000) / 1000
+    channel = _connect_vsock(Path(metadata["jail_root"]) / "run" / "vsock.sock", deadline)
     secret = bytes.fromhex(metadata["secret"])
     environment_id = metadata["id"].encode()
     nonce = secrets.token_bytes(32).hex()
     try:
-        _frame_send(channel, {"type": "hello", "version": PROTOCOL_VERSION, "id": metadata["id"], "nonce": nonce})
-        hello = _frame_recv(channel)
+        _frame_send(
+            channel,
+            {"type": "hello", "version": PROTOCOL_VERSION, "id": metadata["id"], "nonce": nonce},
+            deadline,
+        )
+        hello = _frame_recv(channel, deadline)
         if (
             hello.get("type") != "hello"
             or hello.get("version") != PROTOCOL_VERSION
@@ -540,11 +688,11 @@ def _authenticated_request(metadata: dict[str, Any], payload: dict[str, Any], ti
         if not hmac.compare_digest(str(hello.get("mac", "")), expected):
             raise HelperError("AUTHENTICATION", "Guest identity proof was invalid")
         proof = hmac.new(secret, b"host:" + environment_id + nonce.encode() + hello["nonce"].encode(), hashlib.sha256).hexdigest()
-        _frame_send(channel, {"type": "proof", "mac": proof})
+        _frame_send(channel, {"type": "proof", "mac": proof}, deadline)
         envelope = {"payload": payload, "nonce": nonce, "guest_nonce": hello["nonce"]}
         envelope["mac"] = hmac.new(secret, _canonical(envelope), hashlib.sha256).hexdigest()
-        _frame_send(channel, envelope)
-        response = _frame_recv(channel)
+        _frame_send(channel, envelope, deadline)
+        response = _frame_recv(channel, deadline)
         if (
             set(response) != {"payload", "nonce", "guest_nonce", "mac"}
             or response.get("nonce") != nonce
@@ -562,7 +710,17 @@ def _authenticated_request(metadata: dict[str, Any], payload: dict[str, Any], ti
         channel.close()
 
 
-def _ready(metadata: dict[str, Any], timeout_ms: int = 10_000) -> None:
+def _cgroup_is_live(config: dict[str, Any], env_id: str) -> bool:
+    path = _cgroup_path(config, env_id)
+    try:
+        return bool((path / "cgroup.procs").read_text(encoding="ascii").strip())
+    except OSError:
+        return False
+
+
+def _ready(metadata: dict[str, Any], config: dict[str, Any], timeout_ms: int = 10_000) -> None:
+    if not _cgroup_is_live(config, metadata["id"]):
+        raise HelperError("READINESS", "The owned VM cgroup has no live process")
     result = _authenticated_request(metadata, {"op": "ready"}, timeout_ms)
     if (
         set(result) != {"ok", "version", "id", "workspace", "shell", "python3"}
@@ -576,17 +734,32 @@ def _ready(metadata: dict[str, Any], timeout_ms: int = 10_000) -> None:
         or result.get("python3") is not True
     ):
         raise HelperError("READINESS", "Guest Runner readiness contract was not satisfied")
+    if not _cgroup_is_live(config, metadata["id"]):
+        raise HelperError("READINESS", "The VM disappeared after responding")
 
 
 def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
     _ensure_cgroup_parent(config)
+    CLEANED.discard(metadata["id"])
+    metadata["state"] = "starting"
+    _write_json(_metadata_path(config, metadata["id"]), metadata)
     jail_root = Path(metadata["jail_root"])
     jail_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    (jail_root / "run").mkdir(mode=0o755, exist_ok=True)
-    shutil.copyfile(Path(config["kernel"]), jail_root / "vmlinux")
-    shutil.copyfile(Path(metadata["disk"]), jail_root / "rootfs.ext4")
-    (jail_root / "vmlinux").chmod(0o644)
-    (jail_root / "rootfs.ext4").chmod(0o644)
+    try:
+        run_dir = jail_root / "run"
+        run_dir.mkdir(mode=0o755, exist_ok=True)
+        os.chown(run_dir, metadata["vmm_uid"], metadata["vmm_uid"])
+        shutil.copyfile(Path(config["kernel"]), jail_root / "vmlinux")
+        (jail_root / "vmlinux").chmod(0o644)
+        link = jail_root / "rootfs.ext4"
+        link.unlink(missing_ok=True)
+        os.link(metadata["disk"], link)
+        os.chown(link, metadata["vmm_uid"], metadata["vmm_uid"])
+        link.chmod(0o600)
+        jail_root.chmod(0o755)
+    except BaseException:
+        _stop(metadata, config, failed=True)
+        raise
     vm_config = {
         "boot-source": {
             "kernel_image_path": "/vmlinux",
@@ -600,10 +773,12 @@ def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
         },
         "vsock": {"guest_cid": 3, "uds_path": "/run/vsock.sock"},
     }
-    _write_json(jail_root / "config.json", vm_config)
-    (jail_root / "config.json").chmod(0o644)
-    metadata["state"] = "starting"
-    _write_json(_metadata_path(config, metadata["id"]), metadata)
+    try:
+        _write_json(jail_root / "config.json", vm_config)
+        (jail_root / "config.json").chmod(0o644)
+    except BaseException:
+        _stop(metadata, config, failed=True)
+        raise
     try:
         metadata["netns"] = _create_netns(metadata["id"])
         _write_json(_metadata_path(config, metadata["id"]), metadata)
@@ -617,7 +792,7 @@ def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
             "--parent-cgroup", config["cgroup_parent"],
             "--cgroup-version", "2",
             "--cgroup", f"cpu.max={limits['vcpu_count'] * 100000} 100000",
-            "--cgroup", f"memory.max={limits['memory_mib'] * 1024 * 1024}",
+            "--cgroup", f"memory.max={(limits['memory_mib'] + limits['vmm_overhead_mib']) * 1024 * 1024}",
             "--cgroup", "pids.max=128",
             "--chroot-base-dir", str(Path(config["jailer_dir"])),
             "--netns", f"/run/netns/{metadata['netns']}",
@@ -641,7 +816,7 @@ def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
         )
         if result.returncode:
             raise HelperError("START", result.stderr.strip() or "Jailer failed to start Firecracker")
-        _ready(metadata, min(config["limits"]["start_ms"], 120_000))
+        _ready(metadata, config, min(config["limits"]["start_ms"], 120_000))
     except BaseException:
         _stop(metadata, config, failed=True)
         raise
@@ -649,24 +824,63 @@ def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
     _write_json(_metadata_path(config, metadata["id"]), metadata)
 
 
+def _sync_guest(metadata: dict[str, Any], config: dict[str, Any]) -> None:
+    result = _authenticated_request(metadata, {"op": "sync"}, 30_000)
+    if set(result) != {"ok", "synced"} or result.get("ok") is not True or result.get("synced") is not True:
+        raise HelperError("SYNC", "The guest did not confirm a durable filesystem sync")
+
+
 def _stop(metadata: dict[str, Any], config: dict[str, Any], *, failed: bool = False) -> None:
+    env_id = metadata["id"]
+    if env_id in CLEANED:
+        return
+    CLEANED.add(env_id)
+    try:
+        _stop_inner(metadata, config, failed=failed)
+    finally:
+        CLEANED.discard(env_id)
+
+
+def _stop_inner(
+    metadata: dict[str, Any], config: dict[str, Any], *, failed: bool = False
+) -> None:
+    env_id = metadata["id"]
+    uncertain = failed
+    kill_error: HelperError | None = None
     if metadata["state"] in {"ready", "starting", "failed"}:
-        _kill_cgroup(config, metadata["id"])
-    netns = metadata.get("netns")
-    if netns is None and metadata["state"] in {"ready", "starting", "failed"}:
-        netns = f"local-agent-{metadata['id']}"
+        if metadata["state"] == "ready" and not failed:
+            try:
+                _sync_guest(metadata, config)
+            except (HelperError, OSError, ValueError):
+                uncertain = True
+        try:
+            _kill_cgroup(config, env_id)
+        except HelperError as error:
+            kill_error = error
+            uncertain = True
+    netns = metadata.get("netns") or (
+        f"local-agent-{env_id}" if metadata["state"] in {"ready", "starting", "failed"} else None
+    )
     if netns:
-        _destroy_netns(netns)
+        try:
+            _destroy_netns(netns)
+        except HelperError:
+            uncertain = True
         metadata["netns"] = None
     jail_root = Path(metadata["jail_root"])
-    if (jail_root / "rootfs.ext4").is_file():
-        temporary = Path(metadata["disk"]).with_suffix(".stopped")
-        shutil.copyfile(jail_root / "rootfs.ext4", temporary)
-        os.replace(temporary, metadata["disk"])
-    if jail_root.parent.exists():
-        shutil.rmtree(jail_root.parent, ignore_errors=False)
-    metadata["state"] = "failed" if failed else "stopped"
-    _write_json(_metadata_path(config, metadata["id"]), metadata)
+    link = jail_root / "rootfs.ext4"
+    try:
+        link.unlink(missing_ok=True)
+        if jail_root.parent.exists():
+            shutil.rmtree(jail_root.parent, ignore_errors=False)
+    except OSError:
+        uncertain = True
+    metadata["state"] = "failed" if uncertain else "stopped"
+    _write_json(_metadata_path(config, env_id), metadata)
+    if kill_error is not None:
+        raise kill_error
+    if uncertain and not failed:
+        raise HelperError("UNKNOWN_RESULT", "The VM was reclaimed without a confirmed clean shutdown")
 
 
 def _create(config: dict[str, Any]) -> dict[str, Any]:
@@ -702,6 +916,8 @@ def _create(config: dict[str, Any]) -> dict[str, Any]:
         try:
             shutil.copyfile(config["base_rootfs"], temporary)
             os.replace(temporary, disk)
+            disk.chmod(0o600)
+            os.chown(disk, 0, 0)
             metadata = {
                 "id": env_id,
                 "owner_uid": owner,
@@ -733,10 +949,10 @@ def _operate(config: dict[str, Any], operation: str, env_id: str | None = None, 
         if operation == "status":
             if metadata["state"] in {"ready", "starting"}:
                 try:
-                    _ready(metadata)
+                    _ready(metadata, config)
                     metadata["state"] = "ready"
                     _write_json(_metadata_path(config, env_id), metadata)
-                except HelperError:
+                except (HelperError, OSError, ValueError):
                     _stop(metadata, config, failed=True)
                     metadata["state"] = "failed"
                     _write_json(_metadata_path(config, env_id), metadata)
@@ -744,12 +960,13 @@ def _operate(config: dict[str, Any], operation: str, env_id: str | None = None, 
         if operation == "start":
             if metadata["state"] in {"ready", "starting"}:
                 try:
-                    _ready(metadata)
+                    _ready(metadata, config)
                     metadata["state"] = "ready"
                     _write_json(_metadata_path(config, env_id), metadata)
                     return _info(metadata)
-                except HelperError:
+                except (HelperError, OSError, ValueError):
                     _stop(metadata, config, failed=True)
+                    CLEANED.discard(env_id)
             if metadata["state"] not in {"stopped", "failed"}:
                 raise HelperError("STATE", "Environment is busy or in an unknown state")
             ACTIVE.append((config, env_id))
@@ -762,9 +979,13 @@ def _operate(config: dict[str, Any], operation: str, env_id: str | None = None, 
             _stop(metadata, config)
             return _info(metadata)
         if operation == "destroy":
-            _stop(metadata, config)
-            shutil.rmtree(_env_dir(config, env_id), ignore_errors=False)
-            return None
+            with _lock(_global_lock(config)):
+                try:
+                    _stop(metadata, config, failed=True)
+                except HelperError:
+                    raise
+                shutil.rmtree(_env_dir(config, env_id), ignore_errors=False)
+                return None
         if operation == "execute":
             if metadata["state"] != "ready":
                 raise HelperError("STATE", "Environment is not ready")
@@ -798,7 +1019,7 @@ def _operate(config: dict[str, Any], operation: str, env_id: str | None = None, 
                 ):
                     raise HelperError("PROTOCOL", "Guest command result shape was invalid")
                 return {key: result[key] for key in ("code", "stdout", "stderr", "truncated")}
-            except HelperError:
+            except (HelperError, OSError, ValueError, struct.error):
                 _stop(metadata, config, failed=True)
                 raise
             finally:
@@ -814,7 +1035,13 @@ def _response(value: Any) -> dict[str, Any]:
 
 
 def main() -> int:
-    def terminate(_signum: int, _frame: Any) -> None:
+    reclaiming = False
+
+    def reclaim() -> None:
+        nonlocal reclaiming
+        if reclaiming:
+            return
+        reclaiming = True
         for config, env_id in list(ACTIVE):
             try:
                 metadata = _read_metadata(config, env_id)
@@ -824,10 +1051,20 @@ def main() -> int:
                     _kill_cgroup(config, env_id)
                 except Exception:
                     pass
-        raise SystemExit(128 + _signum)
+
+    def terminate(signum: int, _frame: Any) -> None:
+        signal.alarm(0)
+        reclaim()
+        raise SystemExit(128 + signum)
+
+    def watchdog(_signum: int, _frame: Any) -> None:
+        reclaim()
+        raise SystemExit(128 + signal.SIGALRM)
 
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGALRM, watchdog)
+    signal.alarm(WATCHDOG_SECONDS)
     invalid_arguments = len(sys.argv) != 1
     raw = b"" if invalid_arguments else sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
     if invalid_arguments:
@@ -841,7 +1078,14 @@ def main() -> int:
                     json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
                 )
                 _require_root()
-                config = load_config(verify_base_rootfs=request["op"] in {"diagnose", "create"})
+                try:
+                    config = load_config(
+                        verify_installation=request["op"] not in {"stop", "destroy"}
+                    )
+                except HelperError:
+                    if request["op"] not in {"stop", "destroy"}:
+                        raise
+                    config = _shutdown_config()
                 result = _operate(config, request["op"], request.get("id"), request.get("command"))
                 response = _response(result)
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
@@ -856,6 +1100,7 @@ def main() -> int:
     sys.stdout.buffer.write(encoded)
     sys.stdout.buffer.write(b"\n")
     sys.stdout.buffer.flush()
+    signal.alarm(0)
     return 0 if response.get("ok") else 1
 
 
