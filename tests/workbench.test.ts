@@ -265,7 +265,13 @@ test("composer preserves Pi cursor markers, wrapping and complete confirmation p
 test("composer uses Enter to send, Shift+Enter to add a line, and preserves pasted newlines", () => {
   const tui = new TuiMainScreen(new ProcessTerminal());
   tui.requestRender = () => {};
-  for (const newline of ["\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;2~", "\n"]) {
+  for (const newline of [
+    "\x1bOM",
+    "\x1b[13;2u",
+    "\x1b[27;2;13~",
+    "\x1b[13;2~",
+    "\n",
+  ]) {
     const input = editor(tui);
     const sent: string[] = [];
     input.onSubmit = (text) => sent.push(text);

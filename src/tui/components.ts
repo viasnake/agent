@@ -115,7 +115,7 @@ export class Composer extends Editor {
     );
   }
   override handleInput(data: string): void {
-    super.handleInput(data);
+    super.handleInput(data === "\x1bOM" ? "\n" : data);
     const text = this.getExpandedText(),
       safe = safeText(text);
     if (safe !== text) this.setText(safe);

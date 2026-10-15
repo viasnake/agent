@@ -94,7 +94,7 @@ try:
         send("\x1b[200~日本語 é\n貼り付け\x1b]52;c;ZXhmaWw=\x07\x1b[201~")
         requests = os.environ["AGENT_TEST_REQUESTS"]
         assert not os.path.exists(requests), "paste submitted before Enter"
-        send("\x1b[13;2u")
+        send("\x1bOM")
         send("Shift+Enterの改行")
         assert not os.path.exists(requests), "Shift+Enter submitted the draft"
         send("\r")
