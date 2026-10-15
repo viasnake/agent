@@ -530,7 +530,7 @@ export class Store {
     return (
       this.db
         .prepare(
-          "SELECT payload FROM artifacts WHERE run_id=? UNION SELECT a.payload FROM artifacts a JOIN source_links s ON s.artifact_id=a.id WHERE s.run_id=?",
+          "SELECT payload FROM artifacts WHERE run_id=? OR id IN (SELECT artifact_id FROM source_links WHERE run_id=?) ORDER BY rowid",
         )
         .all(runId, runId) as { payload: string }[]
     ).map((a) => JSON.parse(a.payload) as Artifact);

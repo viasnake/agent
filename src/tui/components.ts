@@ -4,6 +4,7 @@ import {
   Input,
   Markdown,
   ScrollView,
+  VStack,
   SelectList,
   Text,
   stripTerminalSequences,
@@ -96,26 +97,17 @@ export function markdown(text: string): Markdown {
   return new Markdown(safeText(text), 0, 0, markdownTheme);
 }
 export class Composer extends Editor {
-  caption = "";
-  placeholder = "依頼を入力…  @ ファイル  / コマンド";
   override renderTopBorder(width: number, hidden: number): string {
     return hidden ? super.renderTopBorder(width, hidden) : " ".repeat(width);
   }
   override renderBottomBorder(width: number, hidden: number): string {
-    return hidden
-      ? super.renderBottomBorder(width, hidden)
-      : truncateToWidth(`  ${this.caption}`, width, "…", true);
+    return hidden ? super.renderBottomBorder(width, hidden) : " ".repeat(width);
   }
   override render(width: number): string[] {
     const inner = Math.max(1, width - 2);
     // Keep Pi's editor, wrapping, cursor markers, paste and completion behavior.
     // Only its public border hooks and rendered rows receive presentation styles.
     const lines = super.render(inner);
-    if (!this.getText() && lines[1]) {
-      lines[1] =
-        lines[1]!.replace(/ +$/, "") +
-        theme.muted(truncateToWidth(this.placeholder, Math.max(0, inner - 4)));
-    }
     return lines.map(
       (line) =>
         theme.accent("▎ ") +
@@ -123,7 +115,7 @@ export class Composer extends Editor {
     );
   }
   override handleInput(data: string): void {
-    super.handleInput(data);
+    super.handleInput(data === "\x1bOM" ? "\n" : data);
     const text = this.getExpandedText(),
       safe = safeText(text);
     if (safe !== text) this.setText(safe);
@@ -168,6 +160,8 @@ export function frame(
 
 // A searchable picker keeps draft text and focus in the composer intact.
 export class Picker implements Component, Focusable {
+  footer = "↑↓ 選択  Enter 決定  Esc 戻る";
+  extra: Component | undefined;
   readonly input = new Input({
     prompt: "/ ",
     placeholder: "検索…",
@@ -208,6 +202,16 @@ export class Picker implements Component, Focusable {
     this.list.invalidate();
     this.input.invalidate();
   }
+  restore(query: string, value?: string): void {
+    this.input.setValue("");
+    this.handleInput(query);
+    if (value) {
+      const index = this.filteredChoices.findIndex(
+        (item) => item.value === value,
+      );
+      if (index >= 0) this.list.setSelectedIndex(index);
+    }
+  }
   handleInput(data: string): void {
     if (
       !this.searchable ||
@@ -241,7 +245,10 @@ export class Picker implements Component, Focusable {
       this.title.includes("\n") || visibleWidth(this.title) + 2 > inner
         ? new Text(this.title, 0, 0).render(inner).length + 1
         : 0;
-    const maxVisible = Math.max(1, Math.min(8, rows - 9 - titleRows));
+    const maxVisible = Math.max(
+      1,
+      Math.min(9, rows - 11 - titleRows - (this.extra ? 2 : 0)),
+    );
     if (maxVisible !== this.maxVisible) {
       const selected = this.list.getSelectedItem();
       this.maxVisible = maxVisible;
@@ -250,29 +257,137 @@ export class Picker implements Component, Focusable {
         selected ? this.filteredChoices.indexOf(selected) : 0,
       );
     }
+    const selected = this.list.getSelectedItem();
+    const index = selected ? this.filteredChoices.indexOf(selected) : 0;
+    const start = Math.max(
+      0,
+      Math.min(
+        index - Math.floor(maxVisible / 2),
+        this.filteredChoices.length - maxVisible,
+      ),
+    );
+    const items = this.filteredChoices.slice(start, start + maxVisible);
     return frame(
       this.title,
       [
         ...(this.searchable ? [...this.input.render(inner), ""] : []),
-        ...this.list.render(inner),
+        ...(items.length
+          ? items.map((item) => {
+              const active = item === selected;
+              const label = truncateToWidth(
+                `${active ? "›" : " "} ${item.label}`,
+                inner,
+                "…",
+                true,
+              );
+              return active ? theme.selected(label) : label;
+            })
+          : [
+              theme.muted("一致する項目がありません"),
+              "検索語を短くするか、Esc で戻れます。",
+            ].map((line) => truncateToWidth(line, inner))),
+        ...(selected?.description
+          ? [theme.muted(truncateToWidth(selected.description, inner))]
+          : []),
+        ...(this.extra ? this.extra.render(inner) : []),
+        ...(this.filteredChoices.length > maxVisible
+          ? [theme.muted(`${index + 1} / ${this.filteredChoices.length} 件`)]
+          : []),
         "",
       ],
-      "↑↓ 選択   Enter 決定   Esc 戻る",
+      this.footer,
       width,
     );
   }
 }
 
+// Percentage sizing is resolved by Pi on every render, including terminal resize.
+export class ResponsiveOverlay implements Component, Focusable {
+  constructor(
+    readonly content: Component & Partial<Focusable>,
+    readonly maxWidth = 88,
+  ) {}
+  get focused(): boolean {
+    return this.content.focused ?? false;
+  }
+  set focused(value: boolean) {
+    this.content.focused = value;
+  }
+  handleInput(data: string): void {
+    this.content.handleInput?.(data);
+  }
+  invalidate(): void {
+    this.content.invalidate();
+  }
+  render(width: number): string[] {
+    const inner = Math.min(width, this.maxWidth);
+    const padding = " ".repeat(Math.max(0, Math.floor((width - inner) / 2)));
+    return this.content.render(inner).map((line) => padding + line);
+  }
+}
+
 export class ContentColumn extends Container {
   render(width: number): string[] {
-    const inner = Math.max(1, Math.min(100, width - 4));
-    const padding = " ".repeat(Math.max(0, Math.floor((width - inner) / 2)));
+    const inner = Math.max(1, width - 2);
+    const padding = width > 2 ? " " : "";
     return super.render(inner).map((line) => padding + line);
   }
 }
 
+export class ConversationScroll extends ScrollView {
+  onOlder?: (remaining: number) => void;
+  private pendingTop?: number;
+  scrollAfterLayout(top: number): void {
+    this.pendingTop = Math.max(0, top);
+  }
+  preserveAfterPrepend(lines: number, remaining = 0): void {
+    this.pendingTop = Math.max(0, this.scrollTop + lines + remaining);
+  }
+  override scrollBy(lines: number): number {
+    const remaining = super.scrollBy(lines);
+    if (remaining < 0 && this.scrollTop === 0) this.onOlder?.(remaining);
+    return remaining;
+  }
+  override updateLayout(
+    height: number,
+    viewport: number,
+    request: () => void,
+  ): void {
+    super.updateLayout(height, viewport, request);
+    if (this.pendingTop !== undefined) {
+      const top = this.pendingTop;
+      this.pendingTop = undefined;
+      this.scrollTo(top, { disableFollow: true });
+    }
+  }
+  override scrollToEnd(): void {
+    this.pendingTop = undefined;
+    super.scrollToEnd();
+  }
+}
+
+export class WorkbenchLayout extends VStack {
+  readonly scroll: ConversationScroll;
+  constructor(content: Component[], controls: Component[]) {
+    const body = new ContentColumn();
+    const footer = new ContentColumn();
+    for (const child of content) body.addChild(child);
+    for (const child of controls) footer.addChild(child);
+    const scroll = new ConversationScroll(body, {
+      follow: "end",
+      primary: true,
+      scrollbar: "hidden",
+    });
+    super([
+      { component: scroll, basis: 0, grow: 1, minSize: 1 },
+      { component: footer, basis: "auto", shrink: 0 },
+    ]);
+    this.scroll = scroll;
+  }
+}
+
 // ScrollView owns follow/scroll state and Pi owns all wrapping/width calculations.
-// Main-screen dialogs clip rendered rows, preserving native terminal scrollback.
+// Dialogs clip rendered rows independently of the main conversation viewport.
 export class Reader implements Component {
   readonly scroll: ScrollView;
   readonly content = markdown("");
@@ -346,7 +461,9 @@ export class Dialog extends Container implements Focusable {
     return frame(
       this.title,
       super.render(Math.max(1, width - 4)),
-      "Enter 決定   Ctrl+J 改行   Esc 戻る",
+      width < 48
+        ? "Esc 戻る · Enter 決定"
+        : "Esc 戻る   Enter 決定   Shift+Enter 改行",
       width,
     );
   }

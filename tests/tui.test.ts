@@ -70,7 +70,12 @@ for (const scenario of ["conversation", "coding", "tmux", "exception"]) {
           const messages = f.store.db
             .prepare("SELECT text FROM messages WHERE role='user'")
             .all() as { text: string }[];
-          assert.ok(messages.some((m) => m.text.includes("貼り付け")));
+          const multiline = messages.find((m) => m.text.includes("貼り付け"));
+          assert.ok(multiline?.text.startsWith("先頭続き日本語"));
+          assert.ok(
+            multiline?.text.includes("\nShift+Enterの改行"),
+            JSON.stringify(messages.map((message) => message.text)),
+          );
           assert.ok(messages.some((m) => m.text === "短く答えて"));
           const saved = f.store.db
             .prepare(

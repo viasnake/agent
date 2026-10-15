@@ -21,6 +21,23 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bubblewrap podman tmux
       - if: runner.os == 'Linux'
+        name: Delegate cgroup controllers to the rootless runner
+        run: |
+          user_unit="user@$(id -u).service"
+          sudo systemctl start "$user_unit"
+          sudo mkdir -p "/etc/systemd/system/$user_unit.d"
+          printf '[Service]\nDelegate=cpu cpuset memory pids\n' | sudo tee "/etc/systemd/system/$user_unit.d/delegate.conf"
+          sudo systemctl daemon-reload
+          # Realize the updated cgroup configuration without restarting user services.
+          sudo systemctl set-property --runtime "$user_unit" CPUAccounting=yes
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          control_group=$(systemctl show "$user_unit" --property=ControlGroup --value)
+          test -n "$control_group"
+          cat "/sys/fs/cgroup$control_group/cgroup.controllers"
+          for controller in cpu cpuset memory pids; do
+            grep -qw "$controller" "/sys/fs/cgroup$control_group/cgroup.controllers"
+          done
+      - if: runner.os == 'Linux'
         name: Prepare the rootless container integration fixture
         run: |
           podman pull docker.io/library/alpine:3.22

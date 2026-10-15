@@ -1,16 +1,22 @@
 import {
   CombinedAutocompleteProvider,
   ProcessTerminal,
-  TuiMainScreen,
+  TuiAltScreen,
   Text,
   matchesKey,
-  getKeybindings,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { SettingsDialog } from "./settings.js";
+import {
+  SettingsEditor,
+  type SettingsField,
+  type SettingsPosition,
+  type SettingsEdit,
+} from "./settings-editor.js";
 import { Application, fileReferences, type AppEvent } from "../application.js";
 import { initialize, loadConfig, paths, type Config } from "../config.js";
 import { Store } from "../storage.js";
+import type { ConversationMessage } from "../conversations.js";
 import { AgentError } from "../types.js";
 import { errorMessage, privateDirectory } from "../util.js";
 import { interactiveLogin } from "../interactive-services.js";
@@ -23,26 +29,34 @@ import {
   safeText,
   theme,
   Picker,
-  ContentColumn,
+  WorkbenchLayout,
   terminalTheme,
+  ResponsiveOverlay,
 } from "./components.js";
+import { doctorSummary, failureGuidance, setupSummary } from "./guidance.js";
 import {
   ActivityView,
   ConversationView,
   runLabels,
   taskDetails,
+  excerpt,
 } from "./workbench.js";
 
 export class TerminalApp {
   readonly terminal = new ProcessTerminal();
-  readonly tui = new TuiMainScreen(this.terminal, true);
+  readonly tui = new TuiAltScreen(this.terminal, true, undefined, {
+    copyOnSelect: false,
+    scrollToEndIndicator: () => theme.accent("↓ 最新へ"),
+  });
   readonly input = editor(this.tui);
   readonly transcript = new ConversationView();
   readonly progress = new Text("起動中…", 0, 0);
   readonly activity = new ActivityView();
   readonly notification = new Text("", 0, 0);
+  readonly inlineDetails = markdown("");
   readonly status = new Text("", 0, 0);
   readonly refs = new Text("", 0, 0);
+  readonly layout: WorkbenchLayout;
   app?: Application;
   private reader?: Reader;
   private cancelDialog?: () => void;
@@ -61,19 +75,26 @@ export class TerminalApp {
   private disposeSignals?: () => void;
   private restored = false;
   private earlyExit = false;
+  private historySession = "";
+  private messages: ConversationMessage[] = [];
+  private hasOlder = false;
+  private detailKind = "";
+  private detailText = "";
+  private detailLimit = 24000;
+  private detailReturn = { top: 0, following: true };
   constructor(readonly home?: string) {
-    const column = new ContentColumn();
-    for (const child of [
-      this.transcript,
-      this.progress,
-      this.activity,
-      this.notification,
-      this.refs,
-      this.input,
-      this.status,
-    ])
-      column.addChild(child);
-    this.tui.addChild(column);
+    this.layout = new WorkbenchLayout(
+      [
+        this.transcript,
+        this.progress,
+        this.activity,
+        this.inlineDetails,
+        this.notification,
+      ],
+      [this.refs, this.input, this.status],
+    );
+    this.tui.setLayoutRoot(this.layout);
+    this.layout.scroll.onOlder = (remaining) => this.loadOlder(remaining);
     this.tui.setFocus(this.input);
     this.input.setAutocompleteProvider(
       new CombinedAutocompleteProvider(commands, process.cwd(), null),
@@ -105,6 +126,8 @@ export class TerminalApp {
     this.tui.addInputListener((data) => this.key(data));
   }
   private key(data: string): { consume: boolean } | undefined {
+    // Consume LF before Pi can interpret Ctrl+J as newline or dialog confirmation.
+    if (matchesKey(data, "ctrl+j")) return { consume: true };
     const action = actionFor(data);
     if (this.tui.hasOverlay()) {
       if (this.reader && this.acceptReader && matchesKey(data, "enter")) {
@@ -152,7 +175,8 @@ export class TerminalApp {
       return { consume: true };
     }
     if (action === "cancel") {
-      if (this.app?.busy) this.app.stop();
+      if (this.detailKind) this.clearDetails();
+      else if (this.app?.busy) this.app.stop();
       return { consume: true };
     }
     if (action === "model") {
@@ -161,10 +185,6 @@ export class TerminalApp {
     }
     if (action === "tools") {
       this.dispatch("tools");
-      return { consume: true };
-    }
-    if (action === "up") {
-      this.dispatch("history");
       return { consume: true };
     }
     if (action === "next") {
@@ -259,9 +279,7 @@ export class TerminalApp {
         await this.shutdown();
         return;
       }
-      this.notice = Object.keys(config.models).length
-        ? "準備できました。Ctrl+P から会話の再開やモデルの変更ができます。"
-        : "接続未設定 · Ctrl+P → 接続・権限・上限からモデルを登録してください。";
+      this.notice = "";
       this.input.setText(this.app.session.draft);
       this.render();
       await done;
@@ -278,7 +296,7 @@ export class TerminalApp {
   private restore(): void {
     if (this.restored) return;
     this.restored = true;
-    this.tui.stop();
+    this.tui.stop({ preserveScreen: true });
   }
   private async shutdown(): Promise<void> {
     if (this.closing) return;
@@ -372,14 +390,19 @@ export class TerminalApp {
       this.activity.clear();
       if (event.type === "run_started") this.notice = "";
       if (event.type === "session") {
+        this.layout.scroll.scrollToEnd();
+        this.tui.resetTextSelection();
         this.input.setText(this.app.session.draft);
         for (const message of this.app
           .history()
           .filter((m) => m.role === "user"))
           this.input.addToHistory(message.text);
-        this.notice = this.app.interrupted()
-          ? "前の作業は未完了です。/tasks で確認し /resume で明示再開できます。"
-          : "会話を開きました。待機入力は /queue で確認できます。";
+        const run = this.app.currentRun();
+        this.notice = run?.reason
+          ? failureGuidance(run.reason, this.app.config, this.app.session)
+          : this.app.interrupted()
+            ? "前の作業は未完了です。/tasks で確認し /resume で明示再開できます。"
+            : "会話を開きました。待機入力は /queue で確認できます。";
       }
     } else if (event.type === "run_finished") {
       this.stream.clear();
@@ -390,10 +413,16 @@ export class TerminalApp {
           run.kind === "coding"
             ? "検査完了 · /diff で変更を確認・適用"
             : run.kind === "chat"
-              ? "完了 · 続きの依頼を入力できます。"
+              ? ""
               : "完了 · 成果物を /artifacts で確認できます。";
-      else
-        this.notice = `${run ? runLabels[run.state] : "未完了"} · ${run?.reason ?? "作業は未完了です。"}\n${run?.reason?.startsWith("SANDBOX") || run?.reason?.startsWith("CHECK_CONFIG") ? "/doctor と /settings で隔離環境・必須検査を確認してください。" : run?.state === "waiting_approval" ? "/reconcile で未確定操作を照合してください。" : run?.state.startsWith("waiting_") ? "接続・入力を確認し /resume で再開できます。" : "続きは新しい依頼として入力してください。待機入力は /queue に保存されています。"}`;
+      else {
+        this.notice = `${run ? runLabels[run.state] : "未完了"} · ${failureGuidance(run?.reason ?? "作業は未完了です。", this.app.config, this.app.session)}`;
+        if (run?.state === "waiting_approval")
+          this.notice += "\n/reconcile で未確定操作を照合してください。";
+        else if (!run?.reason?.startsWith("NO_MODEL"))
+          this.notice +=
+            "\n/status で詳細 · 待機入力は /queue に保存されています。";
+      }
     }
     if (!this.renderTimer)
       this.renderTimer = setTimeout(() => {
@@ -407,13 +436,35 @@ export class TerminalApp {
       run = app.currentRun();
     this.transcript.name = app.session.name;
     this.transcript.workspace = app.session.workspace;
-    this.transcript.setMessages(app.history());
+    const latest = app.history();
+    if (this.historySession !== app.session.id) {
+      this.historySession = app.session.id;
+      this.messages = [];
+      this.hasOlder = latest.length === 30;
+      this.detailKind = "";
+      this.inlineDetails.setText("");
+      this.transcript.setMessages([]);
+    }
+    const merged = new Map(
+      this.messages.map((message) => [message.seq, message]),
+    );
+    for (const message of latest) merged.set(message.seq, message);
+    this.messages = [...merged.values()].sort((a, b) => a.seq - b.seq);
+    this.transcript.setMessages(this.messages);
+    this.transcript.hasOlder = this.hasOlder;
+    this.transcript.setup = setupSummary(app.config, app.session);
+    const recent = app
+      .sessions()
+      .find((s) => s.id !== app.session.id && (s.draft || s.latestRunId));
+    this.transcript.recent = recent
+      ? `/continue 前回の会話へ · ${safeText(recent.name)}${recent.draft ? " · 下書きあり" : ""}`
+      : "";
     const preparing = app.busy && !app.activeRunId;
     this.activity.run = preparing ? undefined : run;
     this.activity.busy = app.busy;
     const streams = [...this.stream].slice(-2);
     this.activity.previewing = streams.length > 0;
-    const width = Math.max(10, Math.min(100, this.terminal.columns - 4));
+    const width = Math.max(1, this.terminal.columns - 2);
     // Model labels stay outside clipped previews; full responses remain in history.
     const preview = streams
       .map(([task, text]) =>
@@ -428,24 +479,6 @@ export class TerminalApp {
       )
       .join("\n");
     this.progress.setText(preview);
-    this.input.placeholder = app.busy
-      ? width < 60
-        ? "追加指示を入力…"
-        : "作業への追加指示…  Alt+Enter で次の依頼"
-      : width < 60
-        ? "依頼を入力…"
-        : "依頼を入力…  @ ファイル  / コマンド";
-    const model = truncateToWidth(
-      safeText(app.session.model || "自動選択").replace(/\s+/g, " "),
-      Math.max(8, Math.min(28, width - 20)),
-    );
-    const mode = {
-      single: "単独",
-      reviewed: "レビュー付き",
-      assisted: "計画・委任",
-    }[app.session.strategy];
-    this.input.caption =
-      width < 60 ? `${model} · Ctrl+L` : `${model}  ·  ${mode}  ·  Ctrl+L 変更`;
     const pending = app.session.queue[0];
     const notice = preparing
       ? ""
@@ -455,28 +488,14 @@ export class TerminalApp {
           : "");
     this.notification.setText(
       notice
-        ? truncateToWidth(
-            (run?.state === "failed" || notice.startsWith("エラー")
-              ? theme.error
-              : theme.muted)(safeText(notice).replace(/\s+/g, " ")),
-            width,
-          ) + "\n"
+        ? (run?.state === "failed" || notice.startsWith("エラー")
+            ? theme.error
+            : theme.accent)(safeText(notice)) + "\n"
         : "",
     );
     this.status.setText(
       [
-        theme.muted(
-          truncateToWidth(
-            app.busy
-              ? width < 60
-                ? "Ctrl+P 操作   Esc 停止"
-                : "Ctrl+P メニュー   Enter 追加指示   Esc 停止"
-              : width < 60
-                ? "Ctrl+P 操作   Enter 送信"
-                : "Ctrl+P メニュー   Enter 送信   Ctrl+J 改行",
-            width,
-          ),
-        ),
+        ...(app.busy ? [theme.muted("作業中 · Esc 停止")] : []),
         ...(pending
           ? [
               theme.muted(
@@ -492,7 +511,7 @@ export class TerminalApp {
     this.tui.requestRender();
   }
   private showError(error: unknown): void {
-    this.notice = `エラー · /status で詳細: ${safeText(errorMessage(error))}`;
+    this.notice = `エラー · ${safeText(this.app ? failureGuidance(errorMessage(error), this.app.config, this.app.session) : errorMessage(error))}\n/status で詳細`;
     this.render();
   }
   private dispatch(command: string): void {
@@ -560,8 +579,37 @@ export class TerminalApp {
       };
       picker.onSelect = finish;
       this.cancelDialog = () => finish();
-      this.tui.showOverlay(picker, {
-        width: Math.min(88, this.terminal.columns - 4),
+      this.tui.showOverlay(new ResponsiveOverlay(picker), {
+        width: "100%",
+        margin: 1,
+        anchor: "center",
+      });
+    });
+  }
+  private async editSettings(
+    title: string,
+    fields: SettingsField[],
+    position: SettingsPosition,
+  ): Promise<SettingsEdit | undefined> {
+    return new Promise((resolve) => {
+      const panel = new SettingsEditor(
+        title,
+        fields,
+        position,
+        () => this.terminal.rows,
+      );
+      const finish = (value?: SettingsEdit) => {
+        this.closeDialog();
+        resolve(value);
+      };
+      panel.onSubmit = finish;
+      this.cancelDialog = () => {
+        if (!panel.cancel()) finish();
+        else this.tui.requestRender();
+      };
+      this.tui.showOverlay(new ResponsiveOverlay(panel, 112), {
+        width: "100%",
+        margin: 1,
         anchor: "center",
       });
     });
@@ -575,7 +623,6 @@ export class TerminalApp {
     return new Promise((resolve) => {
       const dialog = new Dialog(safeText(title));
       const control = editor(this.tui);
-      control.placeholder = "入力…";
       control.setText(safeText(value));
       const cancel = () => finish();
       const finish = (text?: string) => {
@@ -586,8 +633,9 @@ export class TerminalApp {
       control.onSubmit = (text) => finish(text);
       dialog.setControl(control);
       this.cancelDialog = cancel;
-      this.tui.showOverlay(dialog, {
-        width: Math.min(88, this.terminal.columns - 4),
+      this.tui.showOverlay(new ResponsiveOverlay(dialog), {
+        width: "100%",
+        margin: 1,
         anchor: "center",
       });
       signal?.addEventListener("abort", cancel, { once: true });
@@ -628,8 +676,9 @@ export class TerminalApp {
           this.closeDialog();
           resolve(true);
         };
-      this.tui.showOverlay(this.reader, {
-        width: Math.min(104, this.terminal.columns - 2),
+      this.tui.showOverlay(new ResponsiveOverlay(this.reader, 104), {
+        width: "100%",
+        margin: 1,
         anchor: "center",
       });
     });
@@ -641,6 +690,7 @@ export class TerminalApp {
       throw new AgentError("BUSY", "認証・診断の終了を待ってください。");
     const [command, ...args] = line.trim().split(/\s+/);
     const argument = args.join(" ");
+    if (command !== "status") this.notice = "";
     switch (command) {
       case "commands": {
         const preferred = app.busy
@@ -648,7 +698,7 @@ export class TerminalApp {
           : app.session.workRunId
             ? ["diff", "apply"]
             : Object.keys(app.config.models).length
-              ? ["sessions", "model", "new"]
+              ? ["continue", "sessions", "model", "new"]
               : ["settings", "login", "doctor"];
         const items = commands
           .filter((item) => item.name !== "commands")
@@ -676,10 +726,13 @@ export class TerminalApp {
           [
             `会話: ${app.session.name}`,
             `作業場所: ${app.session.workspace}`,
+            `モデル: ${app.session.model || "自動選択"} · 構成: ${{ single: "単独", reviewed: "レビュー付き", assisted: "計画・委任" }[app.session.strategy]}`,
             `送信区分: ${app.session.dataClass} · ${app.session.localOnly ? "ローカルのみ" : "許可した接続を使用"}`,
             `状態: ${run ? runLabels[run.state] : "未実行"}`,
-            this.notice,
-            run?.reason ?? "",
+            run?.reason
+              ? failureGuidance(run.reason, app.config, app.session)
+              : this.notice,
+            ...(run?.reason ? ["\n技術詳細", safeText(run.reason)] : []),
             "",
             `要求: ${view.usage?.requests ?? 0}/${app.config.limits.maxRequests}`,
             `入力 ${view.usage?.input ?? "不明"} / 出力 ${view.usage?.output ?? "不明"} tokens`,
@@ -698,12 +751,20 @@ export class TerminalApp {
             Object.values(actions)
               .map((a) => `${a.keys.join(" / ")} — ${a.description}`)
               .join("\n") +
-            `\n${getKeybindings().getKeys("tui.input.newLine").join(" / ")} — 改行\nEnter — 送信／実行中は追加指示\nTab — コマンド・パス・@ファイル補完\n↑/↓ — 入力履歴\nCtrl+C の空入力、Ctrl+D の空入力、/quit は確認後に終了。入力は下書きに保存。`,
+            "\nShift+Enter — 改行\nEnter — 送信／実行中は追加指示\nTab — コマンド・パス・@ファイル補完\n↑/↓ — 入力履歴\nCtrl+C の空入力、Ctrl+D の空入力、/quit は保存して終了。作業中のみ確認します。\n/tools list — 保存済みツール結果を選ぶ\n/expand [番号] — 長文の続きを同じ場所に表示",
         );
         break;
       case "new":
         await app.newSession();
         break;
+      case "continue": {
+        const recent = app
+          .sessions()
+          .find((s) => s.id !== app.session.id && (s.draft || s.latestRunId));
+        if (recent) app.openSession(recent.id);
+        else this.notice = "保存済みの会話はありません。";
+        break;
+      }
       case "sessions": {
         let offset = 0;
         while (true) {
@@ -719,11 +780,12 @@ export class TerminalApp {
                   value: s.id,
                   label: s.name,
                   description:
-                    s.id === app.session.id
+                    `${s.draft ? "下書きあり · " : ""}${s.queue.length ? `待機 ${s.queue.length} 件 · ` : ""}` +
+                    (s.id === app.session.id
                       ? "現在の会話"
                       : run
                         ? runLabels[run.state]
-                        : "未実行",
+                        : "未実行"),
                 };
               }),
               ...(sessions.length === 30
@@ -758,9 +820,10 @@ export class TerminalApp {
         break;
       case "quit":
         if (
-          await this.confirm(
+          !app.busy ||
+          (await this.confirm(
             "作業を中断し、下書き・待機入力を保存して終了しますか？",
-          )
+          ))
         )
           await this.shutdown();
         break;
@@ -789,20 +852,35 @@ export class TerminalApp {
       case "history":
         await this.history();
         break;
+      case "expand":
+        this.layout.scroll.scrollAfterLayout(this.layout.scroll.scrollTop);
+        if (this.detailKind && !argument) {
+          this.detailLimit += 24000;
+          this.renderDetails();
+        } else if (
+          !this.transcript.expand(argument ? Number(argument) : undefined)
+        )
+          this.notice = "展開する長文はありません。";
+        break;
       case "model":
         await this.model();
         break;
       case "tasks": {
         const run = app.currentRun();
         if (!run) {
-          await this.show("まだ実行していません。");
+          this.notice = "まだ実行していません。";
+          break;
+        }
+        if (this.detailKind === "作業詳細") {
+          this.clearDetails();
           break;
         }
         const sessionId = app.session.id;
         const checks = await app.lastValidation(run.id);
         if (sessionId !== app.session.id) break;
         const view = app.view(run.id);
-        await this.show(
+        this.showDetails(
+          "作業詳細",
           [
             taskDetails(run),
             "検査コマンド",
@@ -857,13 +935,25 @@ export class TerminalApp {
       }
       case "artifacts":
       case "tools":
-        await this.artifacts(command === "tools");
+        if (
+          command === "tools" &&
+          this.detailKind === "ツール結果" &&
+          !argument
+        )
+          this.clearDetails();
+        else
+          await this.artifacts(
+            command === "tools",
+            undefined,
+            argument === "list",
+          );
         break;
       case "compact":
         await app.compact();
         break;
       case "settings":
         await new SettingsDialog(app, {
+          edit: this.editSettings.bind(this),
           choose: (title, choices) => this.choose(title, choices, true),
           prompt: this.prompt.bind(this),
           confirm: this.confirm.bind(this),
@@ -875,7 +965,15 @@ export class TerminalApp {
       case "doctor":
         this.busyDialog = true;
         try {
-          await this.show(JSON.stringify(await app.doctor(), null, 2));
+          const report = await app.doctor();
+          if (
+            await this.show(
+              doctorSummary(report),
+              "診断 · モデル呼出しなし",
+              "技術詳細",
+            )
+          )
+            await this.show(JSON.stringify(report, null, 2), "診断の技術詳細");
         } finally {
           this.busyDialog = false;
         }
@@ -898,25 +996,64 @@ export class TerminalApp {
     this.render();
   }
   private async history(): Promise<void> {
-    const app = this.app!;
-    let before = Number.MAX_SAFE_INTEGER;
-    while (true) {
-      const messages = app.history(before);
-      if (!messages.length) return;
-      await this.show(messages.map((m) => `${m.role}\n${m.text}`).join("\n\n"));
-      if (
-        messages.length < 30 ||
-        (await this.choose("履歴", [
-          { value: "older", label: "さらに前の30件" },
-          { value: "close", label: "閉じる" },
-        ])) !== "older"
-      )
-        return;
-      before = messages[0]!.seq;
-    }
+    this.loadOlder();
+    this.layout.scroll.scrollToStart();
+    this.tui.requestRender();
+  }
+  private loadOlder(remaining?: number): void {
+    if (!this.app || !this.hasOlder || !this.messages.length) return;
+    const width = Math.max(1, this.terminal.columns - 2);
+    const height = this.transcript.render(width).length;
+    const older = this.app.history(this.messages[0]!.seq);
+    this.hasOlder = older.length === 30;
+    this.messages = [...older, ...this.messages];
+    this.transcript.hasOlder = this.hasOlder;
+    this.transcript.setMessages(this.messages);
+    if (remaining !== undefined)
+      this.layout.scroll.preserveAfterPrepend(
+        this.transcript.render(width).length - height,
+        remaining,
+      );
+    this.tui.requestRender();
+  }
+  private clearDetails(): void {
+    this.detailKind = "";
+    this.inlineDetails.setText("");
+    if (this.detailReturn.following) this.layout.scroll.scrollToEnd();
+    else this.layout.scroll.scrollAfterLayout(this.detailReturn.top);
+    this.tui.requestRender();
+  }
+  private showDetails(kind: string, text: string): void {
+    if (!this.detailKind)
+      this.detailReturn = {
+        top: this.layout.scroll.scrollTop,
+        following: this.layout.scroll.isFollowingEnd,
+      };
+    this.detailKind = kind;
+    this.detailText = text;
+    this.detailLimit = 24000;
+    this.renderDetails();
+    const width = Math.max(1, this.terminal.columns - 2);
+    this.layout.scroll.scrollAfterLayout(
+      this.transcript.render(width).length +
+        this.progress.render(width).length +
+        this.activity.render(width).length,
+    );
+    this.tui.requestRender();
+  }
+  private renderDetails(): void {
+    this.inlineDetails.setText(
+      safeText(
+        `\n## ${this.detailKind} · Esc で閉じる\n\n${excerpt(this.detailText, this.detailLimit)}${Buffer.byteLength(this.detailText) > this.detailLimit ? "\n\n… /expand で続きを表示" : ""}`,
+      ),
+    );
   }
   private async queue(): Promise<void> {
     const app = this.app!;
+    if (!app.session.queue.length) {
+      this.notice = "待機入力はありません · Alt+Enter で次の依頼を保存";
+      return;
+    }
     const value = await this.choose("待機入力（停止・再起動後は明示実行）", [
       ...app.session.queue.map((q) => ({
         value: q.id,
@@ -954,23 +1091,35 @@ export class TerminalApp {
   private async artifacts(
     tools = false,
     runId = this.app!.session.latestRunId,
+    list = false,
   ): Promise<void> {
     const app = this.app!;
-    if (!runId) return;
+    if (!runId) {
+      this.notice = "保存済みの結果はありません。";
+      return;
+    }
     const artifacts = app
       .view(runId)
       .artifacts.filter((a) => !tools || !!a.metadata.tool);
-    const selected = await this.choose(
-      tools ? "ツールの保存済み結果" : "成果物・出典・検査",
-      [
-        ...artifacts.map((a) => ({
-          value: a.id,
-          label: a.name,
-          description: `${a.kind} · ${a.bytes} bytes`,
-        })),
-        { value: "previous", label: "前の作業の成果物を開く" },
-      ],
-    );
+    if (tools && !artifacts.length && !list) {
+      this.notice =
+        "この作業のツール結果はありません · /tools list で以前の作業へ";
+      return;
+    }
+    const selected =
+      tools && !list
+        ? artifacts.at(-1)?.id
+        : await this.choose(
+            tools ? "ツールの保存済み結果" : "成果物・出典・検査",
+            [
+              ...artifacts.map((a) => ({
+                value: a.id,
+                label: a.name,
+                description: `${a.kind} · ${a.bytes} bytes`,
+              })),
+              { value: "previous", label: "前の作業の成果物を開く" },
+            ],
+          );
     if (selected === "previous") {
       let offset = 0;
       while (true) {
@@ -989,13 +1138,20 @@ export class TerminalApp {
           offset += 30;
           continue;
         }
-        if (selectedRun) await this.artifacts(tools, selectedRun);
+        if (selectedRun) await this.artifacts(tools, selectedRun, true);
         return;
       }
     }
     const artifact = artifacts.find((a) => a.id === selected);
     if (!artifact) return;
     const text = await app.artifactText(artifact.id, runId);
+    if (tools) {
+      this.showDetails(
+        "ツール結果",
+        `${artifact.name}\n\n${text}\n\n/tools list で別の結果を選択 · Ctrl+O で閉じる`,
+      );
+      return;
+    }
     await this.show(
       `${artifact.name}\n${JSON.stringify(artifact.metadata)}\n\n${text}`,
     );

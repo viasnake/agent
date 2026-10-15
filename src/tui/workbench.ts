@@ -1,13 +1,21 @@
 import {
   truncateToWidth,
+  Text,
   type Component,
   type Markdown,
 } from "@earendil-works/pi-tui";
 import type { ConversationMessage } from "../conversations.js";
+import { basename } from "node:path";
 import type { Role, Run, RunState } from "../types.js";
 import { markdown, safeText, theme } from "./components.js";
 
 const lineText = (text: string) => safeText(text).replace(/\s+/g, " ");
+export function excerpt(text: string, limit: number): string {
+  const bytes = Buffer.from(text);
+  let end = Math.min(bytes.length, limit);
+  while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString();
+}
 export const runLabels: Record<RunState, string> = {
   created: "準備中",
   planning: "計画中",
@@ -56,60 +64,89 @@ export function taskDetails(run: Run): string {
 export class ConversationView implements Component {
   name = "新しい会話";
   workspace = process.cwd();
-  private messages: { source: string; role: string; body: Markdown }[] = [];
+  setup: string[] = [];
+  recent = "";
+  hasOlder = false;
+  private messages: {
+    seq: number;
+    source: string;
+    role: string;
+    body: Markdown;
+    limit: number;
+  }[] = [];
   setMessages(messages: ConversationMessage[]): void {
     // Streaming updates do not rebuild unchanged Markdown components.
-    this.messages = messages.slice(-8).map((message, index) => {
-      const previous = this.messages[index];
+    const previousMessages = new Map(
+      this.messages.map((message) => [message.seq, message]),
+    );
+    this.messages = messages.map((message) => {
+      const previous = previousMessages.get(message.seq);
       if (previous?.source === message.text && previous.role === message.role)
         return previous;
       return {
+        seq: message.seq,
         source: message.text,
         role: message.role,
-        body: markdown(
-          Buffer.byteLength(message.text) > 6000
-            ? `長いメッセージ (${Buffer.byteLength(message.text)} bytes) — /history で全文を表示`
-            : message.text,
-        ),
+        limit: 6000,
+        body: markdown(excerpt(message.text, 6000)),
       };
     });
+  }
+  expand(seq?: number): boolean {
+    const message = [...this.messages]
+      .reverse()
+      .find(
+        (item) =>
+          (seq === undefined || item.seq === seq) &&
+          Buffer.byteLength(item.source) > item.limit,
+      );
+    if (!message) return false;
+    message.limit += 24000;
+    message.body = markdown(excerpt(message.source, message.limit));
+    return true;
   }
   invalidate(): void {
     for (const message of this.messages) message.body.invalidate();
   }
   render(width: number): string[] {
+    const fit = (text: string) => truncateToWidth(text, width);
     const lines = [
-      truncateToWidth(
-        `${theme.strong("agent")}  ${theme.muted(lineText(this.workspace))}`,
-        width,
+      fit(
+        `${theme.strong(lineText(this.name))}  ${theme.muted("/ " + lineText(basename(this.workspace)))}`,
       ),
+      theme.muted("─".repeat(width)),
     ];
     if (!this.messages.length)
       return [
         ...lines,
         "",
-        "",
-        ...markdown(
-          "**何から始めますか？**\n\nコードの変更、調査、レビューを同じ会話で。\n変更は作業コピーで検査し、確認してから反映します。",
-        ).render(width),
-        "",
-        theme.muted(
-          truncateToWidth("Ctrl+P 操作を探す    @ ファイルを添付", width),
-        ),
+        ...this.setup.flatMap((line) => new Text(line, 0, 0).render(width)),
+        ...(this.recent
+          ? ["", ...new Text(this.recent, 0, 0).render(width)]
+          : []),
         "",
       ];
+    if (this.hasOlder)
+      lines.push(fit(theme.muted("↑ スクロールで以前の発言を読込 · /history")));
     for (const message of this.messages) {
       const body = message.body.render(Math.max(1, width - 2));
       lines.push(
         "",
-        ...body.map((line, index) => {
-          const prefix =
-            index === 0 ? (message.role === "user" ? "› " : "• ") : "  ";
+        fit(
+          message.role === "user"
+            ? theme.accent("あなた")
+            : theme.strong("AGENT"),
+        ),
+        ...body.map((line) => {
+          const prefix = message.role === "user" ? "▎ " : "  ";
           const content = prefix + line;
           return message.role === "user"
             ? theme.panel(truncateToWidth(content, width, "", true))
             : content;
         }),
+        ...(Buffer.byteLength(message.source) > message.limit
+          ? [fit(theme.muted(`… /expand ${message.seq} で続きを表示`))]
+          : []),
       );
     }
     return [...lines, ""];

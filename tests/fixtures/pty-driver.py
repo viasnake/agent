@@ -5,6 +5,7 @@ import os
 import pty
 import select
 import signal
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -51,7 +52,18 @@ def send(text):
     read_for(.15)
 
 try:
-    wait_for("準備できました")
+    wait_for("新しい会話")
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            with sqlite3.connect(f"file:{home}/state.sqlite?mode=ro", uri=True) as db:
+                if db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]:
+                    break
+        except sqlite3.OperationalError:
+            pass
+        assert time.monotonic() < deadline, "conversation was not initialized"
+        read_for(.05)
+    read_for(.15)
     ready_ms = (time.monotonic()-started)*1000
     rss = None
     conversation_rss = None
@@ -79,15 +91,22 @@ try:
         send("\x1b[6~")
         send("\x1b")
         # Bracketed paste must not submit embedded newlines or send terminal controls.
+        send("先頭")
+        send("\n")
+        send("続き")
         send("\x1b[200~日本語 é\n貼り付け\x1b]52;c;ZXhmaWw=\x07\x1b[201~")
         requests = os.environ["AGENT_TEST_REQUESTS"]
         assert not os.path.exists(requests), "paste submitted before Enter"
+        send("\x1bOM")
+        send("Shift+Enterの改行")
+        assert not os.path.exists(requests), "Shift+Enter submitted the draft"
         send("\r")
         wait_for("PTY 応答")
-        wait_for("作業への追加指示")
+        wait_for("作業中")
+        mark = len(output)
         send("短く答えて\r")
         send("次の質問\x1b\r")
-        wait_for("完了 · 続き", after=0)
+        wait_for("AGENT", after=mark)
         read_for(3)
         with open(requests) as trace:
             records = [json.loads(line) for line in trace]
@@ -100,22 +119,24 @@ try:
         # Resize while a long stream is active; history remains usable and Esc stops it.
         send("long-output\r")
         wait_for("全角")
+        mark = len(output)
+        send("/quit\r")
+        wait_for("作業を中断し", after=mark)
+        send("\x1b")
+        assert proc.poll() is None, "canceling busy quit ended the process"
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         proc.send_signal(signal.SIGWINCH)
         send("\x1b[5~")
-        wait_for("PgUp/PgDn")
-        send("\x1b")
+        send("/history\r")
         send("\x1b")
         wait_for("中断 ·")
-        # Ctrl+D inside a draft must edit, not exit. A quit cancellation retains input.
+        # Ctrl+D inside a draft edits; idle quit saves without another dialog.
         send("保存する下書き")
         send("\x04")
         assert proc.poll() is None
         send("\x03")
         send("\x04")
-        wait_for("保存して終了")
-        send("\x1b")
-        assert proc.poll() is None
+        proc.wait(timeout=10)
     elif scenario == "coding":
         for request in ["fix-code-first", "fix-code-second"]:
             mark = len(output)
@@ -165,16 +186,16 @@ try:
         wait_for("+third")
         send("\x1b")
     elif scenario == "tmux":
+        mark = len(output)
         send("日本語の質問\r")
-        wait_for("完了 · 続き")
+        wait_for("PTY 応答", after=mark)
+        wait_for("AGENT", after=mark)
         send("/help\r")
         wait_for("PgUp/PgDn")
         send("\x1b")
         # tmux's legacy Escape disambiguation timer must expire before another key.
         read_for(.8)
         send("/quit\r")
-        wait_for("保存して終了")
-        send("\x1b[B\r")
         proc.wait(timeout=10)
     elif scenario == "exception":
         # An explicitly injected process exception checks the shared restoration path.
@@ -188,6 +209,12 @@ try:
     assert restored[3] & termios.ECHO, "echo remained disabled"
     assert b"\x1b[?2004l" in output, "bracketed paste not restored"
     assert b"\x1b[?25h" in output, "cursor not restored"
+    assert b"\x1b[?1049h" in output, "fullscreen was not entered"
+    assert b"\x1b[?1049l" in output, "main screen was not restored"
+    if scenario != "tmux":
+        restored_output = output.rsplit(b"\x1b[?1049l", 1)[1]
+        assert "▎".encode() not in restored_output, "composer remained on main screen"
+        assert "作業中".encode() not in restored_output, "workbench controls remained on main screen"
     assert b"\x1b]52;c;ZXhmaWw=" not in output, "untrusted clipboard escape reached terminal"
     assert proc.returncode == (1 if scenario == "exception" else 0), proc.returncode
     print(json.dumps({"readyMs":ready_ms,"idleRssKiB":rss,"conversationRssKiB":conversation_rss,"bytes":len(output),"scenario":scenario,"restored":True}))
