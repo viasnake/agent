@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { realpath, readFile, mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { stringify } from "yaml";
 import lockfile from "proper-lockfile";
 import { applyRun } from "./artifacts.js";
@@ -24,6 +24,8 @@ import {
   terminalStates,
   type Run,
   type Runtime,
+  type ImageReference,
+  type DataClass,
   type WorkKind,
 } from "./types.js";
 import {
@@ -35,6 +37,20 @@ import {
   safePath,
   sha256,
 } from "./util.js";
+import {
+  imageMimeForPath,
+  isImageFileSignature,
+  isImagePath,
+  loadStoredImage,
+  maxConversationImageBytes,
+  maxConversationImages,
+  readBoundedImage,
+  saveImage,
+  validateImage,
+  validateImageReference,
+} from "./images.js";
+import { modelCandidates } from "./policy.js";
+import { endpoint } from "./runtime/providers.js";
 import { secretPath, workspaceDiff } from "./workspace.js";
 
 export interface AppEvent {
@@ -42,6 +58,26 @@ export interface AppEvent {
   sessionId: string;
   runId?: string;
   detail: Record<string, unknown>;
+}
+export interface InputPreview {
+  text: string;
+  attachments: {
+    path: string;
+    bytes: number;
+    mimeType?: string;
+  }[];
+  images: ImageReference[];
+  destinations: string[];
+}
+interface InputSnapshot {
+  text: string;
+  attachments: InputPreview["attachments"];
+  images: ImageReference[];
+  destinationBinding: string;
+  configHash: string;
+  dataClass: DataClass;
+  localOnly: boolean;
+  kind: WorkKind;
 }
 export function inferKind(text: string, previous?: WorkKind): WorkKind {
   if (/\b(research|sources|citations)\b|調査|出典|根拠付き/i.test(text))
@@ -85,6 +121,7 @@ export class Application extends EventEmitter {
   private generation = 0;
   private heartbeat?: NodeJS.Timeout;
   private closed = false;
+  private readonly previews = new WeakMap<InputPreview, InputSnapshot>();
   constructor(
     public config: Config,
     readonly paths: Paths,
@@ -171,35 +208,286 @@ export class Application extends EventEmitter {
     ++this.generation;
     this.publish("session");
   }
-  async attachments(text: string): Promise<{ path: string; bytes: number }[]> {
+  private effectiveDisclosure(images: ImageReference[]): {
+    dataClass: DataClass;
+    localOnly: boolean;
+  } {
+    const levels: DataClass[] = ["public", "private", "restricted"];
+    const dataClass = images.reduce<DataClass>(
+      (current, ref) =>
+        levels.indexOf(ref.dataClass ?? "public") > levels.indexOf(current)
+          ? (ref.dataClass ?? "public")
+          : current,
+      this.session.dataClass,
+    );
+    return {
+      dataClass,
+      localOnly:
+        this.session.localOnly || images.some((ref) => ref.localOnly === true),
+    };
+  }
+  private async snapshotInput(text: string): Promise<InputSnapshot> {
     let total = Buffer.byteLength(text);
-    const refs = [];
+    const attachments: InputPreview["attachments"] = [];
+    const fresh: ImageReference[] = [];
     for (const path of fileReferences(text)) {
       if (secretPath(path))
         throw new AgentError(
           "PATH_DENIED",
           "認証・制御ファイルは添付できません。",
         );
-      const content = await readText(
-        await safePath(this.session.workspace, path),
-        this.config.limits.maxFileBytes,
-      );
-      total += Buffer.byteLength(content);
-      refs.push({ path, bytes: Buffer.byteLength(content) });
+      const safe = await safePath(this.session.workspace, path);
+      if (isImagePath(path)) {
+        const bytes = await readBoundedImage(safe);
+        const mimeType = imageMimeForPath(path)!;
+        const metadata = await validateImage(bytes, mimeType);
+        const imageId = `img-${sha256(bytes)}`;
+        const known = new Map(
+          [...(this.session.images ?? []), ...fresh].map((ref) => [
+            ref.id,
+            ref,
+          ]),
+        );
+        if (!known.has(imageId)) {
+          if (known.size >= maxConversationImages)
+            throw new AgentError(
+              "IMAGE_LIMIT",
+              `A conversation can retain at most ${maxConversationImages} images`,
+            );
+          const retainedBytes = [...known.values()].reduce(
+            (sum, ref) => sum + ref.bytes,
+            0,
+          );
+          if (retainedBytes + bytes.length > maxConversationImageBytes)
+            throw new AgentError(
+              "IMAGE_LIMIT",
+              `A conversation can retain at most ${maxConversationImageBytes} image bytes`,
+            );
+        }
+        const disclosure = this.effectiveDisclosure([
+          ...(this.session.images ?? []),
+          ...fresh,
+        ]);
+        const reference = await saveImage(
+          this.paths,
+          basename(path),
+          bytes,
+          disclosure.dataClass,
+          disclosure.localOnly,
+        );
+        if (
+          reference.width !== metadata.width ||
+          reference.height !== metadata.height
+        )
+          throw new AgentError("IMAGE_INVALID", "Image metadata changed");
+        fresh.push(reference);
+        attachments.push({ path, bytes: bytes.length, mimeType });
+      } else {
+        if (await isImageFileSignature(safe))
+          throw new AgentError(
+            "IMAGE_FORMAT",
+            "Image file extension does not match PNG, JPEG, or WebP content",
+          );
+        const content = await readText(safe, this.config.limits.maxFileBytes);
+        const bytes = Buffer.byteLength(content);
+        total += bytes;
+        attachments.push({ path, bytes });
+      }
     }
     if (total > this.config.limits.maxInputBytes)
       throw new AgentError(
         "INPUT_SIZE",
         "依頼と添付ファイルが入力上限を超えています。",
       );
-    return refs;
+    const allImages = [...(this.session.images ?? [])];
+    for (const ref of fresh)
+      if (!allImages.some((image) => image.id === ref.id)) allImages.push(ref);
+    const unique = new Map(allImages.map((ref) => [ref.id, ref]));
+    const images = [...unique.values()];
+    if (
+      images.length > maxConversationImages ||
+      images.reduce((sum, ref) => sum + ref.bytes, 0) >
+        maxConversationImageBytes
+    )
+      throw new AgentError(
+        "IMAGE_LIMIT",
+        `A conversation can retain at most ${maxConversationImages} images and ${maxConversationImageBytes} image bytes`,
+      );
+    for (const ref of images) await loadStoredImage(this.paths, ref);
+    const disclosure = this.effectiveDisclosure(images);
+    const previous = this.session.latestRunId
+      ? this.store.get(this.session.latestRunId)
+      : undefined;
+    const kind =
+      this.session.kind === "auto"
+        ? inferKind(text, previous?.kind)
+        : this.session.kind;
+    const binding = sha256(
+      canonical({
+        conversation: this.session.id,
+        config: configHash(this.config),
+        text,
+        dataClass: disclosure.dataClass,
+        localOnly: disclosure.localOnly,
+        kind,
+        imageIds: images.map((ref) => ref.id),
+      }),
+    );
+    return {
+      text,
+      attachments,
+      images,
+      destinationBinding: binding,
+      configHash: configHash(this.config),
+      dataClass: disclosure.dataClass,
+      localOnly: disclosure.localOnly,
+      kind,
+    };
+  }
+  async previewInput(text: string): Promise<InputPreview> {
+    const snapshot = await this.snapshotInput(text);
+    const preview: InputPreview = {
+      text,
+      attachments: structuredClone(snapshot.attachments),
+      images: structuredClone(snapshot.images),
+      destinations: this.imageDestinations(snapshot.images, snapshot),
+    };
+    this.previews.set(preview, snapshot);
+    return preview;
+  }
+  private imageDestinations(
+    images: ImageReference[],
+    snapshot: Pick<InputSnapshot, "dataClass" | "localOnly" | "kind">,
+  ): string[] {
+    if (!images.length) return [];
+    const kind = snapshot.kind;
+    const run = {
+      kind,
+      dataClass: snapshot.dataClass,
+      localOnly: snapshot.localOnly,
+    } as Run;
+    const aliases = new Set<string>();
+    for (const role of ["lead", "worker", "reviewer"] as const)
+      for (const alias of modelCandidates(
+        this.config,
+        run,
+        role,
+        kind !== "chat",
+      ))
+        aliases.add(alias);
+    return [...aliases]
+      .map((alias) => {
+        const connection =
+          this.config.connections[this.config.models[alias]!.connection]!;
+        let target: string;
+        try {
+          const url = new URL(endpoint(connection));
+          url.username = "";
+          url.password = "";
+          url.search = "";
+          url.hash = "";
+          target = url.toString();
+        } catch {
+          target = "endpoint unavailable";
+        }
+        return `${alias} — ${connection.type}/${this.config.models[alias]!.connection} — ${target}`;
+      })
+      .sort();
+  }
+  private approvedSnapshot(
+    text: string,
+    preview?: InputPreview,
+  ): InputSnapshot {
+    if (!preview) throw new AgentError("INPUT", "Missing input preview");
+    const snapshot = this.previews.get(preview);
+    if (
+      !snapshot ||
+      snapshot.text !== text ||
+      preview.text !== text ||
+      canonical(preview.attachments) !== canonical(snapshot.attachments) ||
+      canonical(preview.images) !== canonical(snapshot.images) ||
+      canonical(preview.destinations) !==
+        canonical(this.imageDestinations(snapshot.images, snapshot))
+    )
+      throw new AgentError(
+        "IMAGE_PREVIEW",
+        "Input preview is invalid; review the input again",
+      );
+    if (
+      snapshot.images.length &&
+      snapshot.configHash !== configHash(this.config)
+    )
+      throw new AgentError(
+        "IMAGE_PREVIEW_STALE",
+        "Configuration changed after preview; review the input and destinations again",
+      );
+    const current = this.effectiveDisclosure(snapshot.images);
+    const previous = this.session.latestRunId
+      ? this.store.get(this.session.latestRunId)
+      : undefined;
+    const kind =
+      this.session.kind === "auto"
+        ? inferKind(text, previous?.kind)
+        : this.session.kind;
+    const currentBinding = sha256(
+      canonical({
+        conversation: this.session.id,
+        config: configHash(this.config),
+        text,
+        dataClass: current.dataClass,
+        localOnly: current.localOnly,
+        kind,
+        imageIds: snapshot.images.map((ref) => ref.id),
+      }),
+    );
+    if (
+      snapshot.images.length &&
+      (currentBinding !== snapshot.destinationBinding || kind !== snapshot.kind)
+    )
+      throw new AgentError(
+        "IMAGE_PREVIEW_STALE",
+        "Conversation privacy settings changed after preview; review the input again",
+      );
+    return structuredClone(snapshot);
+  }
+  async attachments(text: string): Promise<{ path: string; bytes: number }[]> {
+    const snapshot = await this.snapshotInput(text);
+    return snapshot.attachments.map(({ path, bytes }) => ({ path, bytes }));
+  }
+  private async textAttachments(
+    text: string,
+  ): Promise<{ path: string; bytes: number }[]> {
+    let total = Buffer.byteLength(text);
+    const attachments: { path: string; bytes: number }[] = [];
+    for (const path of fileReferences(text)) {
+      if (secretPath(path))
+        throw new AgentError(
+          "PATH_DENIED",
+          "認証・制御ファイルは添付できません。",
+        );
+      if (isImagePath(path)) continue;
+      const safe = await safePath(this.session.workspace, path);
+      const content = await readText(safe, this.config.limits.maxFileBytes);
+      const bytes = Buffer.byteLength(content);
+      total += bytes;
+      attachments.push({ path, bytes });
+    }
+    if (total > this.config.limits.maxInputBytes)
+      throw new AgentError(
+        "INPUT_SIZE",
+        "依頼と添付ファイルが入力上限を超えています。",
+      );
+    return attachments;
   }
   async submit(
     text: string,
     mode: PendingInput["mode"] = "instruction",
+    preview?: InputPreview,
   ): Promise<void> {
     if (!text.trim()) return;
-    await this.attachments(text);
+    const snapshot = preview
+      ? this.approvedSnapshot(text, preview)
+      : this.approvedSnapshot(text, await this.previewInput(text));
     if (this.busy && mode === "instruction" && fileReferences(text).length)
       throw new AgentError(
         "INPUT",
@@ -212,10 +500,17 @@ export class Application extends EventEmitter {
       text,
       mode: this.busy ? mode : "next",
       runId: this.busy && mode === "instruction" ? this.activeRunId : undefined,
+      images: structuredClone(snapshot.images),
+      previewBinding: snapshot.destinationBinding,
+      previewConfigHash: snapshot.configHash,
+      previewDataClass: snapshot.dataClass,
+      previewLocalOnly: snapshot.localOnly,
+      previewKind: snapshot.kind,
     };
     if (!this.session.latestRunId && this.session.name === "新しい会話")
       this.session.name = text.split("\n")[0]!;
     this.session.queue.push(item);
+    this.session.images = structuredClone(snapshot.images);
     this.session.draft = "";
     this.save();
     if (this.busy)
@@ -227,13 +522,29 @@ export class Application extends EventEmitter {
       });
     else this.startQueue();
   }
-  editQueued(inputId: string, text: string): void {
+  editQueued(inputId: string, text: string, preview?: InputPreview): void {
     if (Buffer.byteLength(text) > this.config.limits.maxInputBytes)
       throw new AgentError("INPUT_SIZE", "入力上限を超えています。");
     const item = this.session.queue.find((q) => q.id === inputId);
     if (!item)
       throw new AgentError("QUEUE", "この入力は既に処理されています。");
+    if (
+      (item.images?.length || fileReferences(text).some(isImagePath)) &&
+      !preview
+    )
+      throw new AgentError(
+        "IMAGE_PREVIEW",
+        "Edit image inputs through a new preview and confirmation",
+      );
+    const snapshot = preview ? this.approvedSnapshot(text, preview) : undefined;
     item.text = text;
+    item.images = snapshot?.images;
+    item.previewBinding = snapshot?.destinationBinding;
+    item.previewConfigHash = snapshot?.configHash;
+    item.previewDataClass = snapshot?.dataClass;
+    item.previewLocalOnly = snapshot?.localOnly;
+    item.previewKind = snapshot?.kind;
+    if (snapshot) this.session.images = structuredClone(snapshot.images);
     this.save();
   }
   cancelQueued(inputId: string): void {
@@ -294,13 +605,71 @@ export class Application extends EventEmitter {
       this.session.kind === "auto"
         ? inferKind(input.text, previous?.kind)
         : this.session.kind;
-    const refs = await this.attachments(input.text);
+    const refs = await this.textAttachments(input.text);
+    const retained = new Map(
+      (this.session.images ?? []).map((reference) => [reference.id, reference]),
+    );
+    const images = (input.images ?? this.session.images ?? []).map(
+      (reference) => {
+        const prior = retained.get(reference.id);
+        if (!prior) return reference;
+        const levels: DataClass[] = ["public", "private", "restricted"];
+        return {
+          ...reference,
+          dataClass:
+            levels.indexOf(prior.dataClass) >
+            levels.indexOf(reference.dataClass)
+              ? prior.dataClass
+              : reference.dataClass,
+          localOnly: prior.localOnly || reference.localOnly,
+        };
+      },
+    );
+    if (images.length) {
+      const disclosure = this.effectiveDisclosure(images);
+      const binding = sha256(
+        canonical({
+          conversation: this.session.id,
+          config: configHash(this.config),
+          text: input.text,
+          dataClass: input.previewDataClass,
+          localOnly: input.previewLocalOnly,
+          kind,
+          imageIds: images.map((ref) => ref.id),
+        }),
+      );
+      if (
+        !input.previewBinding ||
+        input.previewConfigHash !== configHash(this.config) ||
+        input.previewBinding !== binding ||
+        input.previewKind !== kind ||
+        disclosure.dataClass !== input.previewDataClass ||
+        disclosure.localOnly !== input.previewLocalOnly
+      )
+        throw new AgentError(
+          "IMAGE_PREVIEW_STALE",
+          "Queued image input needs a new preview and confirmation after configuration or privacy changes",
+        );
+      if (
+        !this.imageDestinations(images, {
+          dataClass: disclosure.dataClass,
+          localOnly: disclosure.localOnly,
+          kind,
+        }).length
+      )
+        throw new AgentError(
+          "NO_IMAGE_MODEL",
+          "No authorized image-capable model is available. Enable images only for a capable model in /settings.",
+        );
+    }
     const config = structuredClone(this.config);
+    const requestDisclosure = this.effectiveDisclosure(images);
     if (
       previous &&
-      (["public", "private", "restricted"].indexOf(this.session.dataClass) <
-        ["public", "private", "restricted"].indexOf(previous.dataClass) ||
-        (previous.localOnly && !this.session.localOnly))
+      (["public", "private", "restricted"].indexOf(
+        requestDisclosure.dataClass,
+      ) < ["public", "private", "restricted"].indexOf(previous.dataClass) ||
+        (previous.localOnly && !requestDisclosure.localOnly))
     )
       throw new AgentError(
         "DISCLOSURE_DENIED",
@@ -384,8 +753,9 @@ export class Application extends EventEmitter {
       objective: input.text,
       kind,
       mode: kind === "chat" ? "single" : this.session.strategy,
-      dataClass: this.session.dataClass,
-      localOnly: this.session.localOnly,
+      dataClass: requestDisclosure.dataClass,
+      localOnly: requestDisclosure.localOnly,
+      images,
       workspace: kind === "coding" ? this.session.workspace : undefined,
       parentRunId: usableParent,
       previousSessions,
@@ -409,6 +779,15 @@ export class Application extends EventEmitter {
     });
     this.publish("run_started", { kind, mode: run.mode });
     await this.executePrepared(harness, run, signal);
+  }
+  imagePath(ref: ImageReference): string {
+    validateImageReference(ref);
+    if (!this.session.images?.some((image) => image.id === ref.id))
+      throw new AgentError(
+        "IMAGE_REFERENCE",
+        "Image is not retained by this conversation",
+      );
+    return join(this.paths.home, "images", `${ref.sha256}.img`);
   }
   private async executePrepared(
     harness: Harness,

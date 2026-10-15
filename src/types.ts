@@ -32,6 +32,21 @@ export interface TaskResult {
   artifacts: string[];
   unresolved: string[];
 }
+export interface ImageReference {
+  id: string;
+  name: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  bytes: number;
+  sha256: string;
+  dataClass: DataClass;
+  localOnly: boolean;
+}
+export interface RuntimeImage {
+  reference: ImageReference;
+  data: Buffer;
+}
 export interface Run {
   parentRunId?: string;
   context?: string;
@@ -55,6 +70,7 @@ export interface Run {
   configHash: string;
   tasks: Task[];
   inputs: string[];
+  images?: ImageReference[];
   checks: string[];
   mustKeep: string[];
   planAttempts: number;
@@ -86,13 +102,18 @@ export interface RuntimeRequest {
   model: string;
   role: Role;
   objective: string;
+  images?: RuntimeImage[];
   system: string;
   sessionDir: string;
   sessionFile?: string;
   tools: ToolSpec[];
   signal: AbortSignal;
   onSession(file: string): void;
-  beforeRequest(inputBytes: number): string;
+  beforeRequest(
+    inputBytes: number,
+    imageCount?: number,
+    estimatedImageTokens?: number,
+  ): string;
   afterRequest(reservationId: string, usage: ModelUsage): void;
   onEvent(type: string, detail: Record<string, unknown>): void;
 }

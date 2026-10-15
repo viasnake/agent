@@ -67,6 +67,7 @@ export const commands = [
   ["diff", "変更と差分"],
   ["apply", "確認して適用"],
   ["artifacts", "文書・出典・検査結果"],
+  ["images", "保存済み画像・参照ID・原本の場所"],
   ["settings", "接続・権限・上限"],
   ["login", "認証"],
   ["doctor", "ローカル診断"],

@@ -2,6 +2,7 @@ import { Store } from "./storage.js";
 import {
   AgentError,
   type DataClass,
+  type ImageReference,
   type Run,
   type WorkKind,
 } from "./types.js";
@@ -12,6 +13,12 @@ export interface PendingInput {
   text: string;
   mode: "instruction" | "next";
   runId?: string;
+  images?: ImageReference[];
+  previewBinding?: string;
+  previewConfigHash?: string;
+  previewDataClass?: DataClass;
+  previewLocalOnly?: boolean;
+  previewKind?: WorkKind;
 }
 export interface Conversation {
   id: string;
@@ -34,6 +41,7 @@ export interface Conversation {
   includeUntracked: boolean;
   compacted?: boolean;
   handoff?: string;
+  images?: ImageReference[];
 }
 export interface ConversationMessage {
   seq: number;

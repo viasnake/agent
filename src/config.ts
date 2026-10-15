@@ -40,6 +40,7 @@ const model = z.strictObject({
   roles: z.array(z.enum(["lead", "worker", "reviewer"])).min(1),
   kinds: z.array(z.enum(["coding", "research", "writing", "chat"])).min(1),
   tools: z.boolean().default(false),
+  images: z.boolean().optional(),
   contextWindow: z.number().int().min(2048).max(2_000_000).default(32000),
   maxOutputTokens: z.number().int().min(256).max(128000).default(4096),
   priority: z.number().int().default(0),

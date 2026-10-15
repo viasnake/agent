@@ -130,7 +130,14 @@ export async function readText(
       "BINARY_INPUT",
       `Binary file is not supported: ${path}`,
     );
-  return data.toString("utf8");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    throw new AgentError(
+      "BINARY_INPUT",
+      `Binary file is not supported: ${path}`,
+    );
+  }
 }
 export function errorMessage(error: unknown): string {
   return error instanceof AgentError

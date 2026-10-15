@@ -531,21 +531,40 @@ export class TerminalApp {
       return;
     }
     if (!text.trim()) return;
-    const refs = await this.app.attachments(text);
-    if (
-      refs.length &&
-      !(await this.confirm(
-        `添付: ${refs.map((r) => `${r.path} (${r.bytes} bytes)`).join(", ")}\n送信区分: ${this.app.session.dataClass}`,
-      ))
-    ) {
+    const preview = await this.app.previewInput(text);
+    if (!(await this.confirmInput(preview))) {
       this.input.setText(text);
       return;
     }
-    if (this.input.getExpandedText() === text) this.input.setText("");
     if (!this.app.busy) this.notice = "";
-    await this.app.submit(text, mode);
+    await this.app.submit(text, mode, preview);
+    if (this.input.getExpandedText() === text) this.input.setText("");
     this.input.addToHistory(text);
     this.render();
+  }
+  private async confirmInput(
+    preview: Awaited<ReturnType<Application["previewInput"]>>,
+  ): Promise<boolean> {
+    if (!preview.attachments.length && !preview.images.length) return true;
+    return this.confirm(
+      [
+        ...preview.attachments
+          .filter((ref) => !ref.mimeType)
+          .map((ref) => `資料: ${ref.path} (${ref.bytes} bytes)`),
+        ...preview.images.map(
+          (ref, index) =>
+            `画像 ${index + 1}: ${ref.name} · ${ref.mimeType} · ${ref.width}×${ref.height} · ${ref.bytes} bytes\n参照ID: ${ref.id}`,
+        ),
+        `送信区分: ${this.app!.session.dataClass}${this.app!.session.localOnly ? " / local-only" : ""}`,
+        ...(preview.images.length
+          ? [
+              "保存済み画像も含めて送信します。",
+              "送信先（自動振り分けを含む候補）:",
+              ...preview.destinations,
+            ]
+          : []),
+      ].join("\n"),
+    );
   }
   private closeDialog(): void {
     this.tui.hideOverlay();
@@ -933,6 +952,19 @@ export class TerminalApp {
           await app.apply(diff.token);
         break;
       }
+      case "images":
+        this.showDetails(
+          "保存済み画像",
+          app.session.images?.length
+            ? app.session.images
+                .map(
+                  (ref, index) =>
+                    `${index + 1}. ${ref.name}\n${ref.id}\n${ref.mimeType} · ${ref.width}×${ref.height} · ${ref.bytes} bytes\n元画像: ${app.imagePath(ref)}`,
+                )
+                .join("\n\n")
+            : '画像はありません。@画像.png または @"空白を含む画像.jpg" で添付できます。SSH では接続先の作業ディレクトリからの相対パスを指定してください。',
+        );
+        break;
       case "artifacts":
       case "tools":
         if (
@@ -1080,8 +1112,9 @@ export class TerminalApp {
     if (action === "edit") {
       const text = await this.prompt("待機入力を編集", item.text);
       if (text !== undefined) {
-        await app.attachments(text);
-        app.editQueued(item.id, text);
+        const preview = await app.previewInput(text);
+        if (await this.confirmInput(preview))
+          app.editQueued(item.id, text, preview);
       }
     }
     if (action === "cancel") app.cancelQueued(item.id);

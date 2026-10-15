@@ -13,7 +13,19 @@ import { runFailureState } from "./run-state.js";
 import { Sandbox } from "./sandbox.js";
 import { Store } from "./storage.js";
 import { TaskExecutor } from "./task-executor.js";
-import { AgentError, type Run, type Runtime, type WorkKind } from "./types.js";
+import {
+  AgentError,
+  type DataClass,
+  type ImageReference,
+  type Run,
+  type Runtime,
+  type WorkKind,
+} from "./types.js";
+import {
+  loadStoredImage,
+  maxConversationImageBytes,
+  maxConversationImages,
+} from "./images.js";
 import {
   atomicWrite,
   canonical,
@@ -45,6 +57,7 @@ export interface NewRun {
   workspace?: string;
   includeUntracked?: boolean;
   inputs?: string[];
+  images?: ImageReference[];
   checks?: string[];
   mustKeep?: string[];
   model?: string;
@@ -89,6 +102,31 @@ export class Harness {
     if (options.kind === "coding" && !workspace)
       throw new AgentError("WORKSPACE", "Coding requires --workspace");
     if (workspace) await ensureOutsideWorkspace(this.paths, workspace);
+    const images = [
+      ...new Map(
+        (options.images ?? []).map((reference) => [reference.id, reference]),
+      ).values(),
+    ];
+    const dataLevels: DataClass[] = ["public", "private", "restricted"];
+    const imageDataClass = images.reduce<DataClass>(
+      (current, ref) =>
+        dataLevels.indexOf(ref.dataClass) > dataLevels.indexOf(current)
+          ? ref.dataClass
+          : current,
+      options.dataClass ?? this.config.defaults.dataClass,
+    );
+    const imageLocalOnly =
+      (options.localOnly ?? false) || images.some((ref) => ref.localOnly);
+    if (
+      images.length > maxConversationImages ||
+      images.reduce((sum, ref) => sum + ref.bytes, 0) >
+        maxConversationImageBytes
+    )
+      throw new AgentError(
+        "IMAGE_LIMIT",
+        "Image count or cumulative bytes exceed the conversation limit",
+      );
+    for (const ref of images) await loadStoredImage(this.paths, ref);
     for (const check of options.checks ?? [])
       if (!this.config.checks[check])
         throw new AgentError(
@@ -104,8 +142,8 @@ export class Harness {
       objective: options.objective,
       kind: options.kind,
       mode: options.mode ?? this.config.defaults.mode,
-      dataClass: options.dataClass ?? this.config.defaults.dataClass,
-      localOnly: options.localOnly ?? false,
+      dataClass: imageDataClass,
+      localOnly: imageLocalOnly,
       workspace,
       model: options.model,
       reviewer: options.reviewer,
@@ -117,6 +155,7 @@ export class Harness {
       configHash: configHash(this.config),
       tasks: [],
       inputs: [],
+      images: images.length ? structuredClone(images) : undefined,
       checks: options.checks ?? [],
       mustKeep: options.mustKeep ?? [],
       planAttempts: 0,
@@ -315,6 +354,8 @@ export class Harness {
           "PREPARATION_INCOMPLETE",
           "Input snapshot was interrupted; create a new run from the original request",
         );
+      for (const ref of run.images ?? [])
+        await loadStoredImage(this.paths, ref);
       if (run.elapsedMs >= this.config.limits.maxSeconds * 1000)
         throw new AgentError("BUDGET", "Run time budget exhausted");
       const unknown = this.store

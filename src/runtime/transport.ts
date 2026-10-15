@@ -10,6 +10,12 @@ import { endpointFetch } from "../network.js";
 import { AgentError, type RuntimeRequest } from "../types.js";
 import { endpoint } from "./providers.js";
 import { StreamCompletion } from "./stream.js";
+import {
+  maxConversationImageBytes,
+  maxConversationImages,
+  validateImage,
+} from "../images.js";
+import { sha256 } from "../util.js";
 export function normalizePayload(
   payload: unknown,
   connection: Connection,
@@ -103,8 +109,65 @@ export function guardModelStream(
             "MODEL_SWITCH",
             "Model changes inside a task are forbidden",
           );
-        const bytes = Buffer.byteLength(JSON.stringify(context));
-        const reservation = request.beforeRequest(bytes);
+        const imageData = new Map<string, { data: Buffer; mimeType: string }>();
+        const visitImages = (value: unknown): void => {
+          if (!value || typeof value !== "object") return;
+          if (Array.isArray(value)) {
+            for (const item of value) visitImages(item);
+            return;
+          }
+          const record = value as Record<string, unknown>;
+          if (
+            record.type === "image" &&
+            typeof record.data === "string" &&
+            typeof record.mimeType === "string"
+          ) {
+            const data = Buffer.from(record.data, "base64");
+            if (data.toString("base64") !== record.data)
+              throw new AgentError(
+                "IMAGE_INVALID",
+                "Invalid image in model history",
+              );
+            const digest = sha256(data);
+            imageData.set(digest, { data, mimeType: record.mimeType });
+          }
+          for (const item of Object.values(record)) visitImages(item);
+        };
+        visitImages(context);
+        if (
+          imageData.size > maxConversationImages ||
+          [...imageData.values()].reduce(
+            (total, image) => total + image.data.length,
+            0,
+          ) > maxConversationImageBytes
+        )
+          throw new AgentError(
+            "IMAGE_LIMIT",
+            "Image history exceeds the conversation image limits",
+          );
+        for (const image of imageData.values())
+          await validateImage(image.data, image.mimeType);
+        const textContext = JSON.parse(JSON.stringify(context)) as unknown;
+        const removeImageData = (value: unknown): void => {
+          if (!value || typeof value !== "object") return;
+          if (Array.isArray(value)) {
+            for (const item of value) removeImageData(item);
+            return;
+          }
+          const record = value as Record<string, unknown>;
+          if (record.type === "image") record.data = "";
+          for (const item of Object.values(record)) removeImageData(item);
+        };
+        removeImageData(textContext);
+        const textBytes = Buffer.byteLength(JSON.stringify(textContext));
+        const imageCount = imageData.size;
+        const estimatedImageTokens = imageCount * 8192;
+        const bytes = textBytes + estimatedImageTokens * 3;
+        const reservation = request.beforeRequest(
+          bytes,
+          imageCount,
+          estimatedImageTokens,
+        );
         const signal = AbortSignal.any([
           request.signal,
           AbortSignal.timeout(timeoutSeconds * 1000),
@@ -204,7 +267,13 @@ export function guardModelStream(
           message: result,
         });
       } catch (error) {
-        lastFailure = error;
+        lastFailure =
+          error instanceof AgentError
+            ? error
+            : new AgentError(
+                "PROVIDER",
+                "Model request failed; inspect connection status",
+              );
         output.push({
           type: "error",
           reason: "error",

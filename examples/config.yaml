@@ -54,6 +54,7 @@ models:
     roles: [lead, worker]
     kinds: [coding, research, writing]
     tools: false
+    images: false
     priority: 20
     contextWindow: 32000
     maxOutputTokens: 4096
@@ -63,6 +64,7 @@ models:
     roles: [lead, worker, reviewer]
     kinds: [coding, research, writing]
     tools: false
+    images: false
     priority: 10
   japanese:
     connection: sarashina
@@ -70,12 +72,14 @@ models:
     roles: [worker, reviewer]
     kinds: [writing, research]
     tools: false
+    images: false
   offline:
     connection: local
     id: REPLACE_WITH_LOCAL_MODEL_ID
     roles: [lead, worker, reviewer]
     kinds: [coding, research, writing]
     tools: false
+    images: false
 
 limits:
   maxRequests: 60

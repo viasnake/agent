@@ -40,6 +40,7 @@ export class Router {
     );
     if (
       !requested &&
+      !run.images?.length &&
       candidates.length > 1 &&
       this.config.routing.mode !== "rules"
     ) {
