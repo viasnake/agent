@@ -1,8 +1,5 @@
 import { Option } from "commander";
-import {
-  FirecrackerEnvironment,
-  requireHostSupport,
-} from "../execution/firecracker.js";
+import { FirecrackerEnvironment } from "../execution/firecracker.js";
 import type { EnvironmentCommand } from "../execution/types.js";
 import type { CliContext } from "./context.js";
 
@@ -19,7 +16,6 @@ export function registerEnvironmentCommands(cli: CliContext): void {
       "Check the fixed Firecracker installation and host prerequisites",
     )
     .action(async () => {
-      requireHostSupport();
       const result = await new FirecrackerEnvironment().diagnose(signal);
       print(result);
       if (!result.ok) process.exitCode = 1;
@@ -31,7 +27,6 @@ export function registerEnvironmentCommands(cli: CliContext): void {
       "Allocate a stopped environment with a private persistent disk",
     )
     .action(async () => {
-      requireHostSupport();
       print(await new FirecrackerEnvironment().create(signal));
     });
 
@@ -56,7 +51,6 @@ export function registerEnvironmentCommands(cli: CliContext): void {
         `${name.slice(0, 1).toUpperCase()}${name.slice(1)} a Firecracker environment`,
       )
       .action(async (id: string) => {
-        requireHostSupport();
         const result = await action(new FirecrackerEnvironment(), id);
         print(result === undefined ? { id, destroyed: true } : result);
       });
@@ -83,7 +77,6 @@ export function registerEnvironmentCommands(cli: CliContext): void {
         command: string[],
         options: { timeoutMs: number; maxOutputBytes: number },
       ) => {
-        requireHostSupport();
         const request: EnvironmentCommand = {
           argv: command,
           timeoutMs: options.timeoutMs,
