@@ -555,7 +555,7 @@ export class TerminalApp {
           (ref, index) =>
             `画像 ${index + 1}: ${ref.name} · ${ref.mimeType} · ${ref.width}×${ref.height} · ${ref.bytes} bytes\n参照ID: ${ref.id}`,
         ),
-        `送信区分: ${this.app!.session.dataClass}${this.app!.session.localOnly ? " / local-only" : ""}`,
+        `送信区分: ${preview.dataClass}${preview.localOnly ? " / local-only" : ""}`,
         ...(preview.images.length
           ? [
               "保存済み画像も含めて送信します。",

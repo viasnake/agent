@@ -24,7 +24,7 @@ export class Planner {
       const writer = await this.router.select(
         run,
         "worker",
-        run.kind !== "chat" || run.inputs.length > 0 || !!run.images?.length,
+        run.kind !== "chat" || run.inputs.length > 0,
         signal,
         run.model,
       );

@@ -19,6 +19,8 @@ export interface PendingInput {
   previewDataClass?: DataClass;
   previewLocalOnly?: boolean;
   previewKind?: WorkKind;
+  previewModel?: string;
+  previewStrategy?: Run["mode"];
 }
 export interface Conversation {
   id: string;

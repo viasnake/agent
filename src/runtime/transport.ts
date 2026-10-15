@@ -13,6 +13,7 @@ import { StreamCompletion } from "./stream.js";
 import {
   maxConversationImageBytes,
   maxConversationImages,
+  maxImageBytes,
   validateImage,
 } from "../images.js";
 import { sha256 } from "../util.js";
@@ -110,6 +111,8 @@ export function guardModelStream(
             "Model changes inside a task are forbidden",
           );
         const imageData = new Map<string, { data: Buffer; mimeType: string }>();
+        let imageOccurrences = 0;
+        let occurrenceBytes = 0;
         const visitImages = (value: unknown): void => {
           if (!value || typeof value !== "object") return;
           if (Array.isArray(value)) {
@@ -117,33 +120,76 @@ export function guardModelStream(
             return;
           }
           const record = value as Record<string, unknown>;
-          if (
-            record.type === "image" &&
-            typeof record.data === "string" &&
-            typeof record.mimeType === "string"
-          ) {
-            const data = Buffer.from(record.data, "base64");
-            if (data.toString("base64") !== record.data)
+          if (record.type === "image") {
+            if (
+              typeof record.data !== "string" ||
+              typeof record.mimeType !== "string"
+            )
               throw new AgentError(
                 "IMAGE_INVALID",
                 "Invalid image in model history",
               );
-            const digest = sha256(data);
-            imageData.set(digest, { data, mimeType: record.mimeType });
+            const encoded = record.data;
+            const maxEncodedBytes = Math.ceil(maxImageBytes / 3) * 4;
+            if (
+              encoded.length > maxEncodedBytes ||
+              encoded.length % 4 !== 0 ||
+              !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+                encoded,
+              )
+            )
+              throw new AgentError(
+                "IMAGE_INVALID",
+                "Invalid image in model history",
+              );
+            const padding = encoded.endsWith("==")
+              ? 2
+              : encoded.endsWith("=")
+                ? 1
+                : 0;
+            const decodedBytes = (encoded.length / 4) * 3 - padding;
+            if (!decodedBytes || decodedBytes > maxImageBytes)
+              throw new AgentError(
+                "IMAGE_SIZE",
+                "Image history exceeds the per-image size limit",
+              );
+            imageOccurrences++;
+            occurrenceBytes += decodedBytes;
+            if (
+              imageOccurrences > maxConversationImages ||
+              occurrenceBytes > maxConversationImageBytes
+            )
+              throw new AgentError(
+                "IMAGE_LIMIT",
+                "Image history exceeds the conversation image limits",
+              );
+            const digest = sha256(encoded);
+            const existing = imageData.get(digest);
+            if (existing && existing.mimeType !== record.mimeType)
+              throw new AgentError(
+                "IMAGE_FORMAT",
+                "Conflicting image MIME types",
+              );
+            if (!existing) {
+              const data = Buffer.from(encoded, "base64");
+              if (
+                data.length !== decodedBytes ||
+                data.toString("base64") !== encoded
+              )
+                throw new AgentError(
+                  "IMAGE_INVALID",
+                  "Invalid image in model history",
+                );
+              imageData.set(digest, { data, mimeType: record.mimeType });
+            }
           }
           for (const item of Object.values(record)) visitImages(item);
         };
         visitImages(context);
-        if (
-          imageData.size > maxConversationImages ||
-          [...imageData.values()].reduce(
-            (total, image) => total + image.data.length,
-            0,
-          ) > maxConversationImageBytes
-        )
+        if (imageOccurrences && !model.input.includes("image"))
           throw new AgentError(
-            "IMAGE_LIMIT",
-            "Image history exceeds the conversation image limits",
+            "NO_IMAGE_MODEL",
+            `Model ${model.id} does not accept image content`,
           );
         for (const image of imageData.values())
           await validateImage(image.data, image.mimeType);
@@ -160,7 +206,7 @@ export function guardModelStream(
         };
         removeImageData(textContext);
         const textBytes = Buffer.byteLength(JSON.stringify(textContext));
-        const imageCount = imageData.size;
+        const imageCount = imageOccurrences;
         const estimatedImageTokens = imageCount * 8192;
         const bytes = textBytes + estimatedImageTokens * 3;
         const reservation = request.beforeRequest(

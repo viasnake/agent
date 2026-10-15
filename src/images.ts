@@ -65,6 +65,11 @@ export async function validateImage(
       "IMAGE_INVALID",
       "Image is malformed, truncated, animated, or cannot be fully decoded",
     );
+  if (signature === "image/png" && hasApngAnimationControl(bytes))
+    throw new AgentError(
+      "IMAGE_DIMENSIONS",
+      "Images must be static and at most 2048×2048 pixels",
+    );
   try {
     const options = {
       failOn: "warning" as const,
@@ -138,6 +143,24 @@ export function isImageSignature(bytes: Buffer): boolean {
     (bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
       bytes.subarray(8, 12).toString("ascii") === "WEBP")
   );
+}
+
+function hasApngAnimationControl(bytes: Buffer): boolean {
+  let offset = 8;
+  const maxChunks = Math.ceil(maxImageBytes / 12);
+  for (
+    let index = 0;
+    index < maxChunks && offset + 12 <= bytes.length;
+    index++
+  ) {
+    const length = bytes.readUInt32BE(offset);
+    if (length > bytes.length - offset - 12) return false;
+    const type = bytes.toString("ascii", offset + 4, offset + 8);
+    if (type === "acTL") return true;
+    if (type === "IEND") return false;
+    offset += length + 12;
+  }
+  return false;
 }
 
 export async function isImageFileSignature(path: string): Promise<boolean> {

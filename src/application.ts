@@ -68,6 +68,8 @@ export interface InputPreview {
   }[];
   images: ImageReference[];
   destinations: string[];
+  dataClass: DataClass;
+  localOnly: boolean;
 }
 interface InputSnapshot {
   text: string;
@@ -78,6 +80,8 @@ interface InputSnapshot {
   dataClass: DataClass;
   localOnly: boolean;
   kind: WorkKind;
+  strategy: Run["mode"];
+  model?: string;
 }
 export function inferKind(text: string, previous?: WorkKind): WorkKind {
   if (/\b(research|sources|citations)\b|調査|出典|根拠付き/i.test(text))
@@ -330,6 +334,8 @@ export class Application extends EventEmitter {
         dataClass: disclosure.dataClass,
         localOnly: disclosure.localOnly,
         kind,
+        strategy: this.session.strategy,
+        model: this.session.model,
         imageIds: images.map((ref) => ref.id),
       }),
     );
@@ -342,40 +348,84 @@ export class Application extends EventEmitter {
       dataClass: disclosure.dataClass,
       localOnly: disclosure.localOnly,
       kind,
+      strategy: this.session.strategy,
+      model: this.session.model,
     };
   }
   async previewInput(text: string): Promise<InputPreview> {
     const snapshot = await this.snapshotInput(text);
+    const destinations = this.imageDestinations(snapshot.images, snapshot);
     const preview: InputPreview = {
       text,
       attachments: structuredClone(snapshot.attachments),
       images: structuredClone(snapshot.images),
-      destinations: this.imageDestinations(snapshot.images, snapshot),
+      destinations,
+      dataClass: snapshot.dataClass,
+      localOnly: snapshot.localOnly,
     };
     this.previews.set(preview, snapshot);
     return preview;
   }
   private imageDestinations(
     images: ImageReference[],
-    snapshot: Pick<InputSnapshot, "dataClass" | "localOnly" | "kind">,
+    snapshot: Pick<
+      InputSnapshot,
+      "dataClass" | "localOnly" | "kind" | "attachments" | "strategy" | "model"
+    >,
   ): string[] {
     if (!images.length) return [];
     const kind = snapshot.kind;
     const run = {
       kind,
+      mode: snapshot.strategy,
       dataClass: snapshot.dataClass,
       localOnly: snapshot.localOnly,
+      images,
+      inputs: snapshot.attachments
+        .filter((attachment) => !attachment.mimeType)
+        .map((attachment) => attachment.path),
     } as Run;
+    const workerNeedsTools =
+      kind !== "chat" ||
+      snapshot.attachments.some((attachment) => !attachment.mimeType);
+    const candidates = {
+      lead: modelCandidates(this.config, run, "lead", true),
+      worker: modelCandidates(this.config, run, "worker", workerNeedsTools),
+      reviewer: modelCandidates(this.config, run, "reviewer", true),
+    };
+    const requiredRoles =
+      kind === "chat"
+        ? (["worker"] as const)
+        : snapshot.strategy === "assisted"
+          ? (["lead", "worker"] as const)
+          : snapshot.strategy === "reviewed"
+            ? (["worker", "reviewer"] as const)
+            : (["worker"] as const);
+    const requestedRole =
+      kind !== "chat" && snapshot.strategy === "assisted" ? "lead" : "worker";
+    const selectedWorker =
+      snapshot.model && candidates.worker.includes(snapshot.model)
+        ? snapshot.model
+        : candidates.worker[0];
+    const reviewerCandidates =
+      kind !== "chat" && snapshot.strategy === "reviewed"
+        ? modelCandidates(this.config, run, "reviewer", true, selectedWorker)
+        : candidates.reviewer;
+    const rolesForAlternatives = new Set<string>();
+    for (const role of requiredRoles) rolesForAlternatives.add(role);
+    if (kind !== "chat" && snapshot.strategy === "assisted")
+      rolesForAlternatives.add("reviewer");
     const aliases = new Set<string>();
-    for (const role of ["lead", "worker", "reviewer"] as const)
-      for (const alias of modelCandidates(
-        this.config,
-        run,
-        role,
-        kind !== "chat",
-      ))
-        aliases.add(alias);
-    return [...aliases]
+    for (const role of rolesForAlternatives) {
+      const eligible =
+        role === "reviewer" &&
+        kind !== "chat" &&
+        snapshot.strategy === "reviewed"
+          ? reviewerCandidates
+          : candidates[role as keyof typeof candidates];
+      for (const alias of eligible) aliases.add(alias);
+    }
+    const destinations = [...aliases]
       .map((alias) => {
         const connection =
           this.config.connections[this.config.models[alias]!.connection]!;
@@ -393,6 +443,24 @@ export class Application extends EventEmitter {
         return `${alias} — ${connection.type}/${this.config.models[alias]!.connection} — ${target}`;
       })
       .sort();
+    const alternatives = destinations.length
+      ? ` Authorized image-capable alternatives: ${destinations.join("; ")}.`
+      : " No authorized image-capable alternatives are available.";
+    const missingRole = requiredRoles.find(
+      (role) =>
+        !(role === "reviewer" ? reviewerCandidates : candidates[role]).length,
+    );
+    if (missingRole)
+      throw new AgentError(
+        "NO_IMAGE_MODEL",
+        `No authorized image-capable ${missingRole} model is available for ${kind}/${snapshot.dataClass}${snapshot.localOnly ? "/local-only" : ""}.${alternatives}`,
+      );
+    if (snapshot.model && !candidates[requestedRole].includes(snapshot.model))
+      throw new AgentError(
+        "NO_IMAGE_MODEL",
+        `Selected model ${snapshot.model} is not an authorized image-capable ${requestedRole} model.${alternatives}`,
+      );
+    return destinations;
   }
   private approvedSnapshot(
     text: string,
@@ -406,8 +474,8 @@ export class Application extends EventEmitter {
       preview.text !== text ||
       canonical(preview.attachments) !== canonical(snapshot.attachments) ||
       canonical(preview.images) !== canonical(snapshot.images) ||
-      canonical(preview.destinations) !==
-        canonical(this.imageDestinations(snapshot.images, snapshot))
+      preview.dataClass !== snapshot.dataClass ||
+      preview.localOnly !== snapshot.localOnly
     )
       throw new AgentError(
         "IMAGE_PREVIEW",
@@ -420,6 +488,14 @@ export class Application extends EventEmitter {
       throw new AgentError(
         "IMAGE_PREVIEW_STALE",
         "Configuration changed after preview; review the input and destinations again",
+      );
+    if (
+      canonical(preview.destinations) !==
+      canonical(this.imageDestinations(snapshot.images, snapshot))
+    )
+      throw new AgentError(
+        "IMAGE_PREVIEW",
+        "Input preview destinations changed; review the input again",
       );
     const current = this.effectiveDisclosure(snapshot.images);
     const previous = this.session.latestRunId
@@ -437,12 +513,17 @@ export class Application extends EventEmitter {
         dataClass: current.dataClass,
         localOnly: current.localOnly,
         kind,
+        strategy: this.session.strategy,
+        model: this.session.model,
         imageIds: snapshot.images.map((ref) => ref.id),
       }),
     );
     if (
       snapshot.images.length &&
-      (currentBinding !== snapshot.destinationBinding || kind !== snapshot.kind)
+      (currentBinding !== snapshot.destinationBinding ||
+        kind !== snapshot.kind ||
+        this.session.strategy !== snapshot.strategy ||
+        this.session.model !== snapshot.model)
     )
       throw new AgentError(
         "IMAGE_PREVIEW_STALE",
@@ -506,6 +587,8 @@ export class Application extends EventEmitter {
       previewDataClass: snapshot.dataClass,
       previewLocalOnly: snapshot.localOnly,
       previewKind: snapshot.kind,
+      previewModel: snapshot.model,
+      previewStrategy: snapshot.strategy,
     };
     if (!this.session.latestRunId && this.session.name === "新しい会話")
       this.session.name = text.split("\n")[0]!;
@@ -544,6 +627,8 @@ export class Application extends EventEmitter {
     item.previewDataClass = snapshot?.dataClass;
     item.previewLocalOnly = snapshot?.localOnly;
     item.previewKind = snapshot?.kind;
+    item.previewModel = snapshot?.model;
+    item.previewStrategy = snapshot?.strategy;
     if (snapshot) this.session.images = structuredClone(snapshot.images);
     this.save();
   }
@@ -635,6 +720,8 @@ export class Application extends EventEmitter {
           dataClass: input.previewDataClass,
           localOnly: input.previewLocalOnly,
           kind,
+          strategy: input.previewStrategy,
+          model: input.previewModel,
           imageIds: images.map((ref) => ref.id),
         }),
       );
@@ -643,6 +730,8 @@ export class Application extends EventEmitter {
         input.previewConfigHash !== configHash(this.config) ||
         input.previewBinding !== binding ||
         input.previewKind !== kind ||
+        input.previewStrategy !== this.session.strategy ||
+        input.previewModel !== this.session.model ||
         disclosure.dataClass !== input.previewDataClass ||
         disclosure.localOnly !== input.previewLocalOnly
       )
@@ -650,17 +739,16 @@ export class Application extends EventEmitter {
           "IMAGE_PREVIEW_STALE",
           "Queued image input needs a new preview and confirmation after configuration or privacy changes",
         );
-      if (
-        !this.imageDestinations(images, {
-          dataClass: disclosure.dataClass,
-          localOnly: disclosure.localOnly,
-          kind,
-        }).length
-      )
-        throw new AgentError(
-          "NO_IMAGE_MODEL",
-          "No authorized image-capable model is available. Enable images only for a capable model in /settings.",
-        );
+      this.imageDestinations(images, {
+        dataClass: disclosure.dataClass,
+        localOnly: disclosure.localOnly,
+        kind,
+        attachments: fileReferences(input.text)
+          .filter((path) => !isImagePath(path))
+          .map((path) => ({ path, bytes: 0 })),
+        strategy: input.previewStrategy!,
+        model: input.previewModel,
+      });
     }
     const config = structuredClone(this.config);
     const requestDisclosure = this.effectiveDisclosure(images);

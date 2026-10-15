@@ -162,6 +162,48 @@ test("edits reverted to their saved value close without confirmation", async () 
   assert.equal(confirms, 0);
 });
 
+test("legacy model config without images can enable the settings toggle", async () => {
+  let config = testConfig();
+  delete config.models.worker!.images;
+  let saves = 0;
+  let editCalls = 0;
+  const app = {
+    get config() {
+      return config;
+    },
+    session: {
+      checks: [],
+      dataClass: "private",
+      localOnly: false,
+      includeUntracked: false,
+    },
+    async saveConfiguration(raw: unknown) {
+      config = validateConfig(raw);
+      saves++;
+    },
+  } as unknown as Application;
+  await new SettingsDialog(app, {
+    edit: async (_title, fields) => {
+      if (editCalls++) return undefined;
+      const imageToggle = fields.find(
+        (field) =>
+          field.value === JSON.stringify(["models", "worker", "images"]),
+      );
+      assert.equal(imageToggle?.current, false);
+      return {
+        value: JSON.stringify(["models", "worker", "images"]),
+        text: "true",
+      };
+    },
+    choose: async () => undefined,
+    prompt: async () => undefined,
+    confirm: async () => true,
+    notify: () => {},
+  }).open();
+  assert.equal(config.models.worker!.images, true);
+  assert.equal(saves, 1);
+});
+
 test("added checks join pending config and session changes", async () => {
   let config = testConfig();
   const session = {
