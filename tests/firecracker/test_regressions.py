@@ -350,10 +350,24 @@ class LifecycleDurabilityTests(unittest.TestCase):
                 self.assertTrue(metadata_path.exists())
                 self.assertTrue((Path(config["state_dir"]) / ENV_ID).exists())
                 retained = json.loads(metadata_path.read_text(encoding="utf-8"))
+                self.assertEqual(retained["state"], "failed")
                 if failure == "netns":
                     self.assertEqual(retained["netns"], f"local-agent-{ENV_ID}")
                 else:
                     self.assertTrue(Path(metadata["jail_root"]).exists())
+
+    def test_stop_retains_inferred_namespace_after_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, metadata = self._environment(Path(temporary))
+            metadata["state"] = "starting"
+            with patch.object(helper, "_kill_cgroup"), patch.object(
+                helper, "_destroy_netns", side_effect=OSError("namespace busy")
+            ):
+                with self.assertRaises(helper.HelperError):
+                    helper._stop(metadata, config)
+            retained = json.loads(helper._metadata_path(config, ENV_ID).read_text())
+            self.assertEqual(retained["state"], "failed")
+            self.assertEqual(retained["netns"], f"local-agent-{ENV_ID}")
 
     def test_start_failed_state_reclaims_before_reusing_runtime_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

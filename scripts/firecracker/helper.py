@@ -855,6 +855,7 @@ def _stop_inner(
         f"local-agent-{env_id}" if metadata["state"] == "starting" else None
     )
     if netns:
+        metadata["netns"] = netns
         try:
             _destroy_netns(netns)
         except (HelperError, OSError, subprocess.SubprocessError) as error:
@@ -875,7 +876,7 @@ def _stop_inner(
             "CLEANUP_UNKNOWN", "Could not remove the Firecracker jail"
         )
         cleanup_error.__cause__ = error
-    metadata["state"] = "failed" if uncertain else "stopped"
+    metadata["state"] = "failed" if uncertain or cleanup_error is not None else "stopped"
     _write_json(_metadata_path(config, env_id), metadata)
     if cleanup_error is not None:
         raise cleanup_error
