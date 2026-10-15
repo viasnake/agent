@@ -4,9 +4,10 @@ import os
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).parents[2]
@@ -116,10 +117,104 @@ class InstallationContractTests(unittest.TestCase):
             (tree / "usr/bin/python3").symlink_to("/usr/bin/python3.12")
             installer._require_guest_executable(tree, "/usr/bin/python3")
 
+    def test_ssh_socket_activation_and_cloud_init_are_masked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            tree = Path(temporary) / "rootfs"
+            services = (
+                "ssh.service",
+                "sshd.service",
+                "ssh.socket",
+                "sshd.socket",
+                "cloud-init.service",
+                "cloud-init-local.service",
+                "cloud-config.service",
+                "cloud-final.service",
+            )
+            for target in ("multi-user.target.wants", "sockets.target.wants"):
+                wants = installer._guest_directory(
+                    tree, f"/etc/systemd/system/{target}"
+                )
+                for service in services:
+                    (wants / service).symlink_to(f"/usr/lib/systemd/system/{service}")
+            installer._mask_guest_services(tree)
+            for target in ("multi-user.target.wants", "sockets.target.wants"):
+                wants = tree / "etc/systemd/system" / target
+                for service in services:
+                    self.assertFalse((wants / service).is_symlink())
+                    self.assertFalse((wants / service).exists())
+            for service in services:
+                self.assertEqual(
+                    os.readlink(tree / "etc/systemd/system" / service), "/dev/null"
+                )
+
 
 class GuestTransportTests(unittest.TestCase):
-    def _serve(self, directory: Path, acknowledgement: bytes = b"OK 1073741824\n", *, close_early: bool = False):
-        socket_path = directory / "run" / "vsock.sock"
+    def test_installed_vsock_path_fits_linux_unix_socket_limit(self):
+        path = helper.FIXED_JAILER_DIR / "firecracker" / ENV_ID / "root" / helper.VSOCK_PATH.relative_to("/")
+        self.assertEqual(len(os.fsencode(path)), 103)
+
+    def test_connection_retries_until_the_guest_listener_is_ready(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            listener, thread, errors = self._serve(directory, retry_once=True)
+            try:
+                result = helper._authenticated_request(
+                    self._metadata(directory), {"op": "ready"}, 10_000
+                )
+            finally:
+                listener.close()
+                thread.join(timeout=5)
+                (directory / helper.VSOCK_PATH.relative_to("/")).unlink(missing_ok=True)
+            self.assertEqual(errors, [])
+            self.assertIs(result["ok"], True)
+            self.assertEqual(result["id"], ENV_ID)
+
+    def test_connection_retries_refused_proxy_before_handshake(self):
+        first = Mock()
+        second = Mock()
+        first.connect.side_effect = FileNotFoundError("proxy not created yet")
+        with patch.object(
+            helper.socket, "socket", side_effect=(first, second)
+        ) as socket_factory, patch.object(helper, "_send_all"), patch.object(
+            helper, "_read_acknowledgement"
+        ), patch.object(helper.time, "sleep"):
+            connected = helper._connect_vsock(Path("/run/vsock"), time.monotonic() + 2)
+        self.assertIs(connected, second)
+        self.assertEqual(socket_factory.call_count, 2)
+        first.close.assert_called_once()
+        second.close.assert_not_called()
+
+    def test_transport_errors_do_not_retry(self):
+        with patch.object(helper.socket, "socket") as socket_factory:
+            channel = socket_factory.return_value
+            channel.connect.side_effect = PermissionError("transport denied")
+            with self.assertRaises(helper.HelperError) as caught:
+                helper._connect_vsock(Path("/run/vsock"), time.monotonic() + 2)
+            self.assertEqual(caught.exception.code, "TRANSPORT")
+            socket_factory.assert_called_once()
+            channel.close.assert_called_once()
+
+    def test_truncated_acknowledgement_fails_closed(self):
+        host, guest = helper.socket.socketpair()
+        try:
+            guest.sendall(b"OK ")
+            guest.close()
+            with self.assertRaises(helper.HelperError) as caught:
+                helper._read_acknowledgement(host, time.monotonic() + 2)
+            self.assertEqual(caught.exception.code, "TRANSPORT")
+        finally:
+            host.close()
+            guest.close()
+
+    def _serve(
+        self,
+        directory: Path,
+        acknowledgement: bytes = b"OK 1073741824\n",
+        *,
+        close_early: bool = False,
+        retry_once: bool = False,
+    ):
+        socket_path = directory / helper.VSOCK_PATH.relative_to("/")
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(os.fspath(socket_path))
@@ -128,25 +223,27 @@ class GuestTransportTests(unittest.TestCase):
 
         def serve() -> None:
             try:
-                channel, _ = listener.accept()
-            except OSError:
-                return
-            try:
-                request = b""
-                while not request.endswith(b"\n"):
-                    block = channel.recv(1)
-                    if not block:
+                for attempt in range(2 if retry_once else 1):
+                    channel, _ = listener.accept()
+                    try:
+                        request = b""
+                        while not request.endswith(b"\n"):
+                            block = channel.recv(1)
+                            if not block:
+                                return
+                            request += block
+                        if close_early or (retry_once and attempt == 0):
+                            if close_early:
+                                return
+                            continue
+                        channel.sendall(acknowledgement)
+                        runner._session(channel, ENV_ID, bytes.fromhex(SECRET))
                         return
-                    request += block
-                if close_early:
-                    channel.close()
-                    return
-                channel.sendall(acknowledgement)
-                runner._session(channel, ENV_ID, bytes.fromhex(SECRET))
+                    finally:
+                        channel.close()
             except BaseException as error:  # noqa: BLE001
                 errors.append(error)
             finally:
-                channel.close()
                 socket_path.unlink(missing_ok=True)
 
         thread = threading.Thread(target=serve, daemon=True)
@@ -176,7 +273,7 @@ class GuestTransportTests(unittest.TestCase):
             finally:
                 listener.close()
                 thread.join(timeout=5)
-                (directory / "run" / "vsock.sock").unlink(missing_ok=True)
+                (directory / helper.VSOCK_PATH.relative_to("/")).unlink(missing_ok=True)
             self.assertEqual(errors, [])
             self.assertIs(result["ok"], True)
             self.assertEqual(result["id"], ENV_ID)
@@ -203,7 +300,7 @@ class GuestTransportTests(unittest.TestCase):
             finally:
                 listener.close()
                 thread.join(timeout=5)
-                (directory / "run" / "vsock.sock").unlink(missing_ok=True)
+                (directory / helper.VSOCK_PATH.relative_to("/")).unlink(missing_ok=True)
             self.assertEqual(errors, [])
             self.assertEqual(executed["code"], 3)
 
@@ -402,6 +499,8 @@ class LifecycleDurabilityTests(unittest.TestCase):
                     with patch.object(
                         helper, "_read_metadata", return_value=metadata
                     ), patch.object(
+                        helper, "_verify_installation"
+                    ), patch.object(
                         helper, "_authenticated_request", side_effect=failure
                     ), patch.object(
                         helper,
@@ -422,6 +521,27 @@ class LifecycleDurabilityTests(unittest.TestCase):
                                 },
                             )
                     self.assertEqual(stopped, [True])
+
+    def test_execution_is_registered_for_cleanup_before_asset_verification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, metadata = self._environment(Path(temporary))
+            def verify(_config):
+                self.assertIn((config, ENV_ID), helper.ACTIVE)
+                raise helper.HelperError("INSTALLATION", "bad digest")
+            with patch.object(
+                helper, "_read_metadata", return_value=metadata
+            ), patch.object(
+                helper, "_verify_installation", side_effect=verify
+            ), patch.object(helper, "_stop") as stop, patch.object(
+                helper, "_authenticated_request"
+            ) as request:
+                with self.assertRaises(helper.HelperError):
+                    helper._operate(config, "execute", ENV_ID, {
+                        "argv": ["/bin/true"], "timeoutMs": 1000, "maxOutputBytes": 1024,
+                    })
+            stop.assert_called_once_with(metadata, config, failed=True)
+            request.assert_not_called()
+            self.assertNotIn((config, ENV_ID), helper.ACTIVE)
 
 
 class GuestReadinessTests(unittest.TestCase):

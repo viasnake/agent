@@ -130,8 +130,19 @@ network allowances、manifest、会話との環境 ID 紐付けはまだこの�
 
 ## 検証状況
 
-Python helper/Guest Runner unit tests と、Firecracker に限定した TypeScript tests は
-pass しています。実 KVM boot/integration は、特権 setup の承認待ちのためまだ実行
-していません。初期の v1.12 compatibility kernel/rootfs fixture は production-hardened
-image ではなく、管理者による patch・更新・再検証が必要です。この PR の公開範囲は
-専用 `agent environment` CLI のみで、TUI や `execution.backend` は変更しません。
+2026-10-15 に承認済みの Devin VM 内で実 KVM boot/integration を実行し、2件とも pass
+しました。guest boot/readiness、ディスク永続化、コマンド終了コード、process signal、
+出力上限、timeout、guest poweroff を実機で確認しました。SSH/sshd と cloud-init の8 unit
+が masked かつ inactive であることも、認証済み Guest Runner の execute から確認しています。
+
+Python helper/Guest Runner unit tests は 34 件 pass し、Firecracker 限定 TypeScript tests
+は 8 件 pass（実 KVM integration 2件を含む、skip なし）しました。キャンセル処理では、
+helper が固定 asset の SHA-256 を検証する間も環境を `ACTIVE` に登録するようにし、検証
+失敗時は guest request を送らず fail-closed cleanup します。500ms と 8000ms の実機
+cancellation timing の両方で `CANCELLED` と `failed` 状態を確認しました。
+
+`npm run check` と `npm run build` は TypeScript に変更がない状態で直近に pass しています。
+最終の `npm run format:check` も pass しました。初期の v1.12 compatibility kernel/rootfs
+fixture は production-hardened image ではなく、管理者による patch・更新・再検証が必要です。
+この PR の公開範囲は専用 `agent environment` CLI のみで、TUI や `execution.backend` は
+変更しません。

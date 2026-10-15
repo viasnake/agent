@@ -28,6 +28,7 @@ CONFIG_PATH = Path("/etc/local-agent/firecracker.json")
 FIXED_STATE_DIR = Path("/var/lib/local-agent-firecracker/state")
 FIXED_JAILER_DIR = Path("/var/lib/local-agent-firecracker/jailer")
 FIXED_CGROUP_PARENT = "local-agent-firecracker"
+VSOCK_PATH = Path("/run/vsock")
 FIXED_VMM_UIDS = [2000, 2001, 2002, 2003]
 MAX_REQUEST_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -174,10 +175,6 @@ def load_config(*, verify_installation: bool = True) -> dict[str, Any]:
         raise HelperError("INSTALLATION", "Configuration fields are not fixed")
     if config["firecracker_version"] != "1.16.2" or config["jailer_version"] != "1.16.2":
         raise HelperError("INSTALLATION", "Firecracker and jailer versions are not pinned")
-    paths = [Path(config[key]) for key in ("firecracker", "jailer", "kernel", "base_rootfs")]
-    if verify_installation:
-        for path in paths:
-            _safe_path(path, expect_file=True)
     for key in ("state_dir", "jailer_dir"):
         path = Path(config[key])
         _safe_path(path)
@@ -235,14 +232,20 @@ def load_config(*, verify_installation: bool = True) -> dict[str, Any]:
         if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
             raise HelperError("INSTALLATION", "Digest pins must be lowercase SHA256 values")
     if verify_installation:
-        for key, path in zip(("firecracker", "jailer", "kernel", "base_rootfs"), paths):
-            if _sha256(path) != pins[key]:
-                raise HelperError("INSTALLATION", f"Digest mismatch for {key}")
-        if Path(config["firecracker"]).name != "firecracker":
-            raise HelperError("INSTALLATION", "Firecracker binary name must be pinned")
-        if Path(config["jailer"]).name != "jailer":
-            raise HelperError("INSTALLATION", "Jailer binary name must be pinned")
+        _verify_installation(config)
     return config
+
+
+def _verify_installation(config: dict[str, Any]) -> None:
+    for key in ("firecracker", "jailer", "kernel", "base_rootfs"):
+        path = Path(config[key])
+        _safe_path(path, expect_file=True)
+        if _sha256(path) != config["pins"][key]:
+            raise HelperError("INSTALLATION", f"Digest mismatch for {key}")
+    if Path(config["firecracker"]).name != "firecracker":
+        raise HelperError("INSTALLATION", "Firecracker binary name must be pinned")
+    if Path(config["jailer"]).name != "jailer":
+        raise HelperError("INSTALLATION", "Jailer binary name must be pinned")
 
 
 def _sudo_uid() -> int:
@@ -557,7 +560,9 @@ def _read_acknowledgement(channel: socket.socket, deadline: float) -> None:
         channel.settimeout(_remaining(deadline))
         block = channel.recv(1)
         if not block:
-            raise HelperError("TRANSPORT", "Guest closed the vsock control connection")
+            if not acknowledgement:
+                raise HelperError("VSOCK_UNAVAILABLE", "Guest has not accepted the vsock connection")
+            raise HelperError("TRANSPORT", "Guest vsock acknowledgement ended early")
         acknowledgement += block
     match = re.fullmatch(rb"OK (\d{1,10})\n", acknowledgement)
     if match is None or not 0 <= int(match.group(1)) <= 0xFFFFFFFF:
@@ -571,17 +576,32 @@ def _connect_vsock(path: Path, deadline: float) -> socket.socket:
         try:
             channel.settimeout(remaining)
             channel.connect(os.fspath(path))
-            _send_all(channel, b"CONNECT 5000\n", deadline)
-            _read_acknowledgement(channel, deadline)
-            return channel
-        except HelperError:
+        except (FileNotFoundError, ConnectionRefusedError):
             channel.close()
-            raise
-        except OSError:
+        except TimeoutError as error:
             channel.close()
-            if deadline - time.monotonic() <= 0.05:
-                raise HelperError("READINESS", "Guest Runner did not accept a vsock connection") from None
-            time.sleep(0.05)
+            raise HelperError("TIMEOUT", "Guest vsock connection exceeded the host deadline") from error
+        except OSError as error:
+            channel.close()
+            raise HelperError("TRANSPORT", "Guest vsock transport failed") from error
+        else:
+            try:
+                _send_all(channel, b"CONNECT 5000\n", deadline)
+                _read_acknowledgement(channel, deadline)
+                return channel
+            except HelperError as error:
+                channel.close()
+                if error.code != "VSOCK_UNAVAILABLE":
+                    raise
+            except TimeoutError as error:
+                channel.close()
+                raise HelperError("TIMEOUT", "Guest vsock handshake exceeded the host deadline") from error
+            except OSError as error:
+                channel.close()
+                raise HelperError("TRANSPORT", "Guest vsock transport failed") from error
+        if deadline - time.monotonic() <= 0.05:
+            raise HelperError("READINESS", "Guest Runner did not accept a vsock connection") from None
+        time.sleep(0.05)
 
 
 def _wait_writable(channel: socket.socket, deadline: float | None) -> None:
@@ -660,7 +680,7 @@ def _canonical(value: dict[str, Any]) -> bytes:
 
 def _authenticated_request(metadata: dict[str, Any], payload: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
     deadline = time.monotonic() + min(timeout_ms, 605_000) / 1000
-    channel = _connect_vsock(Path(metadata["jail_root"]) / "run" / "vsock.sock", deadline)
+    channel = _connect_vsock(Path(metadata["jail_root"]) / VSOCK_PATH.relative_to("/"), deadline)
     secret = bytes.fromhex(metadata["secret"])
     environment_id = metadata["id"].encode()
     nonce = secrets.token_bytes(32).hex()
@@ -768,7 +788,7 @@ def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
                 "mem_size_mib": config["limits"]["memory_mib"],
                 "smt": False,
             },
-            "vsock": {"guest_cid": 3, "uds_path": "/run/vsock.sock"},
+            "vsock": {"guest_cid": 3, "uds_path": str(VSOCK_PATH)},
         }
         _write_json(jail_root / "config.json", vm_config)
         (jail_root / "config.json").chmod(0o644)
@@ -1002,6 +1022,7 @@ def _operate(config: dict[str, Any], operation: str, env_id: str | None = None, 
                 raise HelperError("INVALID_COMMAND", "Command limits exceed configured administrator limits")
             ACTIVE.append((config, env_id))
             try:
+                _verify_installation(config)
                 result = _authenticated_request(
                     metadata,
                     {
@@ -1085,7 +1106,7 @@ def main() -> int:
                 _require_root()
                 try:
                     config = load_config(
-                        verify_installation=request["op"] not in {"stop", "destroy"}
+                        verify_installation=request["op"] not in {"execute", "stop", "destroy"}
                     )
                 except HelperError:
                     if request["op"] not in {"stop", "destroy"}:

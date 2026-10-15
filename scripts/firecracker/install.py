@@ -220,6 +220,20 @@ def _guest_directory(tree: Path, guest_path: str, mode: int = 0o755) -> Path:
     return current
 
 
+def _mask_guest_services(tree: Path) -> None:
+    units = _guest_directory(tree, "/etc/systemd/system")
+    for service in (
+        "ssh.service", "sshd.service", "ssh.socket", "sshd.socket",
+        "cloud-init.service", "cloud-init-local.service", "cloud-config.service", "cloud-final.service",
+    ):
+        for target in ("multi-user.target.wants", "sockets.target.wants"):
+            wants = _guest_directory(tree, f"/etc/systemd/system/{target}")
+            (wants / service).unlink(missing_ok=True)
+        override = units / service
+        override.unlink(missing_ok=True)
+        override.symlink_to("/dev/null")
+
+
 def prepare_rootfs(source: Path, runner: Path, destination: Path) -> None:
     unsquashfs = shutil.which("unsquashfs")
     mkfs = shutil.which("mkfs.ext4")
@@ -248,8 +262,7 @@ def prepare_rootfs(source: Path, runner: Path, destination: Path) -> None:
                     fields[1] = "!"
                 lines.append(":".join(fields))
             shadow.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        for service in ("ssh.service", "sshd.service", "cloud-init.service", "cloud-init-local.service"):
-            (tree / "etc/systemd/system/multi-user.target.wants" / service).unlink(missing_ok=True)
+        _mask_guest_services(tree)
         _require_guest_executable(tree, "/usr/bin/python3")
         _require_guest_executable(tree, "/bin/sh")
         if not (tree / "lib/systemd/system").exists():
