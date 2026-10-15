@@ -478,22 +478,6 @@ export class TerminalApp {
       )
       .join("\n");
     this.progress.setText(preview);
-    this.input.placeholder = app.busy
-      ? width < 60
-        ? "追加指示を入力…"
-        : "作業への追加指示…  Alt+Enter で次の依頼"
-      : "@ ファイル  / コマンド";
-    this.input.heading = app.busy ? "作業中 · 追加指示を書く" : "依頼を書く";
-    const model = truncateToWidth(
-      safeText(app.session.model || "自動選択").replace(/\s+/g, " "),
-      Math.max(8, Math.min(28, width - 20)),
-    );
-    const mode = {
-      single: "単独",
-      reviewed: "レビュー付き",
-      assisted: "計画・委任",
-    }[app.session.strategy];
-    this.input.caption = `${model} · ${mode} · ${app.session.localOnly ? "ローカルのみ" : app.session.dataClass}`;
     const pending = app.session.queue[0];
     const notice = preparing
       ? ""
@@ -510,18 +494,7 @@ export class TerminalApp {
     );
     this.status.setText(
       [
-        theme.muted(
-          truncateToWidth(
-            app.busy
-              ? width < 60
-                ? "Ctrl+P 操作   Esc 停止"
-                : "Ctrl+P メニュー   Enter 追加指示   Esc 停止"
-              : width < 60
-                ? "Ctrl+P 操作   Enter 送信"
-                : "Ctrl+P 操作   Enter 送信   Ctrl+J 改行",
-            width,
-          ),
-        ),
+        ...(app.busy ? [theme.muted("作業中 · Esc 停止")] : []),
         ...(pending
           ? [
               theme.muted(
@@ -649,8 +622,6 @@ export class TerminalApp {
     return new Promise((resolve) => {
       const dialog = new Dialog(safeText(title));
       const control = editor(this.tui);
-      control.heading = "入力";
-      control.placeholder = "入力…";
       control.setText(safeText(value));
       const cancel = () => finish();
       const finish = (text?: string) => {
@@ -754,6 +725,7 @@ export class TerminalApp {
           [
             `会話: ${app.session.name}`,
             `作業場所: ${app.session.workspace}`,
+            `モデル: ${app.session.model || "自動選択"} · 構成: ${{ single: "単独", reviewed: "レビュー付き", assisted: "計画・委任" }[app.session.strategy]}`,
             `送信区分: ${app.session.dataClass} · ${app.session.localOnly ? "ローカルのみ" : "許可した接続を使用"}`,
             `状態: ${run ? runLabels[run.state] : "未実行"}`,
             run?.reason

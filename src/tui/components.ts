@@ -97,29 +97,17 @@ export function markdown(text: string): Markdown {
   return new Markdown(safeText(text), 0, 0, markdownTheme);
 }
 export class Composer extends Editor {
-  heading = "依頼を書く";
-  caption = "";
-  placeholder = "@ ファイル  / コマンド";
   override renderTopBorder(width: number, hidden: number): string {
-    return hidden
-      ? super.renderTopBorder(width, hidden)
-      : truncateToWidth(`  ${theme.strong(this.heading)}`, width, "", true);
+    return hidden ? super.renderTopBorder(width, hidden) : " ".repeat(width);
   }
   override renderBottomBorder(width: number, hidden: number): string {
-    return hidden
-      ? super.renderBottomBorder(width, hidden)
-      : truncateToWidth(`  ${this.caption}`, width, "…", true);
+    return hidden ? super.renderBottomBorder(width, hidden) : " ".repeat(width);
   }
   override render(width: number): string[] {
     const inner = Math.max(1, width - 2);
     // Keep Pi's editor, wrapping, cursor markers, paste and completion behavior.
     // Only its public border hooks and rendered rows receive presentation styles.
     const lines = super.render(inner);
-    if (!this.getText() && lines[1]) {
-      lines[1] =
-        lines[1]!.replace(/ +$/, "") +
-        theme.muted(truncateToWidth(this.placeholder, Math.max(0, inner - 4)));
-    }
     return lines.map(
       (line) =>
         theme.accent("▎ ") +
@@ -475,7 +463,7 @@ export class Dialog extends Container implements Focusable {
       super.render(Math.max(1, width - 4)),
       width < 48
         ? "Esc 戻る · Enter 決定"
-        : "Esc 戻る   Enter 決定   Ctrl+J 改行",
+        : "Esc 戻る   Enter 決定   Shift+Enter 改行",
       width,
     );
   }

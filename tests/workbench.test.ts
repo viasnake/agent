@@ -233,7 +233,13 @@ test("composer preserves Pi cursor markers, wrapping and complete confirmation p
   tui.requestRender = () => {};
   const input = editor(tui);
   input.focused = true;
-  input.caption = "local-worker · 単独";
+  assert.equal(
+    safeText(input.render(80).join(""))
+      .replaceAll(CURSOR_MARKER, "")
+      .replace(/[▎\s]/g, ""),
+    "",
+    "empty composer contains no labels, metadata or hints",
+  );
   for (const text of ["", "日本語 é\n次の依頼".repeat(5)]) {
     input.setText(text);
     for (const width of [20, 40, 80, 120]) {
@@ -254,6 +260,23 @@ test("composer preserves Pi cursor markers, wrapping and complete confirmation p
     40,
   );
   assert.ok(safeText(lines.join("")).replace(/[│ ]/g, "").includes(path));
+});
+
+test("composer uses Enter to send, Shift+Enter to add a line, and preserves pasted newlines", () => {
+  const tui = new TuiMainScreen(new ProcessTerminal());
+  tui.requestRender = () => {};
+  for (const newline of ["\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;2~", "\n"]) {
+    const input = editor(tui);
+    const sent: string[] = [];
+    input.onSubmit = (text) => sent.push(text);
+    input.handleInput("一行目");
+    input.handleInput(newline);
+    input.handleInput("\x1b[200~二行目\n三行目\x1b[201~");
+    assert.deepEqual(sent, [], "newline and paste must not submit");
+    assert.equal(input.getExpandedText(), "一行目\n二行目\n三行目");
+    input.handleInput("\r");
+    assert.deepEqual(sent, ["一行目\n二行目\n三行目"]);
+  }
 });
 
 test("conversation layout handles resize, CJK, long messages and color-free terminals", (t) => {
