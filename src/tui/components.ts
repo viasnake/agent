@@ -287,7 +287,10 @@ export class Picker implements Component, Focusable {
               "検索語を短くするか、Esc で戻れます。",
             ].map((line) => truncateToWidth(line, inner))),
         ...(selected?.description
-          ? [theme.muted(truncateToWidth(selected.description, inner))]
+          ? new Text(selected.description, 0, 0)
+              .render(inner)
+              .slice(0, 2)
+              .map((line) => theme.muted(truncateToWidth(line, inner)))
           : []),
         ...(this.extra ? this.extra.render(inner) : []),
         ...(this.filteredChoices.length > maxVisible
