@@ -28,7 +28,30 @@ jobs:
           printf '[Service]\nDelegate=cpu cpuset memory pids\n' | sudo tee "/etc/systemd/system/$user_unit.d/delegate.conf"
           sudo systemctl daemon-reload
           sudo loginctl enable-linger "$(id -un)"
-          sudo systemctl restart "$user_unit"
+          if ! sudo systemctl restart "$user_unit"; then
+            echo "::group::systemd user service diagnostics"
+            sudo systemctl status "$user_unit" --no-pager --full || true
+            sudo journalctl -b --no-pager -u "$user_unit" -n 100 || true
+            sudo systemctl show "$user_unit" --property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,ControlGroup,Delegate,DropInPaths || true
+            sudo systemctl cat "$user_unit" || true
+            echo "::endgroup::"
+            echo "::group::cgroup controller diagnostics"
+            uid=$(id -u)
+            for path in \
+              /sys/fs/cgroup/cgroup.controllers \
+              /sys/fs/cgroup/user.slice/cgroup.controllers \
+              "/sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.controllers" \
+              "/sys/fs/cgroup/user.slice/user-$uid.slice/$user_unit/cgroup.controllers"; do
+              echo "### $path"
+              if test -r "$path"; then
+                cat "$path"
+              else
+                echo "unavailable"
+              fi
+            done
+            echo "::endgroup::"
+            exit 1
+          fi
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           control_group=$(systemctl show "$user_unit" --property=ControlGroup --value)
           for controller in cpu cpuset memory pids; do
