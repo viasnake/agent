@@ -32,6 +32,8 @@ Tests compile to `.test-dist` and run sequentially because provider fixtures rep
 
 Use `AGENT_REQUIRE_SANDBOX=1 npm test` on Linux to fail instead of skipping unavailable isolation. For real rootless Podman tests, preload a Linux image and set `AGENT_TEST_PODMAN_IMAGE` to its digest-pinned reference, then run `AGENT_REQUIRE_PODMAN=1 npm test`. On macOS, set `AGENT_TEST_PODMAN_DIRECTORY` to an absolute directory shared with the VM. CI requires both backends on Linux; macOS jobs exercise synthetic Podman contracts.
 
+Linux rootless Podman also requires cgroup v2 controllers delegated to the user's systemd service. CI enables `cpu`, `cpuset`, `memory`, and `pids` for the runner before starting Podman and verifies their availability. This permits the sandbox's CPU, memory, and process limits to be enforced; missing delegation must not be worked around by removing limits or skipping the integration test. See the [rootless cgroup delegation guide](https://rootlesscontaine.rs/getting-started/common/cgroup2/).
+
 Live authentication, account-specific model access, provider output quality, graphical-terminal IME behavior and native macOS/Windows TUI operation require separate acceptance checks. PTY or synthetic tests do not establish them.
 
 ## Changes
