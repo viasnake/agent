@@ -65,7 +65,8 @@ Firecracker 環境は既存の TUI、Pi、Harness、SQLite、通常の sandbox �
    `jailer` に配置されます。installer は既存の deployment/state を上書きせず、
    destination の root ownership・symlink・writable ancestor を事前検査します。
    `--user` で指定した一つの非 root account だけに sudoers を限定し、`visudo -cf`
-   の検証後に atomic install します。runtime の `sudo` は `-n`、isolated Python、
+   の検証後に atomic install します。install 成功時点で、選択した account だけが
+   fixed helper を実行できる sudoers rule が有効になります。runtime の `sudo` は `-n`、isolated Python、
    fixed absolute helper のみを使い、caller の path、uid、image、jailer flags は
    受け取りません。管理者が先に cgroup v2 の CPU/memory/pids と empty network
    namespace の要件を確認してください。guest RAM の `memory_mib` に加えて固定
@@ -126,3 +127,11 @@ TUI の既存 Shell、TaskTools の host file operations、PTY、persistence、s
 network allowances、manifest、会話との環境 ID 紐付けはまだこの環境へ切り替わり
 ません。これらを混在させる `execution.backend` 変更は行わず、PR2 以降で全操作を
 同じ workspace 境界へ一括移行します。
+
+## 検証状況
+
+Python helper/Guest Runner unit tests と、Firecracker に限定した TypeScript tests は
+pass しています。実 KVM boot/integration は、特権 setup の承認待ちのためまだ実行
+していません。初期の v1.12 compatibility kernel/rootfs fixture は production-hardened
+image ではなく、管理者による patch・更新・再検証が必要です。この PR の公開範囲は
+専用 `agent environment` CLI のみで、TUI や `execution.backend` は変更しません。

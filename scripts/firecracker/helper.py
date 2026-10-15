@@ -744,8 +744,8 @@ def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
     metadata["state"] = "starting"
     _write_json(_metadata_path(config, metadata["id"]), metadata)
     jail_root = Path(metadata["jail_root"])
-    jail_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
+        jail_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         run_dir = jail_root / "run"
         run_dir.mkdir(mode=0o755, exist_ok=True)
         os.chown(run_dir, metadata["vmm_uid"], metadata["vmm_uid"])
@@ -757,29 +757,21 @@ def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
         os.chown(link, metadata["vmm_uid"], metadata["vmm_uid"])
         link.chmod(0o600)
         jail_root.chmod(0o755)
-    except BaseException:
-        _stop(metadata, config, failed=True)
-        raise
-    vm_config = {
-        "boot-source": {
-            "kernel_image_path": "/vmlinux",
-            "boot_args": f"console=ttyS0 reboot=k panic=1 root=/dev/vda rw rootwait agent.env_id={metadata['id']} agent.env_secret={metadata['secret']} init=/sbin/init",
-        },
-        "drives": [{"drive_id": "rootfs", "path_on_host": "/rootfs.ext4", "is_root_device": True, "is_read_only": False}],
-        "machine-config": {
-            "vcpu_count": config["limits"]["vcpu_count"],
-            "mem_size_mib": config["limits"]["memory_mib"],
-            "smt": False,
-        },
-        "vsock": {"guest_cid": 3, "uds_path": "/run/vsock.sock"},
-    }
-    try:
+        vm_config = {
+            "boot-source": {
+                "kernel_image_path": "/vmlinux",
+                "boot_args": f"console=ttyS0 reboot=k panic=1 root=/dev/vda rw rootwait agent.env_id={metadata['id']} agent.env_secret={metadata['secret']} init=/sbin/init",
+            },
+            "drives": [{"drive_id": "rootfs", "path_on_host": "/rootfs.ext4", "is_root_device": True, "is_read_only": False}],
+            "machine-config": {
+                "vcpu_count": config["limits"]["vcpu_count"],
+                "mem_size_mib": config["limits"]["memory_mib"],
+                "smt": False,
+            },
+            "vsock": {"guest_cid": 3, "uds_path": "/run/vsock.sock"},
+        }
         _write_json(jail_root / "config.json", vm_config)
         (jail_root / "config.json").chmod(0o644)
-    except BaseException:
-        _stop(metadata, config, failed=True)
-        raise
-    try:
         metadata["netns"] = _create_netns(metadata["id"])
         _write_json(_metadata_path(config, metadata["id"]), metadata)
         limits = config["limits"]
@@ -817,11 +809,11 @@ def _start(metadata: dict[str, Any], config: dict[str, Any]) -> None:
         if result.returncode:
             raise HelperError("START", result.stderr.strip() or "Jailer failed to start Firecracker")
         _ready(metadata, config, min(config["limits"]["start_ms"], 120_000))
+        metadata["state"] = "ready"
+        _write_json(_metadata_path(config, metadata["id"]), metadata)
     except BaseException:
         _stop(metadata, config, failed=True)
         raise
-    metadata["state"] = "ready"
-    _write_json(_metadata_path(config, metadata["id"]), metadata)
 
 
 def _sync_guest(metadata: dict[str, Any], config: dict[str, Any]) -> None:
@@ -846,39 +838,47 @@ def _stop_inner(
 ) -> None:
     env_id = metadata["id"]
     uncertain = failed
-    kill_error: HelperError | None = None
+    cleanup_error: HelperError | None = None
     if metadata["state"] in {"ready", "starting", "failed"}:
         if metadata["state"] == "ready" and not failed:
             try:
                 _sync_guest(metadata, config)
             except (HelperError, OSError, ValueError):
                 uncertain = True
-        try:
-            _kill_cgroup(config, env_id)
-        except HelperError as error:
-            kill_error = error
-            uncertain = True
+    try:
+        _kill_cgroup(config, env_id)
+    except HelperError as error:
+        metadata["state"] = "failed"
+        _write_json(_metadata_path(config, env_id), metadata)
+        raise error
     netns = metadata.get("netns") or (
-        f"local-agent-{env_id}" if metadata["state"] in {"ready", "starting", "failed"} else None
+        f"local-agent-{env_id}" if metadata["state"] == "starting" else None
     )
     if netns:
         try:
             _destroy_netns(netns)
-        except HelperError:
-            uncertain = True
-        metadata["netns"] = None
+        except (HelperError, OSError, subprocess.SubprocessError) as error:
+            cleanup_error = error if isinstance(error, HelperError) else HelperError(
+                "CLEANUP_UNKNOWN", "Could not remove the network namespace"
+            )
+            cleanup_error.__cause__ = error
+        else:
+            metadata["netns"] = None
     jail_root = Path(metadata["jail_root"])
     link = jail_root / "rootfs.ext4"
     try:
         link.unlink(missing_ok=True)
         if jail_root.parent.exists():
             shutil.rmtree(jail_root.parent, ignore_errors=False)
-    except OSError:
-        uncertain = True
+    except OSError as error:
+        cleanup_error = cleanup_error or HelperError(
+            "CLEANUP_UNKNOWN", "Could not remove the Firecracker jail"
+        )
+        cleanup_error.__cause__ = error
     metadata["state"] = "failed" if uncertain else "stopped"
     _write_json(_metadata_path(config, env_id), metadata)
-    if kill_error is not None:
-        raise kill_error
+    if cleanup_error is not None:
+        raise cleanup_error
     if uncertain and not failed:
         raise HelperError("UNKNOWN_RESULT", "The VM was reclaimed without a confirmed clean shutdown")
 
@@ -969,6 +969,10 @@ def _operate(config: dict[str, Any], operation: str, env_id: str | None = None, 
                     CLEANED.discard(env_id)
             if metadata["state"] not in {"stopped", "failed"}:
                 raise HelperError("STATE", "Environment is busy or in an unknown state")
+            if metadata["state"] == "failed":
+                _stop(metadata, config, failed=True)
+                metadata["state"] = "stopped"
+                _write_json(_metadata_path(config, env_id), metadata)
             ACTIVE.append((config, env_id))
             try:
                 _start(metadata, config)

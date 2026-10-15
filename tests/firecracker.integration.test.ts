@@ -62,19 +62,19 @@ test(
 );
 
 test(
-  "real Firecracker reports force poweroff and enforces output/time ceilings",
+  "real Firecracker reports guest-process signals and enforces output/time ceilings",
   { skip: !required },
   async () => {
     const environment = new FirecrackerEnvironment();
     const target = await environment.create();
     try {
       await environment.start(target.id);
-      const poweroff = await environment.execute(target.id, {
+      const signalExit = await environment.execute(target.id, {
         argv: ["/usr/bin/python3", "-c", "import os; os.kill(os.getpid(), 9)"],
         timeoutMs: 5000,
         maxOutputBytes: 128,
       });
-      assert.notEqual(poweroff.code, 0, JSON.stringify(poweroff));
+      assert.notEqual(signalExit.code, 0, JSON.stringify(signalExit));
 
       const output = await environment.execute(target.id, {
         argv: ["/bin/sh", "-c", "head -c 4096 /dev/zero"],
@@ -96,6 +96,15 @@ test(
       });
       assert.equal(timeout.code, 124, JSON.stringify(timeout));
       assert.ok(Date.now() - started < 5000);
+
+      await assert.rejects(
+        environment.execute(target.id, {
+          argv: ["/sbin/poweroff", "-f"],
+          timeoutMs: 5000,
+          maxOutputBytes: 128,
+        }),
+      );
+      assert.equal((await environment.status(target.id)).state, "failed");
     } finally {
       await environment.destroy(target.id);
     }

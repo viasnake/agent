@@ -400,7 +400,8 @@ def install(assets: Path, user: str) -> None:
     _atomic_write(CONFIG, json.dumps(config, indent=2) + "\n", 0o600)
     _install_sudoers(account.pw_name)
     print(f"installed Firecracker {VERSION}; transformed rootfs digest: {config['pins']['base_rootfs']}")
-    print("Review the cgroup hierarchy and sudoers rule before enabling the helper.")
+    print(f"enabled the fixed helper for {account.pw_name} through the validated sudoers rule")
+    print("Review the cgroup hierarchy and sudoers rule; no host kernel repair was performed.")
 
 
 def _uid_exists(uid: int) -> bool:

@@ -307,6 +307,75 @@ class LifecycleDurabilityTests(unittest.TestCase):
                     helper._stop(metadata, config)
             self.assertEqual(caught.exception.code, "CLEANUP_UNKNOWN")
             self.assertEqual(metadata["state"], "failed")
+            self.assertTrue((Path(metadata["jail_root"]) / "rootfs.ext4").exists())
+
+    def test_destroy_cleanup_failures_retain_metadata_for_retry(self):
+        for failure in ("netns", "jail"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config, metadata = self._environment(root)
+                metadata["netns"] = (
+                    f"local-agent-{ENV_ID}" if failure == "netns" else None
+                )
+                metadata_path = Path(config["state_dir"]) / ENV_ID / "metadata.json"
+                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+                helper.CLEANED.clear()
+                original_rmtree = helper.shutil.rmtree
+
+                def rmtree(path, *args, **kwargs):
+                    if failure == "jail" and Path(path) == Path(metadata["jail_root"]).parent:
+                        raise OSError("jail removal failed")
+                    return original_rmtree(path, *args, **kwargs)
+
+                netns = (
+                    patch.object(
+                        helper,
+                        "_destroy_netns",
+                        side_effect=helper.HelperError(
+                            "NETWORK_NAMESPACE", "namespace removal failed"
+                        ),
+                    )
+                    if failure == "netns"
+                    else patch.object(helper, "_destroy_netns")
+                )
+                with patch.object(
+                    helper, "_safe_path", lambda *_args, **_kwargs: None
+                ), patch.object(
+                    helper, "_sudo_uid", return_value=1000
+                ), netns, patch.object(
+                    helper.shutil, "rmtree", side_effect=rmtree
+                ):
+                    with self.assertRaises(helper.HelperError):
+                        helper._operate(config, "destroy", ENV_ID)
+                self.assertTrue(metadata_path.exists())
+                self.assertTrue((Path(config["state_dir"]) / ENV_ID).exists())
+                retained = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if failure == "netns":
+                    self.assertEqual(retained["netns"], f"local-agent-{ENV_ID}")
+                else:
+                    self.assertTrue(Path(metadata["jail_root"]).exists())
+
+    def test_start_failed_state_reclaims_before_reusing_runtime_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, metadata = self._environment(root)
+            metadata["state"] = "failed"
+            metadata_path = Path(config["state_dir"]) / ENV_ID / "metadata.json"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            helper.CLEANED.clear()
+            with patch.object(
+                helper, "_safe_path", lambda *_args, **_kwargs: None
+            ), patch.object(
+                helper, "_sudo_uid", return_value=1000
+            ), patch.object(
+                helper,
+                "_stop",
+                side_effect=helper.HelperError("CLEANUP_UNKNOWN", "stale jail remains"),
+            ) as stop, patch.object(helper, "_start") as start:
+                with self.assertRaises(helper.HelperError):
+                    helper._operate(config, "start", ENV_ID)
+            stop.assert_called_once_with(metadata, config, failed=True)
+            start.assert_not_called()
 
     def test_timeouts_and_os_errors_stop_a_running_environment(self):
         for failure in (TimeoutError("slow frame"), OSError("socket error")):
