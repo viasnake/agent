@@ -72,3 +72,6 @@ agent
 バックアップは終了後に保存先全体をコピーします。`auth/` は認証情報を含むため共有しないでください。
 
 開発・検証方法は [docs/architecture.md](docs/architecture.md)、保守用 CLI は `agent --help` を参照してください。
+
+独立した Firecracker agent environment の管理者セットアップ、CLI、制約は
+[docs/firecracker.md](docs/firecracker.md) を参照してください。
