@@ -4,7 +4,6 @@ import {
   TuiAltScreen,
   Text,
   matchesKey,
-  getKeybindings,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { SettingsDialog } from "./settings.js";
@@ -127,6 +126,8 @@ export class TerminalApp {
     this.tui.addInputListener((data) => this.key(data));
   }
   private key(data: string): { consume: boolean } | undefined {
+    // Consume LF before Pi can interpret Ctrl+J as newline or dialog confirmation.
+    if (matchesKey(data, "ctrl+j")) return { consume: true };
     const action = actionFor(data);
     if (this.tui.hasOverlay()) {
       if (this.reader && this.acceptReader && matchesKey(data, "enter")) {
@@ -750,7 +751,7 @@ export class TerminalApp {
             Object.values(actions)
               .map((a) => `${a.keys.join(" / ")} — ${a.description}`)
               .join("\n") +
-            `\n${getKeybindings().getKeys("tui.input.newLine").join(" / ")} — 改行\nEnter — 送信／実行中は追加指示\nTab — コマンド・パス・@ファイル補完\n↑/↓ — 入力履歴\nCtrl+C の空入力、Ctrl+D の空入力、/quit は保存して終了。作業中のみ確認します。\n/tools list — 保存済みツール結果を選ぶ\n/expand [番号] — 長文の続きを同じ場所に表示`,
+            "\nShift+Enter — 改行\nEnter — 送信／実行中は追加指示\nTab — コマンド・パス・@ファイル補完\n↑/↓ — 入力履歴\nCtrl+C の空入力、Ctrl+D の空入力、/quit は保存して終了。作業中のみ確認します。\n/tools list — 保存済みツール結果を選ぶ\n/expand [番号] — 長文の続きを同じ場所に表示",
         );
         break;
       case "new":

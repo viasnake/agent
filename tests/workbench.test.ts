@@ -26,6 +26,7 @@ import {
   doctorSummary,
 } from "../src/tui/guidance.js";
 import { testConfig } from "./helpers.js";
+import { TerminalApp } from "../src/tui/app.js";
 
 test("fullscreen uses the viewport width and pins controls while scrolling and resizing", async () => {
   let columns = 157;
@@ -270,7 +271,6 @@ test("composer uses Enter to send, Shift+Enter to add a line, and preserves past
     "\x1b[13;2u",
     "\x1b[27;2;13~",
     "\x1b[13;2~",
-    "\n",
   ]) {
     const input = editor(tui);
     const sent: string[] = [];
@@ -283,6 +283,24 @@ test("composer uses Enter to send, Shift+Enter to add a line, and preserves past
     input.handleInput("\r");
     assert.deepEqual(sent, ["一行目\n二行目\n三行目"]);
   }
+});
+
+test("Ctrl+J is consumed before editors and dialogs, without swallowing pasted newlines", () => {
+  const app = new TerminalApp();
+  app.tui.requestRender = () => {};
+  app.input.setText("日本語");
+  for (const key of ["\n", "\x1b[106;5u", "\x1b[27;5;106~"]) {
+    assert.deepEqual(app["key"](key), { consume: true });
+  }
+  assert.equal(app.input.getText(), "日本語");
+  assert.equal(app["key"]("\x1b[200~一行目\n二行目\x1b[201~"), undefined);
+  assert.equal(app["key"]("\x1b[13;2u"), undefined);
+  app.input.setText("日本語");
+  app.input.focused = true;
+  const cursorLine = app.input
+    .render(80)
+    .find((line) => line.includes(CURSOR_MARKER))!;
+  assert.equal(visibleWidth(cursorLine.split(CURSOR_MARKER)[0]!), 9);
 });
 
 test("conversation layout handles resize, CJK, long messages and color-free terminals", (t) => {

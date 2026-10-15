@@ -91,6 +91,9 @@ try:
         send("\x1b[6~")
         send("\x1b")
         # Bracketed paste must not submit embedded newlines or send terminal controls.
+        send("先頭")
+        send("\n")
+        send("続き")
         send("\x1b[200~日本語 é\n貼り付け\x1b]52;c;ZXhmaWw=\x07\x1b[201~")
         requests = os.environ["AGENT_TEST_REQUESTS"]
         assert not os.path.exists(requests), "paste submitted before Enter"
