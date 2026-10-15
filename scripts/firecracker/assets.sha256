@@ -1,0 +1,5 @@
+# Firecracker v1.16.2 official release and the explicitly selected CI fixture.
+# The first digest is copied from the matching .sha256.txt release asset.
+firecracker-v1.16.2-x86_64.tgz 32e3cdcd4081f91fe2b024a266f57dcb3b4e5fec5033e0cb22467ad7f7820bda https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.2/firecracker-v1.16.2-x86_64.tgz
+vmlinux-6.1.128 27a8310b9a727517e9eb02044524b6ceb77de5728e3491b6974d5c846227ecc8 https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/x86_64/vmlinux-6.1.128
+ubuntu-24.04.squashfs 88821a26b5a38c92b84a064d452167d7f80f9e17cf4441d1ebbae7569e340aee https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/x86_64/ubuntu-24.04.squashfs
