@@ -21,6 +21,7 @@ export interface PendingInput {
   previewKind?: WorkKind;
   previewModel?: string;
   previewStrategy?: Run["mode"];
+  previewReviewer?: string;
 }
 export interface Conversation {
   id: string;

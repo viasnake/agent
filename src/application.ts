@@ -82,6 +82,7 @@ interface InputSnapshot {
   kind: WorkKind;
   strategy: Run["mode"];
   model?: string;
+  reviewer?: string;
 }
 export function inferKind(text: string, previous?: WorkKind): WorkKind {
   if (/\b(research|sources|citations)\b|調査|出典|根拠付き/i.test(text))
@@ -336,6 +337,7 @@ export class Application extends EventEmitter {
         kind,
         strategy: this.session.strategy,
         model: this.session.model,
+        reviewer: this.session.reviewer,
         imageIds: images.map((ref) => ref.id),
       }),
     );
@@ -350,6 +352,7 @@ export class Application extends EventEmitter {
       kind,
       strategy: this.session.strategy,
       model: this.session.model,
+      reviewer: this.session.reviewer,
     };
   }
   async previewInput(text: string): Promise<InputPreview> {
@@ -370,7 +373,13 @@ export class Application extends EventEmitter {
     images: ImageReference[],
     snapshot: Pick<
       InputSnapshot,
-      "dataClass" | "localOnly" | "kind" | "attachments" | "strategy" | "model"
+      | "dataClass"
+      | "localOnly"
+      | "kind"
+      | "attachments"
+      | "strategy"
+      | "model"
+      | "reviewer"
     >,
   ): string[] {
     if (!images.length) return [];
@@ -455,6 +464,16 @@ export class Application extends EventEmitter {
         "NO_IMAGE_MODEL",
         `No authorized image-capable ${missingRole} model is available for ${kind}/${snapshot.dataClass}${snapshot.localOnly ? "/local-only" : ""}.${alternatives}`,
       );
+    if (
+      kind !== "chat" &&
+      snapshot.strategy === "reviewed" &&
+      snapshot.reviewer &&
+      !reviewerCandidates.includes(snapshot.reviewer)
+    )
+      throw new AgentError(
+        "NO_IMAGE_MODEL",
+        `Selected reviewer ${snapshot.reviewer} is not an authorized image-capable reviewer model.${alternatives}`,
+      );
     if (snapshot.model && !candidates[requestedRole].includes(snapshot.model))
       throw new AgentError(
         "NO_IMAGE_MODEL",
@@ -515,6 +534,7 @@ export class Application extends EventEmitter {
         kind,
         strategy: this.session.strategy,
         model: this.session.model,
+        reviewer: this.session.reviewer,
         imageIds: snapshot.images.map((ref) => ref.id),
       }),
     );
@@ -523,7 +543,8 @@ export class Application extends EventEmitter {
       (currentBinding !== snapshot.destinationBinding ||
         kind !== snapshot.kind ||
         this.session.strategy !== snapshot.strategy ||
-        this.session.model !== snapshot.model)
+        this.session.model !== snapshot.model ||
+        this.session.reviewer !== snapshot.reviewer)
     )
       throw new AgentError(
         "IMAGE_PREVIEW_STALE",
@@ -589,6 +610,7 @@ export class Application extends EventEmitter {
       previewKind: snapshot.kind,
       previewModel: snapshot.model,
       previewStrategy: snapshot.strategy,
+      previewReviewer: snapshot.reviewer,
     };
     if (!this.session.latestRunId && this.session.name === "新しい会話")
       this.session.name = text.split("\n")[0]!;
@@ -629,6 +651,7 @@ export class Application extends EventEmitter {
     item.previewKind = snapshot?.kind;
     item.previewModel = snapshot?.model;
     item.previewStrategy = snapshot?.strategy;
+    item.previewReviewer = snapshot?.reviewer;
     if (snapshot) this.session.images = structuredClone(snapshot.images);
     this.save();
   }
@@ -722,6 +745,7 @@ export class Application extends EventEmitter {
           kind,
           strategy: input.previewStrategy,
           model: input.previewModel,
+          reviewer: input.previewReviewer,
           imageIds: images.map((ref) => ref.id),
         }),
       );
@@ -732,6 +756,7 @@ export class Application extends EventEmitter {
         input.previewKind !== kind ||
         input.previewStrategy !== this.session.strategy ||
         input.previewModel !== this.session.model ||
+        input.previewReviewer !== this.session.reviewer ||
         disclosure.dataClass !== input.previewDataClass ||
         disclosure.localOnly !== input.previewLocalOnly
       )
@@ -748,6 +773,7 @@ export class Application extends EventEmitter {
           .map((path) => ({ path, bytes: 0 })),
         strategy: input.previewStrategy!,
         model: input.previewModel,
+        reviewer: input.previewReviewer,
       });
     }
     const config = structuredClone(this.config);

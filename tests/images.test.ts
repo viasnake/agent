@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import sharp from "sharp";
@@ -257,7 +258,10 @@ test("transport guards count repeated image history and reject non-image SDK mod
     ],
   };
   const observations: unknown[][] = [];
-  const runGuard = async (input: string[]) => {
+  const runGuard = async (
+    input: string[],
+    requestContext: unknown = context,
+  ) => {
     const model = {
       id: "worker-fixture",
       provider: "agent-compatible",
@@ -296,7 +300,7 @@ test("transport guards count repeated image history and reject non-image SDK mod
           options: object,
         ) => AsyncIterable<unknown>;
       }
-    ).streamSimple(model, context, {});
+    ).streamSimple(model, requestContext, {});
     for await (const _event of stream) {
     }
     return checkFailure;
@@ -306,8 +310,39 @@ test("transport guards count repeated image history and reject non-image SDK mod
     assert.deepEqual(observations[0]!.slice(1), [2, 16384]);
     assert.ok((observations[0]![0] as number) > 49152);
     assert.throws(supportedFailure);
+
+    const rawPixels = randomBytes(1024 * 1024 * 3);
+    const largePng = await sharp(rawPixels, {
+      raw: { width: 1024, height: 1024, channels: 3 },
+    })
+      .png({ compressionLevel: 0 })
+      .toBuffer();
+    assert.ok(largePng.length > 3_000_000 && largePng.length < maxImageBytes);
+    const largeFailure = await runGuard(["text", "image"], {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              data: largePng.toString("base64"),
+              mimeType: "image/png",
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(observations.length, 2);
+    assert.equal(observations[1]![1], 1);
+    assert.equal(observations[1]![2], 8192);
+    assert.throws(largeFailure, (error: unknown) => {
+      assert.ok(error instanceof AgentError);
+      assert.equal(error.code, "PROVIDER");
+      return true;
+    });
+
     const unsupportedFailure = await runGuard(["text"]);
-    assert.equal(observations.length, 1);
+    assert.equal(observations.length, 2);
     assert.throws(unsupportedFailure, (error: unknown) => {
       assert.ok(error instanceof AgentError);
       assert.equal(error.code, "NO_IMAGE_MODEL");
@@ -521,6 +556,51 @@ test("configuration changes invalidate an approved image preview without consumi
     assert.equal(app.session.draft, text);
     assert.equal(app.session.queue.length, 0);
     assert.equal(runtime.requests.length, 0);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("reviewer changes invalidate an image preview and text-only reviewers are refused", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unexpected"));
+  f.config.models.worker!.images = true;
+  f.config.models.reviewer!.images = true;
+  f.config.models.textOnlyReviewer = {
+    ...f.config.models.reviewer!,
+    id: "text-only-reviewer",
+    images: false,
+  };
+  const [png] = await fixtures();
+  await writeFile(join(f.root, "review.png"), png!);
+  const app = new Application(f.config, f.p, f.store, f.root);
+  const text = "Inspect @review.png";
+  try {
+    await app.initialize();
+    app.session.kind = "coding";
+    app.session.strategy = "reviewed";
+    app.session.reviewer = "reviewer";
+    app.setDraft(text);
+    const preview = await app.previewInput(text);
+    app.session.reviewer = undefined;
+    await assert.rejects(app.submit(text, "next", preview), {
+      code: "IMAGE_PREVIEW_STALE",
+    });
+    assert.equal(app.session.draft, text);
+    assert.equal(app.session.queue.length, 0);
+
+    app.session.reviewer = "textOnlyReviewer";
+    await assert.rejects(app.previewInput(text), (error: unknown) => {
+      assert.ok(error instanceof AgentError);
+      assert.equal(error.code, "NO_IMAGE_MODEL");
+      assert.match(
+        error.message,
+        /Authorized image-capable alternatives: reviewer/,
+      );
+      return true;
+    });
+    assert.equal(app.session.draft, text);
+    assert.equal(app.session.queue.length, 0);
   } finally {
     await app.close();
     await f.cleanup();

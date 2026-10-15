@@ -131,22 +131,28 @@ export function guardModelStream(
               );
             const encoded = record.data;
             const maxEncodedBytes = Math.ceil(maxImageBytes / 3) * 4;
+            if (encoded.length > maxEncodedBytes)
+              throw new AgentError(
+                "IMAGE_INVALID",
+                "Invalid image in model history",
+              );
+            let padding = 0;
+            for (
+              let index = encoded.length - 1;
+              index >= 0 && padding <= 2 && encoded[index] === "=";
+              index--
+            )
+              padding++;
+            const body = encoded.slice(0, encoded.length - padding);
             if (
-              encoded.length > maxEncodedBytes ||
               encoded.length % 4 !== 0 ||
-              !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-                encoded,
-              )
+              padding > 2 ||
+              /[^A-Za-z0-9+/]/.test(body)
             )
               throw new AgentError(
                 "IMAGE_INVALID",
                 "Invalid image in model history",
               );
-            const padding = encoded.endsWith("==")
-              ? 2
-              : encoded.endsWith("=")
-                ? 1
-                : 0;
             const decodedBytes = (encoded.length / 4) * 3 - padding;
             if (!decodedBytes || decodedBytes > maxImageBytes)
               throw new AgentError(
