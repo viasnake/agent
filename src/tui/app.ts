@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { SettingsDialog } from "./settings.js";
 import { ResearchBrowser } from "./research-browser.js";
+import { SearchBrowser } from "./search-browser.js";
 import {
   SettingsEditor,
   type SettingsField,
@@ -857,6 +858,20 @@ export class TerminalApp {
           .find((s) => s.id !== app.session.id && (s.draft || s.latestRunId));
         if (recent) app.openSession(recent.id);
         else this.notice = "保存済みの会話はありません。";
+        break;
+      }
+      case "search": {
+        const text =
+          argument ||
+          (await this.prompt("検索する文字列（正規表現ではありません）"));
+        if (text)
+          await new SearchBrowser(app, {
+            choose: this.choose.bind(this),
+            show: this.show.bind(this),
+            notice: (notice) => {
+              this.notice = notice;
+            },
+          }).search(text);
         break;
       }
       case "sessions": {
