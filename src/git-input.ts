@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
+import { setImmediate as yieldEventLoop } from "node:timers/promises";
 import { createTwoFilesPatch } from "diff";
 import type { Paths } from "./config.js";
 import { AgentError, type PreparedInput } from "./types.js";
@@ -14,6 +16,7 @@ const outputLimit = 5_000_000;
 const maxContentBytes = 5_000_000;
 const maxInspectedBytes = 50_000_000;
 const maxTrackedPaths = 50_000;
+const operationTimeoutMs = 30_000;
 
 export const gitComparisonNotice =
   "[NOTE: raw stored bytes are compared; Git clean/smudge filters, attributes, textconv and line-ending normalization are intentionally not applied.]";
@@ -41,14 +44,22 @@ interface Omission {
 class Budget {
   private inspected = 0;
   readonly blobs = new Map<string, Buffer>();
+  objectFormat: "sha1" | "sha256" = "sha1";
   constructor(
-    private readonly signal: AbortSignal,
-    readonly objectFormat: "sha1" | "sha256",
+    readonly signal: AbortSignal,
+    readonly deadline: number,
   ) {}
   check(): void {
+    if (performance.now() >= this.deadline)
+      throw new AgentError("GIT_TIMEOUT", "Git input exceeded 30 seconds");
     this.signal.throwIfAborted();
   }
+  remainingMs(): number {
+    this.check();
+    return Math.max(1, Math.ceil(this.deadline - performance.now()));
+  }
   charge(bytes: number): void {
+    this.check();
     this.inspected += bytes;
     if (this.inspected > maxInspectedBytes)
       throw new AgentError(
@@ -77,20 +88,19 @@ export async function selectGitInput(
   maxBytes: number,
   signal: AbortSignal,
 ): Promise<GitInputSelection> {
+  const deadline = performance.now() + operationTimeoutMs;
+  const budget = new Budget(signal, deadline);
+  budget.check();
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)
     throw new AgentError("INPUT_SIZE", "Git input budget is exhausted");
-  const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(30000)]);
   const command = selector.slice("git:".length);
-  const root = await repositoryRoot(workspace, boundedSignal);
-  const budget = new Budget(
-    boundedSignal,
-    await hashFormat(root, boundedSignal),
-  );
+  const root = await repositoryRoot(workspace, budget);
+  await hashFormat(root, budget);
   let text: string,
     locator: string,
     partial = false;
   if (command === "status") {
-    const status = await statusReport(root, boundedSignal, budget);
+    const status = await statusReport(root, budget);
     text = status.text;
     locator = "read-only branch/status/recent-commit summary";
     partial = status.partial;
@@ -104,39 +114,38 @@ export async function selectGitInput(
       );
     let comparison: Comparison;
     if (spec === "working" || spec === "staged")
-      comparison = await worktreeComparison(root, spec, boundedSignal, budget);
+      comparison = await worktreeComparison(root, spec, budget);
     else if (range)
       comparison = await commitComparison(
         root,
-        await resolveCommit(root, range[1]!, boundedSignal),
-        await resolveCommit(root, range[2]!, boundedSignal),
-        boundedSignal,
+        await resolveCommit(root, range[1]!, budget),
+        await resolveCommit(root, range[2]!, budget),
         budget,
       );
     else if (commitHash.test(spec)) {
-      const commit = await resolveCommit(root, spec, boundedSignal);
-      const parent = await firstParent(root, commit, boundedSignal);
-      comparison = await commitComparison(
-        root,
-        parent,
-        commit,
-        boundedSignal,
-        budget,
-      );
+      const commit = await resolveCommit(root, spec, budget);
+      const parent = await firstParent(root, commit, budget);
+      comparison = await commitComparison(root, parent, commit, budget);
       comparison.label = parent
         ? `${parent}..${commit} (first parent)`
         : `${commit} (root commit against the empty tree)`;
-      comparison.metadata = await commitMetadata(root, commit, boundedSignal);
+      comparison.metadata = await commitMetadata(root, commit, budget);
     } else
       throw new AgentError(
         "GIT_SELECTOR",
         "Use @git:working, @git:staged, @git:status, @git:commit:<full-hash>, or @git:<full-hash>..<full-hash>",
       );
-    const rendered = renderComparison(command, comparison);
+    const rendered = await renderComparison(
+      command,
+      comparison,
+      budget,
+      maxBytes,
+    );
     text = rendered.text;
     locator = rendered.locator;
     partial = rendered.partial;
   }
+  budget.check();
   if (Buffer.byteLength(text) > Math.min(outputLimit, maxBytes))
     throw new AgentError(
       "INPUT_SIZE",
@@ -170,15 +179,13 @@ export async function storeGitInput(
 
 export async function readGitStatus(
   workspace: string,
-  signal = AbortSignal.timeout(30000),
+  signal = new AbortController().signal,
 ): Promise<string> {
-  const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(30000)]);
-  const root = await repositoryRoot(workspace, boundedSignal);
-  const status = await statusReport(
-    root,
-    boundedSignal,
-    new Budget(boundedSignal, await hashFormat(root, boundedSignal)),
-  );
+  const budget = new Budget(signal, performance.now() + operationTimeoutMs);
+  budget.check();
+  const root = await repositoryRoot(workspace, budget);
+  await hashFormat(root, budget);
+  const status = await statusReport(root, budget);
   return status.text;
 }
 
@@ -204,13 +211,12 @@ interface Comparison {
 
 async function statusReport(
   root: string,
-  signal: AbortSignal,
   budget: Budget,
 ): Promise<{ text: string; partial: boolean }> {
-  const head = await resolveHead(root, signal);
-  const tree = head ? await treeEntries(root, head, signal) : new Map();
-  const index = await indexEntries(root, signal);
-  const untracked = await untrackedPaths(root, signal);
+  const head = await resolveHead(root, budget);
+  const tree = head ? await treeEntries(root, head, budget) : new Map();
+  const index = await indexEntries(root, budget);
+  const untracked = await untrackedPaths(root, budget);
   enforcePathCount([
     ...tree.keys(),
     ...index.entries.keys(),
@@ -230,6 +236,7 @@ async function statusReport(
   for (const path of [
     ...new Set([...tree.keys(), ...index.entries.keys()]),
   ].sort()) {
+    budget.check();
     if (index.unmerged.includes(path)) continue;
     const staged = tree.get(path),
       indexed = index.entries.get(path);
@@ -245,7 +252,7 @@ async function statusReport(
       if (indexed.type !== "blob") {
         omitted.push({
           path,
-          reason: `unsupported entry type ${indexed.type}`,
+          reason: entryOmissionReason(indexed),
         });
         y = "?";
       } else if (isImagePath(path)) {
@@ -267,9 +274,9 @@ async function statusReport(
     lines.push(`  UU ${quote(path)} (unmerged; stages are not inspected)`);
   for (const path of untracked.sort())
     lines.push(`  ?? ${quote(path)} (untracked; content is not inspected)`);
-  const recent = head ? await recentCommits(root, signal) : "";
+  const recent = head ? await recentCommits(root, budget) : "";
   const text = [
-    `branch: ${(await branchName(root, signal)) || "(detached)"}`,
+    `branch: ${(await branchName(root, budget)) || "(detached)"}`,
     "status:",
     ...(lines.length ? lines : ["  clean"]),
     ...(omitted.length
@@ -282,6 +289,7 @@ async function statusReport(
     recent || "  (none)",
     gitComparisonNotice,
   ].join("\n");
+  budget.check();
   if (Buffer.byteLength(text) > outputLimit)
     throw new AgentError("GIT_LIMIT", "Git status exceeds the output limit");
   return {
@@ -293,13 +301,12 @@ async function statusReport(
 async function worktreeComparison(
   root: string,
   spec: "working" | "staged",
-  signal: AbortSignal,
   budget: Budget,
 ): Promise<Comparison> {
-  const head = await resolveHead(root, signal);
-  const tree = head ? await treeEntries(root, head, signal) : new Map();
-  const index = await indexEntries(root, signal);
-  const untracked = await untrackedPaths(root, signal);
+  const head = await resolveHead(root, budget);
+  const tree = head ? await treeEntries(root, head, budget) : new Map();
+  const index = await indexEntries(root, budget);
+  const untracked = await untrackedPaths(root, budget);
   enforcePathCount([
     ...tree.keys(),
     ...index.entries.keys(),
@@ -326,11 +333,22 @@ async function worktreeComparison(
   for (const path of [
     ...new Set([...tree.keys(), ...index.entries.keys()]),
   ].sort()) {
+    budget.check();
     if (index.unmerged.includes(path)) continue;
     const before = tree.get(path);
     const indexed = index.entries.get(path);
     if (isImagePath(path)) {
       comparison.omitted.push({ path, reason: "image content omitted" });
+      continue;
+    }
+    const unsupported = [before, indexed].find(
+      (entry) => entry && entry.type !== "blob",
+    );
+    if (unsupported) {
+      comparison.omitted.push({
+        path,
+        reason: entryOmissionReason(unsupported),
+      });
       continue;
     }
     const after =
@@ -340,26 +358,12 @@ async function worktreeComparison(
           ? await worktreeFile(root, path, budget)
           : undefined;
     if (before?.oid === after?.oid && before?.mode === after?.mode) continue;
-    if (before && before.type !== "blob") {
-      comparison.omitted.push({
-        path,
-        reason: `unsupported entry type ${before.type}`,
-      });
-      continue;
-    }
-    if (after && indexed && indexed.type !== "blob") {
-      comparison.omitted.push({
-        path,
-        reason: `unsupported entry type ${indexed.type}`,
-      });
-      continue;
-    }
     const beforeContent = before
-      ? await blobContent(root, before.oid, signal, budget)
+      ? await blobContent(root, before.oid, budget)
       : undefined;
     const afterContent = after
       ? spec === "staged"
-        ? await blobContent(root, indexed!.oid, signal, budget)
+        ? await blobContent(root, indexed!.oid, budget)
         : "content" in after && after.content
           ? {
               data: after.content,
@@ -394,11 +398,10 @@ async function commitComparison(
   root: string,
   from: string | undefined,
   to: string,
-  signal: AbortSignal,
   budget: Budget,
 ): Promise<Comparison> {
-  const before = from ? await treeEntries(root, from, signal) : new Map();
-  const after = await treeEntries(root, to, signal);
+  const before = from ? await treeEntries(root, from, budget) : new Map();
+  const after = await treeEntries(root, to, budget);
   enforcePathCount([...before.keys(), ...after.keys()]);
   const comparison: Comparison = {
     label: from
@@ -411,33 +414,34 @@ async function commitComparison(
   };
   rejectSecretPaths([...new Set([...before.keys(), ...after.keys()])]);
   for (const path of [...new Set([...before.keys(), ...after.keys()])].sort()) {
+    budget.check();
     const previous = before.get(path),
       current = after.get(path);
-    if (
-      previous?.oid === current?.oid &&
-      previous?.mode === current?.mode &&
-      !isImagePath(path)
-    )
-      continue;
     const unsupported = [previous, current].find(
       (entry) => entry && entry.type !== "blob",
     );
     if (unsupported) {
       comparison.omitted.push({
         path,
-        reason: `unsupported entry type ${unsupported.type}`,
+        reason: entryOmissionReason(unsupported),
       });
       continue;
     }
+    if (
+      previous?.oid === current?.oid &&
+      previous?.mode === current?.mode &&
+      !isImagePath(path)
+    )
+      continue;
     if (isImagePath(path)) {
       comparison.omitted.push({ path, reason: "image content omitted" });
       continue;
     }
     const previousContent = previous
-      ? await blobContent(root, previous.oid, signal, budget)
+      ? await blobContent(root, previous.oid, budget)
       : undefined;
     const currentContent = current
-      ? await blobContent(root, current.oid, signal, budget)
+      ? await blobContent(root, current.oid, budget)
       : undefined;
     if (
       (previousContent && !previousContent.text) ||
@@ -462,13 +466,31 @@ async function commitComparison(
   return comparison;
 }
 
-function renderComparison(
+async function renderComparison(
   command: string,
   comparison: Comparison,
-): { text: string; locator: string; partial: boolean } {
+  budget: Budget,
+  maxBytes: number,
+): Promise<{ text: string; locator: string; partial: boolean }> {
   const sections: string[] = [];
-  if (comparison.metadata) sections.push(comparison.metadata);
-  for (const change of comparison.changes) {
+  const limit = Math.min(maxBytes, outputLimit);
+  let renderedBytes = 0;
+  const appendSection = (section: string) => {
+    budget.check();
+    const bytes = Buffer.byteLength(section) + (sections.length ? 1 : 0);
+    budget.check();
+    if (renderedBytes + bytes > limit)
+      throw new AgentError(
+        "INPUT_SIZE",
+        "Git input exceeds the configured input limit",
+      );
+    sections.push(section);
+    renderedBytes += bytes;
+    budget.check();
+  };
+  if (comparison.metadata) appendSection(comparison.metadata);
+  for (const [index, change] of comparison.changes.entries()) {
+    budget.check();
     const header =
       change.before && change.after && change.before.mode !== change.after.mode
         ? `mode ${change.before.mode} => ${change.after.mode} ${quote(change.path)}`
@@ -477,6 +499,7 @@ function renderComparison(
           : !change.after
             ? `deleted file mode ${change.before.mode} ${quote(change.path)}`
             : `modified ${quote(change.path)}`;
+    const timeout = Math.min(250, budget.remainingMs());
     const patch = createTwoFilesPatch(
       change.before ? "a/file" : "/dev/null",
       change.after ? "b/file" : "/dev/null",
@@ -484,10 +507,21 @@ function renderComparison(
       change.after?.content?.toString("utf8") ?? "",
       undefined,
       undefined,
-      { context: 3 },
+      { context: 3, timeout, maxEditLength: 20_000 },
     );
-    sections.push(`${header}\n${patch}`);
+    if (patch === undefined)
+      throw new AgentError(
+        "GIT_LIMIT",
+        `Git diff exceeded its time or edit limit for ${quote(change.path)}`,
+      );
+    budget.check();
+    appendSection(`${header}\n${patch}`);
+    if (index + 1 < comparison.changes.length) {
+      await yieldEventLoop();
+      budget.check();
+    }
   }
+  budget.check();
   const notes: string[] = [];
   const imageOmissions = comparison.omitted.filter((item) =>
     item.reason.includes("image"),
@@ -520,15 +554,20 @@ function renderComparison(
         .join(", ")}]`,
     );
   if (!comparison.changes.length && !comparison.metadata)
-    notes.unshift(
+    appendSection(
       comparison.omitted.length
         ? "[PARTIAL: every change in this selection was omitted from the text comparison.]"
         : "[No text changes in this selection.]",
     );
+  for (const note of notes) appendSection(note);
+  appendSection(gitComparisonNotice);
+  budget.check();
   const partial =
     comparison.omitted.length > 0 || comparison.unmerged.length > 0;
+  const text = sections.join("\n");
+  budget.check();
   return {
-    text: [...sections, ...notes, gitComparisonNotice].join("\n"),
+    text,
     locator: `read-only Git ${command}; ${comparison.label}${
       comparison.omitted.length
         ? `; omitted: ${comparison.omitted.map((item) => quote(item.path)).join(", ")}`
@@ -556,6 +595,43 @@ function enforcePathCount(paths: string[]): void {
     throw new AgentError("GIT_LIMIT", "Git input exceeds the path limit");
 }
 
+function classifyEntry(mode: string, type: string): Entry["type"] {
+  const expected =
+    mode === "100644" || mode === "100755" || mode === "120000"
+      ? "blob"
+      : mode === "160000"
+        ? "commit"
+        : mode === "040000"
+          ? "tree"
+          : undefined;
+  if (!expected || type !== expected)
+    throw new AgentError(
+      "GIT_INPUT",
+      `Git entry has an unsupported mode/type combination: ${mode} ${type}`,
+    );
+  return mode === "120000" ? "link" : expected;
+}
+
+function classifyIndexMode(mode: string): Entry["type"] {
+  if (mode === "100644" || mode === "100755") return "blob";
+  if (mode === "120000") return "link";
+  if (mode === "160000") return "commit";
+  if (mode === "040000") return "tree";
+  throw new AgentError("GIT_INPUT", `Git index mode is unsupported: ${mode}`);
+}
+
+function entryOmissionReason(entry: Entry): string {
+  const kind =
+    entry.type === "link"
+      ? "symbolic link"
+      : entry.type === "commit"
+        ? "submodule"
+        : entry.type === "tree"
+          ? "tree"
+          : `entry type ${entry.type}`;
+  return `unsupported ${kind} entry (mode ${entry.mode})`;
+}
+
 function blobOid(data: Buffer, objectFormat: "sha1" | "sha256"): string {
   return createHash(objectFormat)
     .update(`blob ${data.length}\0`)
@@ -574,7 +650,10 @@ function decodeText(data: Buffer): string | undefined {
 
 function decodeUtf8(data: Buffer): string {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(data);
+    return new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(data);
   } catch {
     throw new AgentError("GIT_INPUT", "Git metadata contains invalid UTF-8");
   }
@@ -663,7 +742,6 @@ async function worktreeFile(
 async function blobContent(
   root: string,
   oid: string,
-  signal: AbortSignal,
   budget: Budget,
 ): Promise<{ data: Buffer; text: boolean }> {
   budget.check();
@@ -674,7 +752,7 @@ async function blobContent(
     data = await gitBytes(
       root,
       ["cat-file", "blob", oid],
-      signal,
+      budget,
       maxContentBytes,
     );
     budget.charge(data.length);
@@ -686,98 +764,119 @@ async function blobContent(
 async function treeEntries(
   root: string,
   commit: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<Map<string, Entry>> {
   const output = await gitBytes(
     root,
     ["ls-tree", "-r", "-z", "--full-tree", commit],
-    signal,
+    budget,
     outputLimit,
   );
   const entries = new Map<string, Entry>();
-  for (const record of nulRecords(output)) {
+  const records = nulRecords(output);
+  budget.check();
+  for (const record of records) {
+    budget.check();
     const separator = record.indexOf(9);
     const header =
       separator >= 0 ? record.subarray(0, separator) : Buffer.alloc(0);
     const path =
       separator >= 0 ? decodePath(record.subarray(separator + 1)) : "";
     const headerText = decodeUtf8(header);
-    const [mode, type, oid] = headerText.split(" ");
+    const fields = headerText.split(" ");
+    const [mode, type, oid] = fields;
+    if (fields.length !== 3 || fields.some((field) => !field))
+      throw new AgentError("GIT_INPUT", "Git tree entry header is malformed");
     if (!mode || !type || !oid || !path || !commitHash.test(oid))
       throw new AgentError("GIT_INPUT", "Git tree entry is malformed");
     validateGitPath(path);
+    const classifiedType = classifyEntry(mode, type);
     if (entries.size >= maxTrackedPaths)
       throw new AgentError("GIT_LIMIT", "Git tree exceeds the path limit");
     if (entries.has(path))
       throw new AgentError("GIT_INPUT", "Git tree contains a duplicate path");
-    entries.set(path, { mode, type, oid });
+    entries.set(path, { mode, type: classifiedType, oid });
   }
   return entries;
 }
 
 async function indexEntries(
   root: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<{ entries: Map<string, Entry>; unmerged: string[] }> {
   const output = await gitBytes(
     root,
     ["ls-files", "--stage", "-z", "--full-name"],
-    signal,
+    budget,
     outputLimit,
   );
   const entries = new Map<string, Entry>(),
-    unmerged = new Set<string>();
+    unmerged = new Set<string>(),
+    seenStages = new Map<string, Set<string>>();
   const records = nulRecords(output);
+  budget.check();
   if (records.length > maxTrackedPaths)
     throw new AgentError("GIT_LIMIT", "Git index exceeds the path limit");
   for (const record of records) {
+    budget.check();
     const separator = record.indexOf(9);
     const header =
       separator >= 0 ? decodeUtf8(record.subarray(0, separator)) : "";
     const path =
       separator >= 0 ? decodePath(record.subarray(separator + 1)) : "";
-    const [mode, oid, stage] = header.split(/\s+/);
+    const fields = header.split(" ");
+    const [mode, oid, stage] = fields;
+    if (fields.length !== 3 || fields.some((field) => !field))
+      throw new AgentError("GIT_INPUT", "Git index entry header is malformed");
     if (!mode || !oid || !stage || !path || !commitHash.test(oid))
       throw new AgentError("GIT_INPUT", "Git index entry is malformed");
     validateGitPath(path);
+    const type = classifyIndexMode(mode);
     if (!["0", "1", "2", "3"].includes(stage))
       throw new AgentError("GIT_INPUT", "Git index stage is unsupported");
     if (entries.size >= maxTrackedPaths)
       throw new AgentError("GIT_LIMIT", "Git index exceeds the path limit");
+    let stages = seenStages.get(path);
+    if (!stages) {
+      stages = new Set();
+      seenStages.set(path, stages);
+    }
+    if (stages.has(stage))
+      throw new AgentError(
+        "GIT_INPUT",
+        "Git index contains a duplicate path/stage record",
+      );
+    if (stages.has("0") || (stage === "0" && stages.size > 0))
+      throw new AgentError(
+        "GIT_INPUT",
+        "Git index contains incompatible stages for one path",
+      );
+    stages.add(stage);
     if (stage !== "0") {
       unmerged.add(path);
       entries.delete(path);
       continue;
     }
-    if (!unmerged.has(path))
-      entries.set(path, {
-        mode,
-        oid,
-        type:
-          mode === "160000"
-            ? "commit"
-            : mode === "120000"
-              ? "link"
-              : mode === "040000"
-                ? "tree"
-                : "blob",
-      });
+    entries.set(path, { mode, oid, type });
   }
   return { entries, unmerged: [...unmerged] };
 }
 
-async function untrackedPaths(
-  root: string,
-  signal: AbortSignal,
-): Promise<string[]> {
+async function untrackedPaths(root: string, budget: Budget): Promise<string[]> {
   const output = await gitBytes(
     root,
     ["ls-files", "--others", "--exclude-standard", "-z"],
-    signal,
+    budget,
     outputLimit,
   );
-  const paths = nulRecords(output).map(decodePath);
-  for (const path of paths) validateGitPath(path);
+  const records = nulRecords(output),
+    paths: string[] = [];
+  for (const record of records) {
+    budget.check();
+    const path = decodePath(record);
+    validateGitPath(path);
+    paths.push(path);
+  }
   if (paths.length > maxTrackedPaths)
     throw new AgentError("GIT_LIMIT", "Git untracked paths exceed the limit");
   return paths;
@@ -785,27 +884,28 @@ async function untrackedPaths(
 
 async function hashFormat(
   root: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<"sha1" | "sha256"> {
   const format = (
-    await gitText(root, ["rev-parse", "--show-object-format"], signal, 32)
+    await gitText(root, ["rev-parse", "--show-object-format"], budget, 32)
   ).trim();
   if (format !== "sha1" && format !== "sha256")
     throw new AgentError(
       "GIT_INPUT",
       `Unsupported Git object format: ${format}`,
     );
+  budget.objectFormat = format;
   return format;
 }
 
 async function branchName(
   root: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<string | undefined> {
   const result = await gitTry(
     root,
     ["symbolic-ref", "--quiet", "--short", "HEAD"],
-    signal,
+    budget,
     4096,
   );
   if (result.code === 0) return decodeUtf8(result.stdout).trim();
@@ -817,10 +917,7 @@ async function branchName(
   return undefined;
 }
 
-async function recentCommits(
-  root: string,
-  signal: AbortSignal,
-): Promise<string> {
+async function recentCommits(root: string, budget: Budget): Promise<string> {
   return gitText(
     root,
     [
@@ -831,7 +928,7 @@ async function recentCommits(
       "--no-color",
       "--format=  %H %s",
     ],
-    signal,
+    budget,
     outputLimit,
   ).then((text) => text.trimEnd());
 }
@@ -839,7 +936,7 @@ async function recentCommits(
 async function commitMetadata(
   root: string,
   commit: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<string> {
   const output = await gitText(
     root,
@@ -852,7 +949,7 @@ async function commitMetadata(
       "--format=commit %H%nAuthor: %an <%ae>%nAuthorDate: %aI%nCommit: %cn <%ce>%nCommitDate: %cI%n%n%B",
       commit,
     ],
-    signal,
+    budget,
     100_000,
   );
   return output.trimEnd();
@@ -860,12 +957,12 @@ async function commitMetadata(
 
 async function resolveHead(
   root: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<string | undefined> {
   const rawHead = await gitTry(
     root,
     ["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD"],
-    signal,
+    budget,
     128,
   );
   if (rawHead.code === 0) {
@@ -878,7 +975,7 @@ async function resolveHead(
     const result = await gitTry(
       root,
       ["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"],
-      signal,
+      budget,
       128,
     );
     if (result.code !== 0)
@@ -899,7 +996,7 @@ async function resolveHead(
   const symbolic = await gitTry(
     root,
     ["symbolic-ref", "--quiet", "HEAD"],
-    signal,
+    budget,
     4096,
   );
   if (symbolic.code === 0) return undefined;
@@ -917,7 +1014,7 @@ async function resolveHead(
 async function resolveCommit(
   root: string,
   revision: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<string> {
   if (!commitHash.test(revision))
     throw new AgentError("GIT_REF", "Git revisions must be full object hashes");
@@ -925,7 +1022,7 @@ async function resolveCommit(
     await gitText(
       root,
       ["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`],
-      signal,
+      budget,
       128,
     )
   ).trim();
@@ -940,29 +1037,29 @@ async function resolveCommit(
 async function firstParent(
   root: string,
   commit: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<string | undefined> {
   const output = await gitText(
     root,
     ["log", "-1", "--no-patch", "--no-show-signature", "--format=%P", commit],
-    signal,
+    budget,
     4096,
   );
   const parent = output.trim().split(/\s+/)[0];
   if (!parent) return undefined;
   if (!commitHash.test(parent))
     throw new AgentError("GIT_REF", "Parent did not resolve to a full commit");
-  return resolveCommit(root, parent, signal);
+  return resolveCommit(root, parent, budget);
 }
 
 async function repositoryRoot(
   workspace: string,
-  signal: AbortSignal,
+  budget: Budget,
 ): Promise<string> {
   const output = await gitText(
     workspace,
     ["rev-parse", "--show-toplevel"],
-    signal,
+    budget,
     8192,
   );
   const toplevel = output.endsWith("\n") ? output.slice(0, -1) : output;
@@ -977,6 +1074,7 @@ async function repositoryRoot(
       realpath(workspace),
       realpath(toplevel),
     ]);
+    budget.check();
   } catch {
     throw new AgentError(
       "GIT_WORKSPACE",
@@ -994,19 +1092,22 @@ async function repositoryRoot(
 async function gitText(
   root: string,
   args: string[],
-  signal: AbortSignal,
+  budget: Budget,
   maxBytes: number,
 ): Promise<string> {
-  return decodeUtf8(await gitBytes(root, args, signal, maxBytes));
+  const text = decodeUtf8(await gitBytes(root, args, budget, maxBytes));
+  budget.check();
+  return text;
 }
 
 async function gitBytes(
   root: string,
   args: string[],
-  signal: AbortSignal,
+  budget: Budget,
   maxBytes: number,
 ): Promise<Buffer> {
-  const result = await gitTry(root, args, signal, maxBytes);
+  const result = await gitTry(root, args, budget, maxBytes);
+  budget.check();
   if (result.code !== 0)
     throw new AgentError(
       "GIT_INPUT",
@@ -1018,11 +1119,12 @@ async function gitBytes(
 function gitTry(
   workspace: string,
   args: string[],
-  signal: AbortSignal,
+  budget: Budget,
   maxBytes: number,
 ): Promise<{ code: number; stdout: Buffer; stderr: string }> {
   return new Promise((resolve, reject) => {
-    signal.throwIfAborted();
+    budget.check();
+    const timeoutMs = budget.remainingMs();
     const child = spawn(
       "git",
       [
@@ -1065,6 +1167,7 @@ function gitTry(
     const output: Buffer[] = [],
       errors: Buffer[] = [];
     let length = 0,
+      errorLength = 0,
       settled = false;
     const finish = (
       error?: Error,
@@ -1073,7 +1176,7 @@ function gitTry(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
+      budget.signal.removeEventListener("abort", abort);
       if (error) reject(error);
       else resolve(value!);
     };
@@ -1084,9 +1187,11 @@ function gitTry(
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       finish(new AgentError("GIT_TIMEOUT", "Git input exceeded 30 seconds"));
-    }, 30000);
-    signal.addEventListener("abort", abort, { once: true });
+    }, timeoutMs);
+    budget.signal.addEventListener("abort", abort, { once: true });
+    if (budget.signal.aborted) abort();
     child.stdout.on("data", (chunk: Buffer) => {
+      if (settled) return;
       length += chunk.length;
       if (length > maxBytes) {
         child.kill("SIGKILL");
@@ -1099,16 +1204,23 @@ function gitTry(
       } else output.push(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      if (Buffer.concat(errors).length < 4096)
-        errors.push(chunk.subarray(0, 4096));
+      if (settled || errorLength >= 4096) return;
+      const part = chunk.subarray(0, 4096 - errorLength);
+      errors.push(part);
+      errorLength += part.length;
     });
     child.on("error", (error) => finish(error));
-    child.on("close", (code) =>
-      finish(undefined, {
-        code: code ?? 1,
-        stdout: Buffer.concat(output, length),
-        stderr: Buffer.concat(errors).toString("utf8"),
-      }),
-    );
+    child.on("close", (code) => {
+      if (settled) return;
+      try {
+        budget.check();
+        const stdout = Buffer.concat(output, length);
+        const stderr = Buffer.concat(errors, errorLength).toString("utf8");
+        budget.check();
+        finish(undefined, { code: code ?? 1, stdout, stderr });
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error("Git input failed"));
+      }
+    });
   });
 }

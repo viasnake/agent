@@ -5,6 +5,7 @@ import {
   mkdir,
   readFile,
   rm,
+  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -1069,6 +1070,166 @@ for (let depth = 0; depth < 8 && pid > 1; depth++) {
       ),
       { code: "GIT_INPUT" },
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Git comparisons omit tracked symlinks without hiding regular-file changes", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const workspace = await gitWorkspace(f.root, {
+      "README.md": "initial regular content\n",
+    });
+    const env = {
+      ...cleanEnvironment,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    };
+    await symlink(
+      "PRIVATE_SYMLINK_TARGET_TOKEN",
+      join(workspace, "tracked-link"),
+    );
+    await writeFile(
+      join(workspace, "README.md"),
+      "committed regular content\n",
+    );
+    const add = await runProcess(
+      "git",
+      ["add", "--", "README.md", "tracked-link"],
+      { cwd: workspace, env },
+    );
+    assert.equal(add.code, 0, add.stderr);
+    const commit = await runProcess(
+      "git",
+      [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "add tracked symlink",
+      ],
+      { cwd: workspace, env },
+    );
+    assert.equal(commit.code, 0, commit.stderr);
+    const head = await runProcess("git", ["rev-parse", "HEAD"], {
+      cwd: workspace,
+      env,
+    });
+    assert.equal(head.code, 0, head.stderr);
+
+    await writeFile(join(workspace, "README.md"), "staged regular change\n");
+    const stage = await runProcess("git", ["add", "--", "README.md"], {
+      cwd: workspace,
+      env,
+    });
+    assert.equal(stage.code, 0, stage.stderr);
+    await writeFile(join(workspace, "README.md"), "working regular change\n");
+
+    const working = await selectGitInput(
+      workspace,
+      "git:working",
+      100_000,
+      AbortSignal.timeout(10_000),
+    );
+    const staged = await selectGitInput(
+      workspace,
+      "git:staged",
+      100_000,
+      AbortSignal.timeout(10_000),
+    );
+    const commitSelection = await selectGitInput(
+      workspace,
+      `git:commit:${head.stdout.trim()}`,
+      100_000,
+      AbortSignal.timeout(10_000),
+    );
+
+    for (const selection of [working, staged, commitSelection]) {
+      assert.equal(selection.partial, true);
+      assert.match(selection.text, /tracked-link/);
+      assert.match(selection.text, /symbolic link/);
+      assert.match(selection.text, /PARTIAL: content not inspected:/);
+      assert.doesNotMatch(selection.text, /PRIVATE_SYMLINK_TARGET_TOKEN/);
+    }
+    assert.match(working.text, /\+working regular change/);
+    assert.match(staged.text, /\+staged regular change/);
+    assert.match(commitSelection.text, /\+committed regular content/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Git input keeps BOM-prefixed filenames distinct from ordinary names", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const normalName = "README.txt";
+    const bomName = `\uFEFF${normalName}`;
+    const workspace = await gitWorkspace(f.root, {
+      [normalName]: "normal baseline\n",
+      [bomName]: "BOM baseline\n",
+    });
+    await writeFile(join(workspace, normalName), "normal changed\n");
+    await writeFile(join(workspace, bomName), "BOM changed\n");
+    const selection = await selectGitInput(
+      workspace,
+      "git:working",
+      100_000,
+      AbortSignal.timeout(10_000),
+    );
+    const normalHeader = `modified ${JSON.stringify(normalName)}`;
+    const bomHeader = `modified ${JSON.stringify(bomName)}`;
+    const normalStart = selection.text.indexOf(normalHeader);
+    const bomStart = selection.text.indexOf(bomHeader);
+    assert.notEqual(normalStart, -1);
+    assert.notEqual(bomStart, -1);
+    const sectionEnd = (start: number) => {
+      const next = selection.text.indexOf("\nmodified ", start + 1);
+      return next < 0 ? selection.text.length : next;
+    };
+    const normalSection = selection.text.slice(
+      normalStart,
+      sectionEnd(normalStart),
+    );
+    const bomSection = selection.text.slice(bomStart, sectionEnd(bomStart));
+    assert.match(normalSection, /\+normal changed/);
+    assert.doesNotMatch(normalSection, /\+BOM changed/);
+    assert.match(bomSection, /\+BOM changed/);
+    assert.doesNotMatch(bomSection, /\+normal changed/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Git rejects disjoint-line diffs at the edit limit within a bounded time", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const lineCount = 20_100;
+    const before = Array.from(
+      { length: lineCount },
+      (_, index) => `before-${index}`,
+    ).join("\n");
+    const workspace = await gitWorkspace(f.root, {
+      "large.txt": `${before}\n`,
+    });
+    const after = Array.from(
+      { length: lineCount },
+      (_, index) => `after-${index}`,
+    ).join("\n");
+    await writeFile(join(workspace, "large.txt"), `${after}\n`);
+    const startedAt = Date.now();
+    await assert.rejects(
+      selectGitInput(
+        workspace,
+        "git:working",
+        1_000_000,
+        AbortSignal.timeout(10_000),
+      ),
+      { code: "GIT_LIMIT" },
+    );
+    assert.ok(Date.now() - startedAt < 3_000);
   } finally {
     await f.cleanup();
   }
