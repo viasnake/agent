@@ -1505,7 +1505,7 @@ export class TerminalApp {
     if (this.renderTimer) clearTimeout(this.renderTimer);
     this.busyDialog = true;
     this.editorAbort = new AbortController();
-    this.tui.stop();
+    this.tui.stop({ preserveScreen: true });
     try {
       const edited = await editExternalText(
         app.paths,

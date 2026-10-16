@@ -103,6 +103,46 @@ test("palette navigation saves the current draft before its debounce expires", a
   }
 });
 
+test("external editing does not copy the TUI draft into the shell buffer", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const app = new Application(f.config, f.p, f.store, f.root);
+  const terminal = new TerminalApp();
+  const writes: string[] = [];
+  terminal.terminal.start = () => {};
+  terminal.terminal.stop = () => {};
+  terminal.terminal.write = (text) => writes.push(text);
+  terminal.app = app;
+  terminal["preferences"].editor = [
+    process.execPath,
+    "-e",
+    "require('node:fs').appendFileSync(process.argv[1], ' edited')",
+  ];
+  try {
+    await app.initialize();
+    const draft = "SHELL_MUST_NOT_CONTAIN_THIS_DRAFT";
+    terminal.input.setText(draft);
+    terminal.tui.start();
+    terminal.tui.renderNow(true);
+    writes.length = 0;
+
+    await terminal["externalEditor"](false);
+    assert.equal(terminal.input.getExpandedText(), `${draft} edited`);
+    assert.equal(app.session.draft, `${draft} edited`);
+    const output = writes.join("");
+    const exit = output.indexOf("\x1b[?1049l");
+    const restart = output.indexOf("\x1b[?1049h", exit + 1);
+    assert.ok(exit >= 0);
+    assert.ok(restart > exit);
+    assert.ok(!output.slice(exit, restart).includes(draft));
+  } finally {
+    if (terminal["draftTimer"]) clearTimeout(terminal["draftTimer"]);
+    if (terminal["renderTimer"]) clearTimeout(terminal["renderTimer"]);
+    terminal.tui.stop({ preserveScreen: true });
+    await app.close();
+    await f.cleanup();
+  }
+});
+
 test("fullscreen uses the viewport width and pins controls while scrolling and resizing", async () => {
   let columns = 157;
   let rows = 51;
