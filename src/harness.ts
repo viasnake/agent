@@ -139,6 +139,29 @@ export class Harness {
         | { kind: "file"; path: string; token: string; size: number }
       > = [];
     const redactedIds = new Set(options.contextState?.redactedImageIds ?? []);
+    const excludedIds = new Set(options.contextState?.excludedSourceIds ?? []);
+    const excludedHashes = new Set(
+      options.contextState?.excludedSourceHashes ?? [],
+    );
+    const excludedUrls = new Set(
+      options.contextState?.excludedSourceUrls ?? [],
+    );
+    if (
+      options.images?.some(
+        (image) =>
+          excludedIds.has(image.id) || excludedHashes.has(image.sha256),
+      ) ||
+      prepared.some(({ images }) =>
+        images?.some(
+          (image) =>
+            excludedIds.has(image.id) || excludedHashes.has(image.sha256),
+        ),
+      )
+    )
+      throw new AgentError(
+        "SOURCE_EXCLUDED",
+        "Image belongs to an excluded source family",
+      );
     if (
       redactedIds.size &&
       (prepared.some(({ reference }) => reference.format === "git") ||
@@ -156,6 +179,15 @@ export class Harness {
     let rawInputBytes = 0,
       selectedInputBytes = Buffer.byteLength(options.objective);
     for (const { reference } of prepared) {
+      if (
+        excludedIds.has(reference.id) ||
+        excludedHashes.has(reference.rawSha256) ||
+        excludedHashes.has(reference.selectedSha256)
+      )
+        throw new AgentError(
+          "SOURCE_EXCLUDED",
+          "Prepared attachment belongs to an excluded source family",
+        );
       if (
         !Number.isSafeInteger(reference.rawBytes) ||
         reference.rawBytes < 0 ||
@@ -408,6 +440,7 @@ export class Harness {
     }
     const redactedHashes = new Set([
       ...(options.redactedImageHashes ?? []),
+      ...excludedHashes,
       ...[...redactedIds]
         .filter((imageId) => /^img-[a-f0-9]{64}$/.test(imageId))
         .map((imageId) => imageId.slice(4)),
@@ -460,6 +493,9 @@ export class Harness {
           owned.id,
           true,
           !!options.contextState?.redactedImageIds?.length,
+          [...excludedIds],
+          [...excludedHashes],
+          [...excludedUrls],
         );
       if (options.snapshotRunId) {
         await continueWorkspace(
@@ -472,6 +508,9 @@ export class Harness {
           owned.id,
           false,
           !!options.contextState?.redactedImageIds?.length,
+          [...excludedIds],
+          [...excludedHashes],
+          [...excludedUrls],
         );
         await sanitizeWorkCopy(
           directory,
@@ -495,6 +534,9 @@ export class Harness {
           owned.id,
           false,
           !!options.contextState?.redactedImageIds?.length,
+          [...excludedIds],
+          [...excludedHashes],
+          [...excludedUrls],
         );
       } else
         await snapshotWorkspace(
@@ -511,6 +553,11 @@ export class Harness {
         prepared.reduce((sum, input) => sum + input.reference.selectedBytes, 0);
       for (const plan of inputPlans) {
         if (plan.kind === "git") {
+          if (excludedHashes.has(sha256(plan.selection.raw)))
+            throw new AgentError(
+              "SOURCE_EXCLUDED",
+              "Git attachment belongs to an excluded source family",
+            );
           if (
             inputBytes + Buffer.byteLength(plan.selection.text) >
             this.config.limits.maxInputBytes
@@ -544,6 +591,15 @@ export class Harness {
               },
             );
           prepared.push(input);
+          if (
+            excludedIds.has(input.reference.id) ||
+            excludedHashes.has(input.reference.rawSha256) ||
+            excludedHashes.has(input.reference.selectedSha256)
+          )
+            throw new AgentError(
+              "SOURCE_EXCLUDED",
+              "Attachment belongs to an excluded source family",
+            );
         }
         inputBytes += prepared.at(-1)!.reference.selectedBytes;
         if (inputBytes > this.config.limits.maxInputBytes)

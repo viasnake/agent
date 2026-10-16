@@ -2,7 +2,6 @@ import { lstat, readFile, rm, mkdtemp, realpath } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { z } from "zod";
 import type { Config } from "./config.js";
-import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
 import { Store } from "./storage.js";
 import { Sandbox } from "./sandbox.js";
 import {
@@ -20,8 +19,16 @@ import {
   secretPath,
 } from "./workspace.js";
 import { assertDisclosure } from "./policy.js";
-import { fetchPublic } from "./network.js";
-import { readContextArchive } from "./context.js";
+import {
+  fetchPublic,
+  type PublicFetchDependencies,
+  type PublicFetchResult,
+} from "./network.js";
+import { normalizeConversationContext, readContextArchive } from "./context.js";
+import { decodeResponse } from "./research.js";
+import { reviewWriting, writingOptionsSchema } from "./writing-quality.js";
+import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
+import { id } from "./util.js";
 
 const pathSchema = z.string().min(1).max(1000);
 export class TaskTools {
@@ -33,6 +40,13 @@ export class TaskTools {
     readonly task: Task,
     readonly root: string,
     readonly sandbox: Sandbox,
+    readonly publicFetcher: (
+      url: URL,
+      signal: AbortSignal,
+      allowedHosts: string[],
+      maxBytes?: number,
+      dependencies?: PublicFetchDependencies,
+    ) => Promise<PublicFetchResult> = fetchPublic,
   ) {}
   wrap<S extends z.ZodObject>(
     name: string,
@@ -154,9 +168,23 @@ export class TaskTools {
           lines: z.number().int().min(1).max(500).default(200),
         }),
         async (args) => {
+          const excluded = new Set(
+            this.run.contextState?.excludedSourceIds ?? [],
+          );
+          const excludedHashes = new Set(
+            this.run.contextState?.excludedSourceHashes ?? [],
+          );
           const source = this.store
             .artifacts(this.run.id)
-            .find((a) => a.id === args.id && a.kind === "source");
+            .find(
+              (a) =>
+                a.id === args.id &&
+                a.kind === "source" &&
+                !excluded.has(a.id) &&
+                !excludedHashes.has(a.sha256) &&
+                !excludedHashes.has(String(a.metadata.selectedSha256 ?? "")) &&
+                !excludedHashes.has(String(a.metadata.rawSha256 ?? "")),
+            );
           if (!source)
             throw new AgentError(
               "SOURCE",
@@ -366,6 +394,7 @@ export class TaskTools {
         ),
       );
     if (
+      this.run.kind === "research" &&
       this.config.web.allowedHosts.length &&
       !this.run.localOnly &&
       this.run.dataClass !== "restricted"
@@ -381,24 +410,99 @@ export class TaskTools {
               { local: false, allowedData: this.config.web.allowedData },
               "web fetch",
             );
-            const result = await fetchPublic(
+            const requested = new URL(args.url);
+            if (
+              (this.run.contextState?.excludedSourceUrls ?? []).includes(
+                requested.href,
+              )
+            )
+              throw new AgentError(
+                "SOURCE_EXCLUDED",
+                "This URL belongs to an excluded source family",
+              );
+            const excludedIds = new Set(
+              this.run.contextState?.excludedSourceIds ?? [],
+            );
+            const excludedHashes = new Set(
+              this.run.contextState?.excludedSourceHashes ?? [],
+            );
+            if (
+              this.store
+                .artifacts(this.run.id)
+                .some(
+                  (artifact) =>
+                    artifact.kind === "source" &&
+                    (artifact.metadata.url === requested.href ||
+                      artifact.metadata.requestedUrl === requested.href) &&
+                    (excludedIds.has(artifact.id) ||
+                      excludedHashes.has(artifact.sha256) ||
+                      excludedHashes.has(
+                        String(artifact.metadata.rawSha256 ?? ""),
+                      ) ||
+                      excludedHashes.has(
+                        String(artifact.metadata.selectedSha256 ?? ""),
+                      )),
+                )
+            )
+              throw new AgentError(
+                "SOURCE_EXCLUDED",
+                "This URL belongs to an excluded source family",
+              );
+            const result = await this.publicFetcher(
               new URL(args.url),
               AbortSignal.any([signal, AbortSignal.timeout(30000)]),
               this.config.web.allowedHosts,
               this.config.limits.maxFileBytes,
             );
+            const rawSha256 = sha256(result.body);
+            const extracted = decodeResponse(
+              result,
+              this.config.limits.maxInputBytes,
+            );
+            const selectedSha256 = sha256(extracted.text);
+            if (
+              excludedHashes.has(rawSha256) ||
+              excludedHashes.has(selectedSha256)
+            )
+              throw new AgentError(
+                "SOURCE_EXCLUDED",
+                "Downloaded bytes match an excluded source family",
+              );
+            const raw = await this.store.artifact(
+              this.run,
+              `source-raw/${rawSha256}`,
+              "source-raw",
+              result.body,
+              {
+                url: result.url,
+                requestedUrl: requested.href,
+                rawSha256,
+                retrievedAt: result.retrievedAt,
+                contentType: result.contentType,
+                mediaType: result.mediaType,
+                lastModified: result.lastModified,
+                private: true,
+              },
+            );
             const source = await this.store.artifact(
               this.run,
               result.url,
               "source",
-              result.text,
+              extracted.text,
               {
                 url: result.url,
-                retrievedAt: new Date().toISOString(),
+                requestedUrl: requested.href,
+                retrievedAt: result.retrievedAt,
                 contentType: result.contentType,
+                mediaType: result.mediaType,
+                charset: result.charset,
+                rawArtifactId: raw.id,
+                rawSha256,
+                selectedSha256,
+                extraction: extracted.metadata,
               },
             );
-            const numbered = result.text
+            const numbered = extracted.text
               .split("\n")
               .map((line, i) => `${i + 1}: ${line}`)
               .join("\n");
@@ -408,6 +512,254 @@ export class TaskTools {
               url: result.url,
               text: numbered,
             });
+          },
+        ),
+      );
+    if (
+      this.run.kind === "research" &&
+      !this.run.localOnly &&
+      this.run.dataClass !== "restricted"
+    )
+      tools.push(
+        this.wrap(
+          "search_web",
+          "Search an explicitly configured public endpoint for discovery only; snippets are not factual evidence.",
+          z.strictObject({
+            query: z.string().min(1).max(2000),
+            limit: z.number().int().min(1).max(20).default(10),
+          }),
+          async (args, signal) => {
+            assertDisclosure(
+              this.run,
+              { local: false, allowedData: this.config.web.allowedData },
+              "web search",
+            );
+            const configured = this.config.web.search;
+            if (!configured)
+              throw new AgentError(
+                "SEARCH_UNAVAILABLE",
+                "No approved web.search endpoint is configured",
+              );
+            const url = new URL(configured.endpoint);
+            url.searchParams.set(configured.queryParam, args.query);
+            const result = await this.publicFetcher(
+              url,
+              AbortSignal.any([signal, AbortSignal.timeout(30000)]),
+              this.config.web.allowedHosts,
+              this.config.limits.maxFileBytes,
+            );
+            const decoded = decodeResponse(
+              result,
+              Math.min(this.config.limits.maxInputBytes, 200_000),
+            );
+            const discoveries = parseDiscoveries(
+              decoded.text,
+              result,
+              args.limit,
+              this.config.web.allowedHosts,
+            );
+            const report = {
+              query: args.query,
+              searchUrl: url.href,
+              url: result.url,
+              retrievedAt: result.retrievedAt,
+              responseSha256: sha256(result.body),
+              discoveryOnly: true,
+              results: discoveries,
+              responseTruncated: decoded.metadata.truncated === true,
+              resultLimit: args.limit,
+            };
+            await this.store.artifact(
+              this.run,
+              `research/search-${id()}.json`,
+              "report",
+              JSON.stringify(report, null, 2),
+              { type: "web-search", discoveryOnly: true },
+            );
+            return JSON.stringify(report);
+          },
+        ),
+      );
+    if (this.run.kind === "research") {
+      tools.push(
+        this.wrap(
+          "research_checkpoint",
+          "Save a bounded, source-linked research checkpoint without changing user policy or pins.",
+          checkpointSchema,
+          async (args) => {
+            const checkpoint = {
+              ...args,
+              author: "model" as const,
+              trusted: false as const,
+              updatedAt: Date.now(),
+            };
+            const serialized = canonical(checkpoint);
+            if (Buffer.byteLength(serialized) > 32_000)
+              throw new AgentError(
+                "CHECKPOINT_SIZE",
+                "Research checkpoint exceeds the combined 32000-byte limit",
+              );
+            const excludedIds = new Set(
+              this.run.contextState?.excludedSourceIds ?? [],
+            );
+            const excludedHashes = new Set(
+              this.run.contextState?.excludedSourceHashes ?? [],
+            );
+            const excludedUrls = new Set(
+              this.run.contextState?.excludedSourceUrls ?? [],
+            );
+            const available = new Set(
+              this.store
+                .artifacts(this.run.id)
+                .filter(
+                  (artifact) =>
+                    artifact.kind === "source" &&
+                    !excludedIds.has(artifact.id) &&
+                    !excludedHashes.has(artifact.sha256) &&
+                    !excludedHashes.has(
+                      String(artifact.metadata.rawSha256 ?? ""),
+                    ) &&
+                    !excludedHashes.has(
+                      String(artifact.metadata.selectedSha256 ?? ""),
+                    ) &&
+                    !excludedUrls.has(String(artifact.metadata.url ?? "")) &&
+                    !excludedUrls.has(
+                      String(artifact.metadata.requestedUrl ?? ""),
+                    ),
+                )
+                .map((artifact) => artifact.id),
+            );
+            for (const sourceId of checkpoint.decisions.flatMap(
+              (decision) => decision.sourceIds,
+            ))
+              if (!available.has(sourceId))
+                throw new AgentError(
+                  "SOURCE",
+                  `Checkpoint source is not authorized: ${sourceId}`,
+                );
+            const context = normalizeConversationContext(this.run.contextState);
+            context.researchCheckpoint = {
+              ...checkpoint,
+              unavailableSourceIds:
+                context.researchCheckpoint?.unavailableSourceIds,
+            };
+            this.run.contextState = context;
+            this.store.save(this.run, "research_checkpoint", {
+              sourceIds: checkpoint.decisions.flatMap(
+                (decision) => decision.sourceIds,
+              ),
+            });
+            await this.store.artifact(
+              this.run,
+              `research/checkpoint-${id()}.json`,
+              "report",
+              serialized,
+              { type: "research-checkpoint", author: "model", trusted: false },
+            );
+            return serialized;
+          },
+        ),
+        this.wrap(
+          "read_research_checkpoint",
+          "Read the current host-retained research checkpoint.",
+          z.strictObject({}),
+          async () =>
+            JSON.stringify(this.run.contextState?.researchCheckpoint ?? null),
+        ),
+      );
+    }
+    if (this.run.kind === "writing" || this.run.kind === "research")
+      tools.push(
+        this.wrap(
+          "check_writing",
+          "Run bounded literal and style heuristics against a protected candidate and an authorized stored source.",
+          writingOptionsSchema.extend({
+            path: pathSchema,
+            sourceId: z.string(),
+          }),
+          async (args) => {
+            const excludedIds = new Set(
+              this.run.contextState?.excludedSourceIds ?? [],
+            );
+            const excludedHashes = new Set(
+              this.run.contextState?.excludedSourceHashes ?? [],
+            );
+            const excludedUrls = new Set(
+              this.run.contextState?.excludedSourceUrls ?? [],
+            );
+            const source = this.store
+              .artifacts(this.run.id)
+              .find(
+                (artifact) =>
+                  artifact.id === args.sourceId &&
+                  artifact.kind === "source" &&
+                  !excludedIds.has(artifact.id) &&
+                  !excludedHashes.has(artifact.sha256) &&
+                  !excludedHashes.has(
+                    String(artifact.metadata.rawSha256 ?? ""),
+                  ) &&
+                  !excludedHashes.has(
+                    String(artifact.metadata.selectedSha256 ?? ""),
+                  ) &&
+                  !excludedUrls.has(String(artifact.metadata.url ?? "")) &&
+                  !excludedUrls.has(
+                    String(artifact.metadata.requestedUrl ?? ""),
+                  ),
+              );
+            if (!source)
+              throw new AgentError(
+                "SOURCE",
+                "Source does not belong to this run or is unavailable",
+              );
+            const sourceText = (await this.store.content(source)).toString(
+              "utf8",
+            );
+            if (
+              Buffer.byteLength(sourceText) > 1_000_000 ||
+              sourceText.split("\n").length > 10_000
+            )
+              throw new AgentError(
+                "WRITING_SIZE",
+                "Select a smaller stored source before running the writing check",
+              );
+            const candidate = await this.file(args.path);
+            const candidateText = await readText(
+              candidate,
+              this.config.limits.maxFileBytes,
+            );
+            const mustKeep = [
+              ...new Set([...(this.run.mustKeep ?? []), ...args.mustKeep]),
+            ];
+            const review = reviewWriting(sourceText, candidateText, {
+              style: args.style,
+              mustKeep,
+              terminology: args.terminology,
+            });
+            const report = {
+              sourceId: source.id,
+              selectedTextSha256: sha256(sourceText),
+              candidatePath: args.path,
+              review: {
+                ...review,
+                findings: review.findings.map((finding) => ({
+                  ...finding,
+                  location: {
+                    ...finding.location,
+                    sourceId: source.id,
+                    selectedTextSha256: sha256(sourceText),
+                  },
+                })),
+              },
+              heuristicOnly: true,
+            };
+            await this.store.artifact(
+              this.run,
+              `writing/check-${id()}.json`,
+              "report",
+              JSON.stringify(report, null, 2),
+              { type: "writing-check", sourceId: source.id },
+            );
+            return JSON.stringify(report);
           },
         ),
       );
@@ -421,6 +773,11 @@ export class TaskTools {
           bytes: z.number().int().min(1).max(32000).default(12000),
         }),
         async (args) => {
+          if (this.run.contextState?.excludedSourceIds?.length)
+            throw new AgentError(
+              "SOURCE_EXCLUDED",
+              "Context archives are unavailable after source exclusion",
+            );
           const text = await readContextArchive(
             this.store.paths,
             this.run,
@@ -440,14 +797,41 @@ export class TaskTools {
           "list_files",
           "search_files",
           "read_context",
+          ...(this.run.kind === "research"
+            ? [
+                "fetch_source",
+                "search_web",
+                "research_checkpoint",
+                "read_research_checkpoint",
+              ]
+            : []),
+          ...(this.run.kind === "writing" || this.run.kind === "research"
+            ? ["check_writing"]
+            : []),
         ].includes(tool.name),
       );
     return tools;
   }
   async evidence(): Promise<string> {
+    const excludedIds = new Set(this.run.contextState?.excludedSourceIds ?? []);
+    const excludedHashes = new Set(
+      this.run.contextState?.excludedSourceHashes ?? [],
+    );
+    const excludedUrls = new Set(
+      this.run.contextState?.excludedSourceUrls ?? [],
+    );
     const artifacts = this.store
       .artifacts(this.run.id)
-      .filter((a) => a.kind === "source");
+      .filter(
+        (a) =>
+          a.kind === "source" &&
+          !excludedIds.has(a.id) &&
+          !excludedHashes.has(a.sha256) &&
+          !excludedHashes.has(String(a.metadata.rawSha256 ?? "")) &&
+          !excludedHashes.has(String(a.metadata.selectedSha256 ?? "")) &&
+          !excludedUrls.has(String(a.metadata.url ?? "")) &&
+          !excludedUrls.has(String(a.metadata.requestedUrl ?? "")),
+      );
     return canonical({
       sources: artifacts.map((a) => ({
         id: a.id,
@@ -469,4 +853,101 @@ export class TaskTools {
         );
     }
   }
+}
+
+const checkpointSchema = z.strictObject({
+  summary: z.string().min(1).max(8000),
+  searchedScopes: z.array(z.string().min(1).max(500)).max(50),
+  openQuestions: z.array(z.string().min(1).max(1000)).max(50),
+  decisions: z
+    .array(
+      z.strictObject({
+        text: z.string().min(1).max(2000),
+        sourceIds: z.array(z.string().regex(/^[a-f0-9-]{36}$/)).max(50),
+      }),
+    )
+    .max(50),
+});
+
+function parseDiscoveries(
+  text: string,
+  response: PublicFetchResult,
+  limit: number,
+  allowedHosts: string[],
+): Array<{
+  title: string;
+  url: string;
+  snippet?: string;
+  fetchAllowed: boolean;
+}> {
+  let entries: unknown[] = [];
+  if (response.mediaType === "application/json") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new AgentError(
+        "SEARCH_RESPONSE",
+        "Search response is not valid JSON",
+      );
+    }
+    const root = parsed as { results?: unknown };
+    entries = Array.isArray(root?.results) ? root.results : [];
+  } else if (response.mediaType === "text/html") {
+    const metadata = decodeResponse(response, 200_000).metadata;
+    const links = Array.isArray(metadata.links)
+      ? (metadata.links as unknown[])
+      : [];
+    entries = links;
+  } else {
+    throw new AgentError(
+      "SEARCH_RESPONSE",
+      "Configured search endpoint must return JSON results or HTML",
+    );
+  }
+  const results: Array<{
+    title: string;
+    url: string;
+    snippet?: string;
+    fetchAllowed: boolean;
+  }> = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const value = entry as Record<string, unknown>;
+    const rawUrl = typeof value.url === "string" ? value.url : undefined;
+    if (!rawUrl) continue;
+    let url: URL;
+    try {
+      url = new URL(rawUrl, response.url);
+    } catch {
+      continue;
+    }
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.hash ||
+      (url.port && url.port !== "443") ||
+      url.protocol !== "https:"
+    )
+      continue;
+    results.push({
+      title:
+        typeof value.title === "string"
+          ? value.title.slice(0, 500)
+          : typeof value.text === "string"
+            ? value.text.slice(0, 500)
+            : "Untitled discovery",
+      url: url.href,
+      snippet:
+        typeof value.snippet === "string"
+          ? value.snippet.slice(0, 2000)
+          : typeof value.content === "string"
+            ? value.content.slice(0, 2000)
+            : undefined,
+      fetchAllowed: allowedHosts.includes(url.hostname),
+    });
+    if (results.length >= limit) break;
+  }
+  return results;
 }

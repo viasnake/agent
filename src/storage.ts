@@ -281,6 +281,9 @@ export class Store {
     runId: string,
     directOnly = false,
     excludeGit = false,
+    excludeIds: readonly string[] = [],
+    excludeHashes: readonly string[] = [],
+    excludeUrls: readonly string[] = [],
   ): void {
     const sources = directOnly
       ? (
@@ -291,10 +294,34 @@ export class Store {
             .all(parentId) as { payload: string }[]
         ).map((row) => JSON.parse(row.payload) as Artifact)
       : this.artifacts(parentId);
-    for (const source of sources.filter(
+    const authorized = sources.filter(
       (artifact) =>
         artifact.kind === "source" &&
         !(excludeGit && artifact.metadata.format === "git"),
+    );
+    const excludedIdSet = new Set(excludeIds),
+      excludedHashSet = new Set(excludeHashes),
+      excludedUrlSet = new Set(excludeUrls);
+    const filtered = authorized.filter(
+      (artifact) =>
+        !excludedIdSet.has(artifact.id) &&
+        !excludedHashSet.has(artifact.sha256) &&
+        !excludedHashSet.has(String(artifact.metadata.rawSha256 ?? "")) &&
+        !excludedHashSet.has(String(artifact.metadata.selectedSha256 ?? "")) &&
+        !excludedUrlSet.has(String(artifact.metadata.url ?? "")) &&
+        !excludedUrlSet.has(String(artifact.metadata.requestedUrl ?? "")),
+    );
+    const rawIds = new Set(
+      filtered
+        .map((artifact) => artifact.metadata.rawArtifactId)
+        .filter((value): value is string => typeof value === "string"),
+    );
+    for (const source of sources.filter(
+      (artifact) =>
+        (artifact.kind === "source" ||
+          (artifact.kind === "source-raw" && rawIds.has(artifact.id))) &&
+        (artifact.kind !== "source" ||
+          filtered.some((candidate) => candidate.id === artifact.id)),
     ))
       this.db
         .prepare("INSERT OR IGNORE INTO source_links VALUES (?,?)")

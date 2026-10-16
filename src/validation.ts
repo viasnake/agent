@@ -137,6 +137,12 @@ export class Evaluator {
         detail: "No output document was reported",
       });
     let combined = "";
+    const documentArtifacts: Array<{
+      id: string;
+      sha256: string;
+      name: string;
+      text: string;
+    }> = [];
     for (const path of documents) {
       const content = await readText(
         await safePath(work, path),
@@ -145,7 +151,18 @@ export class Evaluator {
       if (!content.trim())
         throw new AgentError("ARTIFACT_MISSING", `Empty output ${path}`);
       combined += "\n" + content;
-      await this.store.artifact(run, path, "document", content);
+      const artifact = await this.store.artifact(
+        run,
+        path,
+        "document",
+        content,
+      );
+      documentArtifacts.push({
+        id: artifact.id,
+        sha256: artifact.sha256,
+        name: artifact.name,
+        text: content,
+      });
     }
     for (const text of run.mustKeep)
       results.push({
@@ -156,9 +173,23 @@ export class Evaluator {
           : `Required text is absent: ${text}`,
       });
     if (run.kind === "research") {
+      const excluded = new Set(run.contextState?.excludedSourceIds ?? []);
+      const excludedHashes = new Set(
+        run.contextState?.excludedSourceHashes ?? [],
+      );
+      const excludedUrls = new Set(run.contextState?.excludedSourceUrls ?? []);
       const sources = this.store
         .artifacts(run.id)
-        .filter((a) => a.kind === "source");
+        .filter(
+          (a) =>
+            a.kind === "source" &&
+            !excluded.has(a.id) &&
+            !excludedHashes.has(a.sha256) &&
+            !excludedHashes.has(String(a.metadata.rawSha256 ?? "")) &&
+            !excludedHashes.has(String(a.metadata.selectedSha256 ?? "")) &&
+            !excludedUrls.has(String(a.metadata.url ?? "")) &&
+            !excludedUrls.has(String(a.metadata.requestedUrl ?? "")),
+        );
       const citations = [
         ...combined.matchAll(/\[source:([a-f0-9-]{36}):L(\d+)(?:-L(\d+))?\]/g),
       ];
@@ -213,12 +244,73 @@ export class Evaluator {
         "WORKSPACE_CHANGED",
         "Working copy changed during validation",
       );
-    await this.store.artifact(
+    const validationArtifact = await this.store.artifact(
       run,
       "validation.json",
       "check",
       JSON.stringify(results, null, 2),
     );
+    const excludedSourceIds = new Set(
+      run.contextState?.excludedSourceIds ?? [],
+    );
+    const excludedSourceHashes = new Set(
+      run.contextState?.excludedSourceHashes ?? [],
+    );
+    const excludedSourceUrls = new Set(
+      run.contextState?.excludedSourceUrls ?? [],
+    );
+    const availableSourceIds = this.store
+      .artifacts(run.id)
+      .filter(
+        (artifact) =>
+          artifact.kind === "source" &&
+          !excludedSourceIds.has(artifact.id) &&
+          !excludedSourceHashes.has(artifact.sha256) &&
+          !excludedSourceHashes.has(
+            String(artifact.metadata.rawSha256 ?? ""),
+          ) &&
+          !excludedSourceHashes.has(
+            String(artifact.metadata.selectedSha256 ?? ""),
+          ) &&
+          !excludedSourceUrls.has(String(artifact.metadata.url ?? "")) &&
+          !excludedSourceUrls.has(String(artifact.metadata.requestedUrl ?? "")),
+      )
+      .map((artifact) => artifact.id);
+    for (const document of documentArtifacts) {
+      const citedSourceRanges = [
+        ...document.text.matchAll(
+          /\[source:([a-f0-9-]{36}):L(\d+)(?:-L(\d+))?\]/g,
+        ),
+      ].map((match) => ({
+        sourceId: match[1],
+        startLine: Number(match[2]),
+        endLine: Number(match[3] ?? match[2]),
+      }));
+      await this.store.artifact(
+        run,
+        `provenance/${document.id}.json`,
+        "report",
+        JSON.stringify({
+          version: 1,
+          type: "provenance",
+          documentId: document.id,
+          artifactId: document.id,
+          artifactSha256: document.sha256,
+          producingRunId: run.id,
+          parentRunId: run.parentRunId,
+          availableInputSourceIds: availableSourceIds,
+          citedSourceRanges,
+          validationArtifactId: validationArtifact.id,
+          semanticCorrectness: "not-established",
+        }),
+        {
+          type: "provenance",
+          documentId: document.id,
+          documentSha256: document.sha256,
+          validationArtifactId: validationArtifact.id,
+        },
+      );
+    }
     if (results.every((r) => r.passed)) {
       await atomicWrite(
         join(directory, "validated-manifest.json"),

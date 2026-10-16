@@ -103,6 +103,10 @@ export interface ConversationContext {
   sourceIds: string[];
   imageIds: string[];
   redactedImageIds?: string[];
+  researchCheckpoint?: ResearchCheckpoint;
+  excludedSourceIds?: string[];
+  excludedSourceHashes?: string[];
+  excludedSourceUrls?: string[];
   originalRunIds: string[];
   workingState: {
     runId?: string;
@@ -141,6 +145,16 @@ export interface ConversationContext {
     }>;
   };
   compactions: ContextCompaction[];
+}
+export interface ResearchCheckpoint {
+  summary: string;
+  searchedScopes: string[];
+  openQuestions: string[];
+  decisions: Array<{ text: string; sourceIds: string[] }>;
+  unavailableSourceIds?: string[];
+  author: "model";
+  trusted: false;
+  updatedAt: number;
 }
 export interface Run {
   parentRunId?: string;
@@ -182,12 +196,56 @@ export interface Artifact {
   id: string;
   runId: string;
   name: string;
-  kind: "document" | "patch" | "check" | "source" | "report";
+  kind: "document" | "patch" | "check" | "source" | "source-raw" | "report";
   sha256: string;
   bytes: number;
   dataClass: DataClass;
   metadata: Record<string, unknown>;
 }
+export interface ArtifactHistoryEntry {
+  artifact: Artifact;
+  run: {
+    id: string;
+    state: RunState;
+  };
+  provenanceId?: string;
+}
+export interface ArtifactValidationCheck {
+  id: string;
+  passed: boolean;
+  detail: string;
+}
+export interface ArtifactProvenanceSourceRange {
+  sourceId: string;
+  startLine: number;
+  endLine: number;
+}
+export type ArtifactProvenance =
+  | {
+      status: "unknown";
+      legacy: true;
+      artifactId: string;
+      artifactSha256: string;
+    }
+  | {
+      status: "available";
+      legacy: false;
+      version: 1;
+      type: "provenance";
+      documentId: string;
+      artifactId: string;
+      artifactSha256: string;
+      producingRunId: string;
+      parentRunId?: string;
+      availableInputSourceIds: string[];
+      citedSourceRanges: ArtifactProvenanceSourceRange[];
+      validation: {
+        artifactId: string;
+        sha256: string;
+        checks: ArtifactValidationCheck[];
+      };
+      semanticCorrectness: "not-established";
+    };
 export interface ModelUsage {
   input: number | null;
   output: number | null;

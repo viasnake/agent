@@ -3,6 +3,7 @@ import { realpath, readFile, lstat, mkdtemp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { stringify } from "yaml";
 import lockfile from "proper-lockfile";
+import { createTwoFilesPatch } from "diff";
 import { applyRun } from "./artifacts.js";
 import {
   configHash,
@@ -31,6 +32,11 @@ import {
   type WorkKind,
   type DocumentReference,
   type PreparedInput,
+  type Artifact,
+  type ArtifactHistoryEntry,
+  type ArtifactProvenance,
+  type ArtifactProvenanceSourceRange,
+  type ArtifactValidationCheck,
 } from "./types.js";
 import {
   compactContext,
@@ -312,6 +318,10 @@ export class Application extends EventEmitter {
     const documents: DocumentReference[] = [];
     let rawDocumentBytes = 0;
     const fresh: ImageReference[] = [];
+    const excludedIds = new Set(this.session.context?.excludedSourceIds ?? []);
+    const excludedHashes = new Set(
+      this.session.context?.excludedSourceHashes ?? [],
+    );
     const tokens = fileReferences(text),
       documentTokens = tokens.filter(
         (token) =>
@@ -353,6 +363,11 @@ export class Application extends EventEmitter {
           ),
           AbortSignal.timeout(30000),
         );
+        if (excludedHashes.has(sha256(selection.raw)))
+          throw new AgentError(
+            "SOURCE_EXCLUDED",
+            "Git attachment belongs to an excluded source family",
+          );
         rawDocumentBytes += selection.raw.length;
         if (rawDocumentBytes > maxPreparedInputBytes)
           throw new AgentError(
@@ -422,6 +437,7 @@ export class Application extends EventEmitter {
         const mimeType = imageMimeForPath(actualPath)!;
         const metadata = await validateImage(bytes, mimeType);
         const imageId = `img-${sha256(bytes)}`;
+        this.assertImageNotExcluded(imageId, sha256(bytes));
         if (this.session.context?.redactedImageIds?.includes(imageId))
           throw new AgentError(
             "IMAGE_REDACTED",
@@ -498,6 +514,15 @@ export class Application extends EventEmitter {
             signal: AbortSignal.timeout(30000),
           },
         );
+        if (
+          excludedIds.has(prepared.reference.id) ||
+          excludedHashes.has(prepared.reference.rawSha256) ||
+          excludedHashes.has(prepared.reference.selectedSha256)
+        )
+          throw new AgentError(
+            "SOURCE_EXCLUDED",
+            "Attachment belongs to an excluded source family",
+          );
         documents.push(prepared.reference);
         fresh.push(...(prepared.images ?? []));
         total += prepared.reference.selectedBytes;
@@ -515,7 +540,13 @@ export class Application extends EventEmitter {
         "INPUT_SIZE",
         "依頼と添付ファイルが入力上限を超えています。",
       );
-    const images = mergeImageReferences(this.session.images ?? [], fresh);
+    const excludedImage = (image: ImageReference): boolean =>
+      (this.session.context?.excludedSourceIds ?? []).includes(image.id) ||
+      (this.session.context?.excludedSourceHashes ?? []).includes(image.sha256);
+    const images = mergeImageReferences(
+      this.session.images ?? [],
+      fresh,
+    ).filter((image) => !excludedImage(image));
     if (
       images.length > maxConversationImages ||
       images.reduce((sum, ref) => sum + ref.bytes, 0) >
@@ -961,6 +992,10 @@ export class Application extends EventEmitter {
         "Git attachments are unavailable after image redaction; use a separate sanitized conversation",
       );
     const queuedDocuments = input.documents ?? [];
+    const excludedIds = new Set(this.session.context?.excludedSourceIds ?? []);
+    const excludedHashes = new Set(
+      this.session.context?.excludedSourceHashes ?? [],
+    );
     if (queuedDocuments.length > maxPreparedDocuments)
       throw new AgentError(
         "INPUT_SIZE",
@@ -971,6 +1006,15 @@ export class Application extends EventEmitter {
     if (selectedInputBytes > this.config.limits.maxInputBytes)
       throw new AgentError("INPUT_SIZE", "Request exceeds the input limit");
     for (const reference of queuedDocuments) {
+      if (
+        excludedIds.has(reference.id) ||
+        excludedHashes.has(reference.rawSha256) ||
+        excludedHashes.has(reference.selectedSha256)
+      )
+        throw new AgentError(
+          "SOURCE_EXCLUDED",
+          "Queued attachment belongs to an excluded source family",
+        );
       if (
         !Number.isSafeInteger(reference.rawBytes) ||
         reference.rawBytes < 0 ||
@@ -1010,10 +1054,18 @@ export class Application extends EventEmitter {
         "INPUT_PREVIEW_STALE",
         "Queued attachment has no immutable selection; review it again",
       );
-    const images = mergeImageReferences(
+    const mergedImages = mergeImageReferences(
       this.session.images ?? [],
       input.images ?? this.session.images ?? [],
     );
+    const excludedImage = (image: ImageReference): boolean =>
+      excludedIds.has(image.id) || excludedHashes.has(image.sha256);
+    if (input.images?.some(excludedImage))
+      throw new AgentError(
+        "SOURCE_EXCLUDED",
+        "Image belongs to an excluded source family",
+      );
+    const images = mergedImages.filter((image) => !excludedImage(image));
     const preparedForRun = preparedInputs.map((prepared) => {
       const imageIds = prepared.reference.imageIds ?? [],
         attachedImages = imageIds.map((imageId) =>
@@ -1115,7 +1167,17 @@ export class Application extends EventEmitter {
       contextRun.access === access &&
       contextRun.mode === this.session.strategy &&
       contextRun.dataClass === requestDisclosure.dataClass &&
-      contextRun.localOnly === requestDisclosure.localOnly
+      contextRun.localOnly === requestDisclosure.localOnly &&
+      canonical({
+        ids: contextRun.contextState?.excludedSourceIds ?? [],
+        hashes: contextRun.contextState?.excludedSourceHashes ?? [],
+        urls: contextRun.contextState?.excludedSourceUrls ?? [],
+      }) ===
+        canonical({
+          ids: this.session.context?.excludedSourceIds ?? [],
+          hashes: this.session.context?.excludedSourceHashes ?? [],
+          urls: this.session.context?.excludedSourceUrls ?? [],
+        })
     )
       for (const task of contextRun.tasks)
         if (task.sessionFile && task.model)
@@ -1138,6 +1200,12 @@ export class Application extends EventEmitter {
         ? parentRunId
         : undefined;
     const contextState = normalizeConversationContext(this.session.context);
+    contextState.sourceIds = contextState.sourceIds.filter(
+      (sourceId) => !excludedIds.has(sourceId),
+    );
+    contextState.imageIds = contextState.imageIds.filter(
+      (imageId) => !excludedIds.has(imageId),
+    );
     if (contextState.redactedImageIds?.length) {
       const unavailableGitArtifacts = this.conversations
         .runs(this.session.id)
@@ -1325,6 +1393,16 @@ export class Application extends EventEmitter {
       );
     return join(this.paths.home, "images", `${ref.sha256}.img`);
   }
+  private assertImageNotExcluded(imageId: string, hash: string): void {
+    if (
+      this.session.context?.excludedSourceIds?.includes(imageId) ||
+      this.session.context?.excludedSourceHashes?.includes(hash)
+    )
+      throw new AgentError(
+        "SOURCE_EXCLUDED",
+        "This image belongs to an excluded source family; use a separate conversation to attach it again",
+      );
+  }
   async stageClipboardImage(): Promise<ImageReference> {
     if (this.busy)
       throw new AgentError(
@@ -1333,6 +1411,7 @@ export class Application extends EventEmitter {
       );
     const bytes = await readClipboardPng();
     const imageId = `img-${sha256(bytes)}`;
+    this.assertImageNotExcluded(imageId, sha256(bytes));
     if (this.session.context?.redactedImageIds?.includes(imageId))
       throw new AgentError(
         "IMAGE_REDACTED",
@@ -1395,6 +1474,7 @@ export class Application extends EventEmitter {
       mimeType = imageMimeForPath(path)!;
     await validateImage(bytes, mimeType);
     const imageId = `img-${sha256(bytes)}`;
+    this.assertImageNotExcluded(imageId, sha256(bytes));
     if (this.session.context?.redactedImageIds?.includes(imageId))
       throw new AgentError(
         "IMAGE_REDACTED",
@@ -1665,6 +1745,34 @@ export class Application extends EventEmitter {
       throw new AgentError(
         "POLICY_CHANGED",
         "設定が変わっています。新しい依頼として続けてください。",
+      );
+    if (
+      canonical({
+        ids:
+          normalizeConversationContext(this.session.context)
+            .excludedSourceIds ?? [],
+        hashes:
+          normalizeConversationContext(this.session.context)
+            .excludedSourceHashes ?? [],
+        urls:
+          normalizeConversationContext(this.session.context)
+            .excludedSourceUrls ?? [],
+      }) !==
+      canonical({
+        ids:
+          normalizeConversationContext(run.contextState).excludedSourceIds ??
+          [],
+        hashes:
+          normalizeConversationContext(run.contextState).excludedSourceHashes ??
+          [],
+        urls:
+          normalizeConversationContext(run.contextState).excludedSourceUrls ??
+          [],
+      })
+    )
+      throw new AgentError(
+        "SOURCE_EXCLUDED",
+        "This run predates a source exclusion; continue with a fresh request",
       );
     const activeRedactions = new Set(
       normalizeConversationContext(this.session.context).redactedImageIds ?? [],
@@ -1981,6 +2089,11 @@ export class Application extends EventEmitter {
     bytes = 32_000,
   ): Promise<string> {
     this.idle();
+    if (this.session.context?.excludedSourceIds?.length)
+      throw new AgentError(
+        "SOURCE_EXCLUDED",
+        "Context archives are unavailable after source exclusion",
+      );
     if (
       !Number.isSafeInteger(start) ||
       start < 0 ||
@@ -2014,6 +2127,496 @@ export class Application extends EventEmitter {
       "CONTEXT_ARCHIVE",
       "Context archive is not in this conversation",
     );
+  }
+  private conversationArtifacts(): Map<
+    string,
+    { artifact: Artifact; run: Run }
+  > {
+    const result = new Map<string, { artifact: Artifact; run: Run }>();
+    for (const runId of this.conversations.runs(this.session.id)) {
+      const run = this.store.get(runId);
+      for (const artifact of this.store.artifacts(runId))
+        result.set(artifact.id, { artifact, run });
+    }
+    return result;
+  }
+  private sourceFamily(sourceId: string): {
+    sourceIds: string[];
+    rawArtifactIds: string[];
+    imageIds: string[];
+    hashes: string[];
+    urls: string[];
+  } {
+    const authorized = this.conversationArtifacts(),
+      source = authorized.get(sourceId);
+    if (!source || source.artifact.kind !== "source")
+      throw new AgentError(
+        "SOURCE",
+        "Source is not authorized in this conversation",
+      );
+    const sourceArtifacts = [...authorized.values()].filter(
+      ({ artifact }) => artifact.kind === "source",
+    );
+    const sources = new Map([[sourceId, source]]);
+    const hashes = new Set<string>();
+    const urls = new Set<string>();
+    const addHashes = (artifact: Artifact): boolean => {
+      const before = hashes.size;
+      for (const hash of [
+        artifact.sha256,
+        artifact.metadata.rawSha256,
+        artifact.metadata.selectedSha256,
+      ])
+        if (typeof hash === "string" && hash) hashes.add(hash);
+      return hashes.size !== before;
+    };
+    const addUrls = (artifact: Artifact): boolean => {
+      const before = urls.size;
+      for (const url of [artifact.metadata.url, artifact.metadata.requestedUrl])
+        if (typeof url === "string" && url) urls.add(url);
+      return urls.size !== before;
+    };
+    addHashes(source.artifact);
+    addUrls(source.artifact);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const candidate of sourceArtifacts) {
+        if (
+          !sources.has(candidate.artifact.id) &&
+          ([
+            candidate.artifact.sha256,
+            candidate.artifact.metadata.rawSha256,
+            candidate.artifact.metadata.selectedSha256,
+          ].some((hash) => typeof hash === "string" && hashes.has(hash)) ||
+            [
+              candidate.artifact.metadata.url,
+              candidate.artifact.metadata.requestedUrl,
+            ].some((url) => typeof url === "string" && urls.has(url)))
+        ) {
+          sources.set(candidate.artifact.id, candidate);
+          if (addHashes(candidate.artifact)) changed = true;
+          if (addUrls(candidate.artifact)) changed = true;
+          changed = true;
+        }
+      }
+      if (sources.size + hashes.size > 1000)
+        throw new AgentError(
+          "SOURCE_FAMILY_LIMIT",
+          "Source family is too large to exclude safely",
+        );
+    }
+    const sourceList = [...sources.values()];
+    const rawArtifactIds = [...authorized.values()]
+      .filter(
+        ({ artifact }) =>
+          artifact.kind === "source-raw" &&
+          (sourceList.some(
+            ({ artifact: sourceArtifact }) =>
+              sourceArtifact.metadata.rawArtifactId === artifact.id,
+          ) ||
+            hashes.has(artifact.sha256) ||
+            (typeof artifact.metadata.rawSha256 === "string" &&
+              hashes.has(artifact.metadata.rawSha256))),
+      )
+      .map(({ artifact }) => artifact.id);
+    const sourceIds = [...sources.keys()];
+    const imageIds = [
+      ...new Set(
+        [...authorized.values()]
+          .flatMap(({ run }) => run.images ?? [])
+          .filter(
+            (image) =>
+              (image.sourceId !== undefined &&
+                sourceIds.includes(image.sourceId)) ||
+              (typeof image.documentId === "string" &&
+                sourceList.some(
+                  ({ artifact }) =>
+                    artifact.metadata.sourceId === image.documentId,
+                )),
+          )
+          .map((image) => image.id),
+      ),
+    ];
+    for (const id of rawArtifactIds) {
+      const raw = authorized.get(id)?.artifact;
+      if (raw) addHashes(raw);
+    }
+    for (const image of [...authorized.values()].flatMap(
+      ({ run }) => run.images ?? [],
+    ))
+      if (imageIds.includes(image.id)) hashes.add(image.sha256);
+    const excludedUrls = [...urls];
+    if (
+      sourceIds.length +
+        rawArtifactIds.length +
+        imageIds.length +
+        hashes.size +
+        excludedUrls.length >
+      1000
+    )
+      throw new AgentError(
+        "SOURCE_FAMILY_LIMIT",
+        "Source family is too large to exclude safely",
+      );
+    return {
+      sourceIds,
+      rawArtifactIds,
+      imageIds,
+      hashes: [...hashes],
+      urls: excludedUrls,
+    };
+  }
+  previewSourceExclusion(sourceId: string): {
+    sessionId: string;
+    sourceId: string;
+    family: ReturnType<Application["sourceFamily"]>;
+    policy: {
+      excludedSourceIds: string[];
+      excludedSourceHashes: string[];
+      excludedSourceUrls: string[];
+    };
+    binding: string;
+    warning: string;
+  } {
+    this.idle();
+    const family = this.sourceFamily(sourceId);
+    const policy = {
+      excludedSourceIds: [
+        ...(this.session.context?.excludedSourceIds ?? []),
+      ].sort(),
+      excludedSourceHashes: [
+        ...(this.session.context?.excludedSourceHashes ?? []),
+      ].sort(),
+      excludedSourceUrls: [
+        ...(this.session.context?.excludedSourceUrls ?? []),
+      ].sort(),
+    };
+    const binding = sha256(
+      canonical({
+        sessionId: this.session.id,
+        sourceId,
+        family,
+        policy,
+      }),
+    );
+    return {
+      sessionId: this.session.id,
+      sourceId,
+      family: structuredClone(family),
+      policy,
+      binding,
+      warning:
+        "Exclusion is forward-only; previously transmitted facts and remote data are not erased.",
+    };
+  }
+  excludeSource(sourceId: string, binding: string): void {
+    this.idle();
+    const preview = this.previewSourceExclusion(sourceId);
+    if (preview.sessionId !== this.session.id || preview.binding !== binding)
+      throw new AgentError(
+        "SOURCE_BINDING",
+        "Source exclusion preview is stale; create a fresh preview",
+      );
+    const context = normalizeConversationContext(this.session.context),
+      excludedIds = new Set([
+        ...(context.excludedSourceIds ?? []),
+        ...preview.family.sourceIds,
+        ...preview.family.rawArtifactIds,
+        ...preview.family.imageIds,
+      ]),
+      excludedHashes = new Set([
+        ...(context.excludedSourceHashes ?? []),
+        ...preview.family.hashes,
+      ]),
+      excludedUrls = new Set([
+        ...(context.excludedSourceUrls ?? []),
+        ...preview.family.urls,
+      ]);
+    context.excludedSourceIds = [...excludedIds].sort();
+    context.excludedSourceHashes = [...excludedHashes].sort();
+    context.excludedSourceUrls = [...excludedUrls].sort();
+    context.sourceIds = context.sourceIds.filter((id) => !excludedIds.has(id));
+    context.imageIds = context.imageIds.filter((id) => !excludedIds.has(id));
+    context.workingState.artifacts = context.workingState.artifacts.filter(
+      (id) => !excludedIds.has(id),
+    );
+    if (context.researchCheckpoint) {
+      const unavailableSourceIds = new Set([
+        ...(context.researchCheckpoint.unavailableSourceIds ?? []),
+        ...preview.family.sourceIds,
+      ]);
+      context.researchCheckpoint = {
+        ...context.researchCheckpoint,
+        decisions: context.researchCheckpoint.decisions.map((decision) => ({
+          ...decision,
+          sourceIds: decision.sourceIds.filter((id) => !excludedIds.has(id)),
+        })),
+        unavailableSourceIds: [...unavailableSourceIds].sort(),
+      };
+    }
+    for (const [path, hash] of Object.entries(context.workingState.hashes))
+      if (excludedHashes.has(hash)) delete context.workingState.hashes[path];
+    context.workingState.history = context.workingState.history.map(
+      (entry) => ({
+        ...entry,
+        artifacts: entry.artifacts.filter((id) => !excludedIds.has(id)),
+        hashes: Object.fromEntries(
+          Object.entries(entry.hashes).filter(
+            ([, hash]) => !excludedHashes.has(hash),
+          ),
+        ),
+      }),
+    );
+    this.session.queue = this.session.queue.map((queued) => ({
+      ...queued,
+      documents: queued.documents?.filter(
+        (document) =>
+          !excludedIds.has(document.id) &&
+          !excludedHashes.has(document.rawSha256) &&
+          !excludedHashes.has(document.selectedSha256),
+      ),
+      images: queued.images?.filter(
+        (image) =>
+          !excludedIds.has(image.id) && !excludedHashes.has(image.sha256),
+      ),
+    }));
+    this.session.context = context;
+    this.session.contextRunId = undefined;
+    this.session.handoff = undefined;
+    this.session.handoffDigest = undefined;
+    this.save();
+  }
+  async artifactHistory(
+    name?: string,
+    offset = 0,
+  ): Promise<ArtifactHistoryEntry[]> {
+    this.idle();
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000)
+      throw new AgentError("ARTIFACT", "Artifact history range is invalid");
+    const authorized = this.conversationArtifacts();
+    const entries = [...authorized.values()]
+      .filter(
+        ({ artifact }) =>
+          artifact.kind === "document" &&
+          (name === undefined || artifact.name === name),
+      )
+      .sort((a, b) => b.run.updatedAt - a.run.updatedAt)
+      .slice(offset, offset + 30);
+    for (const { artifact } of entries) {
+      if (artifact.bytes > this.config.limits.maxFileBytes)
+        throw new AgentError(
+          "ARTIFACT_SIZE",
+          "Artifact history contains a document above the read limit",
+        );
+      await this.store.content(artifact);
+    }
+    return entries.map(({ artifact, run }) => ({
+      artifact,
+      run: { id: run.id, state: run.state },
+      provenanceId: [...authorized.values()].find(
+        ({ artifact: candidate }) =>
+          candidate.kind === "report" &&
+          candidate.metadata.type === "provenance" &&
+          candidate.metadata.documentId === artifact.id,
+      )?.artifact.id,
+    }));
+  }
+  async artifactProvenance(artifactId: string): Promise<ArtifactProvenance> {
+    this.idle();
+    const authorized = this.conversationArtifacts();
+    const document = authorized.get(artifactId);
+    if (!document || document.artifact.kind !== "document")
+      throw new AgentError("ARTIFACT", "Artifact is not authorized");
+    if (document.artifact.bytes > this.config.limits.maxFileBytes)
+      throw new AgentError("ARTIFACT_SIZE", "Document exceeds the read limit");
+    await this.store.content(document.artifact);
+    const record = [...authorized.values()].find(
+      ({ artifact }) =>
+        artifact.kind === "report" &&
+        artifact.metadata.type === "provenance" &&
+        artifact.metadata.documentId === artifactId,
+    );
+    if (!record)
+      return {
+        legacy: true,
+        artifactId,
+        artifactSha256: document.artifact.sha256,
+        status: "unknown",
+      };
+    if (record.artifact.bytes > this.config.limits.maxFileBytes)
+      throw new AgentError(
+        "ARTIFACT_SIZE",
+        "Provenance record exceeds the read limit",
+      );
+    const parsed = JSON.parse(
+      (await this.store.content(record.artifact)).toString("utf8"),
+    ) as Record<string, unknown>;
+    const validation =
+      typeof parsed.validationArtifactId === "string"
+        ? authorized.get(parsed.validationArtifactId)
+        : undefined;
+    const sourceIds = parsed.availableInputSourceIds;
+    const citedRanges = parsed.citedSourceRanges;
+    const parentRunId = parsed.parentRunId;
+    if (
+      parsed.version !== 1 ||
+      parsed.type !== "provenance" ||
+      parsed.documentId !== artifactId ||
+      parsed.artifactId !== artifactId ||
+      parsed.artifactSha256 !== document.artifact.sha256 ||
+      typeof parsed.producingRunId !== "string" ||
+      parsed.producingRunId !== document.run.id ||
+      (parentRunId !== undefined && typeof parentRunId !== "string") ||
+      !Array.isArray(sourceIds) ||
+      !sourceIds.every((sourceId) => typeof sourceId === "string") ||
+      !Array.isArray(citedRanges) ||
+      !citedRanges.every(
+        (range): range is ArtifactProvenanceSourceRange =>
+          !!range &&
+          typeof range === "object" &&
+          typeof (range as Record<string, unknown>).sourceId === "string" &&
+          Number.isSafeInteger((range as Record<string, unknown>).startLine) &&
+          Number.isSafeInteger((range as Record<string, unknown>).endLine) &&
+          Number((range as Record<string, unknown>).startLine) > 0 &&
+          Number((range as Record<string, unknown>).endLine) >=
+            Number((range as Record<string, unknown>).startLine),
+      ) ||
+      parsed.semanticCorrectness !== "not-established" ||
+      typeof parsed.validationArtifactId !== "string" ||
+      !validation ||
+      validation.artifact.kind !== "check" ||
+      validation.run.id !== document.run.id
+    )
+      throw new AgentError(
+        "ARTIFACT_CORRUPT",
+        "Provenance does not match artifact",
+      );
+    const availableInputSourceIds = sourceIds as string[],
+      availableSources = new Set(
+        [...authorized.values()]
+          .filter(({ artifact }) => artifact.kind === "source")
+          .map(({ artifact }) => artifact.id),
+      ),
+      citedSourceRanges = citedRanges as ArtifactProvenanceSourceRange[];
+    if (
+      availableInputSourceIds.some(
+        (sourceId) => !availableSources.has(sourceId),
+      ) ||
+      citedSourceRanges.some(
+        (range) => !availableInputSourceIds.includes(range.sourceId),
+      )
+    )
+      throw new AgentError(
+        "ARTIFACT_CORRUPT",
+        "Provenance references an unavailable source",
+      );
+    if (validation.artifact.bytes > this.config.limits.maxFileBytes)
+      throw new AgentError(
+        "ARTIFACT_SIZE",
+        "Validation record exceeds the read limit",
+      );
+    const checks = JSON.parse(
+      (await this.store.content(validation.artifact)).toString("utf8"),
+    ) as unknown;
+    if (
+      !Array.isArray(checks) ||
+      !checks.every(
+        (check): check is ArtifactValidationCheck =>
+          !!check &&
+          typeof check === "object" &&
+          typeof (check as Record<string, unknown>).id === "string" &&
+          typeof (check as Record<string, unknown>).passed === "boolean" &&
+          typeof (check as Record<string, unknown>).detail === "string",
+      )
+    )
+      throw new AgentError(
+        "ARTIFACT_CORRUPT",
+        "Validation record is malformed",
+      );
+    return {
+      status: "available",
+      legacy: false,
+      version: 1,
+      type: "provenance",
+      documentId: artifactId,
+      artifactId,
+      artifactSha256: document.artifact.sha256,
+      producingRunId: document.run.id,
+      ...(parentRunId === undefined ? {} : { parentRunId }),
+      availableInputSourceIds,
+      citedSourceRanges,
+      validation: {
+        artifactId: validation.artifact.id,
+        sha256: validation.artifact.sha256,
+        checks,
+      },
+      semanticCorrectness: "not-established",
+    };
+  }
+  async artifactDiff(
+    beforeId: string,
+    afterId: string,
+  ): Promise<{ beforeId: string; afterId: string; patch: string }> {
+    this.idle();
+    const authorized = this.conversationArtifacts(),
+      before = authorized.get(beforeId),
+      after = authorized.get(afterId);
+    if (
+      !before ||
+      !after ||
+      before.artifact.kind !== "document" ||
+      after.artifact.kind !== "document"
+    )
+      throw new AgentError(
+        "ARTIFACT",
+        "Both artifacts must be authorized documents",
+      );
+    const maxBytes = Math.min(this.config.limits.maxFileBytes, 5_000_000);
+    if (before.artifact.bytes > maxBytes || after.artifact.bytes > maxBytes)
+      throw new AgentError(
+        "DIFF_LIMIT",
+        "Document diff exceeds the byte limit",
+      );
+    const [oldBytes, newBytes] = await Promise.all([
+      this.store.content(before.artifact),
+      this.store.content(after.artifact),
+    ]);
+    if (oldBytes.length > maxBytes || newBytes.length > maxBytes)
+      throw new AgentError(
+        "DIFF_LIMIT",
+        "Document diff exceeds the byte limit",
+      );
+    let oldText: string;
+    let newText: string;
+    try {
+      const decoder = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      });
+      oldText = decoder.decode(oldBytes);
+      newText = decoder.decode(newBytes);
+    } catch {
+      throw new AgentError(
+        "DIFF_ENCODING",
+        "Document diff requires UTF-8 text",
+      );
+    }
+    const patch = createTwoFilesPatch(
+      `a/${before.artifact.name}`,
+      `b/${after.artifact.name}`,
+      oldText,
+      newText,
+      "",
+      "",
+      { context: 3, timeout: 250, maxEditLength: 20_000 },
+    );
+    if (patch === undefined || Buffer.byteLength(patch) > maxBytes)
+      throw new AgentError(
+        "DIFF_LIMIT",
+        "Document diff exceeded the resource limit",
+      );
+    return { beforeId, afterId, patch };
   }
   async compact(): Promise<void> {
     this.idle();

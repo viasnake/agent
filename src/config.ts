@@ -136,6 +136,15 @@ export const configSchema = z.strictObject({
     .strictObject({
       allowedHosts: z.array(z.string().regex(/^[a-zA-Z0-9.-]+$/)).default([]),
       allowedData: z.array(dataClass).default(["public"]),
+      search: z
+        .strictObject({
+          endpoint: z.url(),
+          queryParam: z
+            .string()
+            .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
+            .default("q"),
+        })
+        .optional(),
     })
     .prefault({}),
   mcp: z.record(name, mcp).default({}),
@@ -256,6 +265,26 @@ export function validateConfig(input: unknown): Config {
       throw new AgentError(
         "CONFIG",
         `${key}: Sarashina output limit is 8000 tokens`,
+      );
+  }
+  if (config.web.search) {
+    const endpoint = new URL(config.web.search.endpoint);
+    if (
+      endpoint.protocol !== "https:" ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.hash ||
+      (endpoint.port && endpoint.port !== "443") ||
+      !config.web.allowedHosts.includes(endpoint.hostname)
+    )
+      throw new AgentError(
+        "CONFIG",
+        "web.search.endpoint must be HTTPS on an allowed host without credentials, query or fragment",
+      );
+    if (endpoint.search)
+      throw new AgentError(
+        "CONFIG",
+        "web.search.endpoint must not contain a query; configure queryParam instead",
       );
   }
   if (
