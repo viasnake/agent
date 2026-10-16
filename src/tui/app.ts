@@ -754,7 +754,10 @@ export class TerminalApp {
             ...(run?.reason ? ["\n技術詳細", safeText(run.reason)] : []),
             "",
             `要求: ${view.usage?.requests ?? 0}/${app.config.limits.maxRequests}`,
-            `入力 ${view.usage?.input ?? "不明"} / 出力 ${view.usage?.output ?? "不明"} tokens`,
+            view.context
+              ? `コンテキスト推定: ${view.context.bytes}/${view.context.limit} bytes · 残り約 ${Math.max(0, view.context.limit - view.context.bytes)} bytes${view.context.imageCount ? ` · 画像 ${view.context.imageCount} 件 / 約 ${view.context.estimatedImageTokens} tokens相当 (heuristic)` : ""}`
+              : "コンテキスト推定: 不明",
+            `プロバイダー報告: 入力 ${view.usage?.input ?? "不明"} / 出力 ${view.usage?.output ?? "不明"} tokens${view.usage?.usageComplete ? "" : " · 使用量不明または一部未報告"}`,
             `待機入力: ${app.session.queue.length} 件`,
             "詳しい担当・検査は /tasks、接続の変更は /settings。",
           ].join("\n"),
@@ -983,6 +986,58 @@ export class TerminalApp {
       case "compact":
         await app.compact();
         break;
+      case "pins": {
+        const [operation, noteId, ...rest] = args;
+        if (!argument || operation === "list") {
+          await this.show(
+            app
+              .pins()
+              .map((pin) => `${pin.id}  ${pin.text}`)
+              .join("\n") || "固定メモはありません。",
+            "固定メモ",
+          );
+          break;
+        }
+        if (operation === "add") {
+          const text =
+            args.slice(1).join(" ") || (await this.prompt("固定メモ", ""));
+          if (text) app.addPin(text);
+        } else if (operation === "remove" && noteId) app.removePin(noteId);
+        else if (operation === "edit" && noteId) {
+          const text = rest.join(" ") || (await this.prompt("固定メモ", ""));
+          if (text) app.editPin(noteId, text);
+        } else this.notice = "/pins add|remove|edit [id] [text]";
+        break;
+      }
+      case "context": {
+        if (args[0] === "read" && args[1])
+          await this.show(
+            await app.readContext(args[1]),
+            "保存済みコンテキスト",
+          );
+        else if (args[0] === "original" && args[1])
+          await this.show(app.contextOriginal(Number(args[1])), "会話原文");
+        else if (args[0] === "edit" && args[1]) {
+          const text =
+            args.slice(2).join(" ") || (await this.prompt("メモ", ""));
+          if (text) app.editContextNote(args[1], text);
+        } else if (
+          args[0] === "add" &&
+          ["decision", "question"].includes(args[1] ?? "")
+        ) {
+          const text =
+            args.slice(2).join(" ") || (await this.prompt("メモ", ""));
+          if (text)
+            app.addContextNote(args[1] as "decision" | "question", text);
+        } else if (args[0] === "constraint" && args[1] === "add") {
+          const text =
+            args.slice(2).join(" ") || (await this.prompt("制約", ""));
+          if (text) app.addConstraint(text);
+        } else if (args[0] === "constraint" && args[1] === "remove" && args[2])
+          app.removeConstraint(Number(args[2]));
+        else await this.show(app.contextDetails(), "会話コンテキスト");
+        break;
+      }
       case "settings":
         await new SettingsDialog(app, {
           edit: this.editSettings.bind(this),

@@ -16,6 +16,7 @@ import {
 import { copyWorkspace, inventory, secretPath } from "./workspace.js";
 import { assertDisclosure } from "./policy.js";
 import { fetchPublic } from "./network.js";
+import { readContextArchive } from "./context.js";
 
 const pathSchema = z.string().min(1).max(1000);
 export class TaskTools {
@@ -105,7 +106,11 @@ export class TaskTools {
         "Credential, runtime, and control directories are excluded",
       );
     if (write) {
-      if (!this.task.write || this.task.role === "reviewer")
+      if (
+        this.run.access === "read-only" ||
+        !this.task.write ||
+        this.task.role === "reviewer"
+      )
         throw new AgentError(
           "WRITE_DENIED",
           "This task has no writer permission",
@@ -390,6 +395,37 @@ export class TaskTools {
             });
           },
         ),
+      );
+    tools.push(
+      this.wrap(
+        "read_context",
+        "Retrieve a bounded excerpt from an archived context belonging to this conversation.",
+        z.strictObject({
+          archiveId: z.string().regex(/^[a-f0-9]{64}$/),
+          start: z.number().int().min(0).default(0),
+          bytes: z.number().int().min(1).max(32000).default(12000),
+        }),
+        async (args) => {
+          const text = await readContextArchive(
+            this.store.paths,
+            this.run,
+            args.archiveId,
+            args.bytes,
+            args.start,
+          );
+          return text;
+        },
+      ),
+    );
+    if (this.run.access === "read-only")
+      return tools.filter((tool) =>
+        [
+          "read_file",
+          "read_source",
+          "list_files",
+          "search_files",
+          "read_context",
+        ].includes(tool.name),
       );
     return tools;
   }

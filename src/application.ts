@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { realpath, readFile, mkdtemp, rm } from "node:fs/promises";
+import { realpath, readFile, lstat, mkdtemp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { stringify } from "yaml";
 import lockfile from "proper-lockfile";
@@ -26,8 +26,15 @@ import {
   type Runtime,
   type ImageReference,
   type DataClass,
+  type RequestAccess,
+  type ContextNote,
   type WorkKind,
 } from "./types.js";
+import {
+  compactContext,
+  normalizeConversationContext,
+  readContextArchive,
+} from "./context.js";
 import {
   atomicWrite,
   canonical,
@@ -70,6 +77,7 @@ export interface InputPreview {
   destinations: string[];
   dataClass: DataClass;
   localOnly: boolean;
+  access: RequestAccess;
 }
 interface InputSnapshot {
   text: string;
@@ -79,12 +87,45 @@ interface InputSnapshot {
   configHash: string;
   dataClass: DataClass;
   localOnly: boolean;
+  access: RequestAccess;
   kind: WorkKind;
   strategy: Run["mode"];
   model?: string;
   reviewer?: string;
 }
+export function inferAccess(
+  text: string,
+  previous: RequestAccess = "read-only",
+): RequestAccess {
+  if (
+    /まだ(?:は)?変更しない|変更せず|変更はしない|do not change|without changing|no changes/i.test(
+      text,
+    )
+  )
+    return "read-only";
+  if (
+    /実装して|修正して|変更して|作って|作成して|調査して|整文して|執筆して|追加して|削除して|直して|\b(?:fix|implement|refactor|add|remove|change|write|draft)\b/i.test(
+      text,
+    )
+  )
+    return "change";
+  return previous === "change" &&
+    /^(次に|続け|それ|これも|also\b|next\b|continue\b)/i.test(text)
+    ? "change"
+    : "read-only";
+}
+function repositoryIntent(text: string): boolean {
+  return /repo|repository|codebase|source|file|review|explain|plan|構成|リポジトリ|コード|ファイル|レビュー|説明|計画|調べ/i.test(
+    text,
+  );
+}
 export function inferKind(text: string, previous?: WorkKind): WorkKind {
+  if (
+    /まだ(?:は)?変更しない|変更せず|変更はしない|do not change|without changing|no changes/i.test(
+      text,
+    )
+  )
+    return "chat";
   if (/\b(research|sources|citations)\b|調査|出典|根拠付き/i.test(text))
     return "research";
   if (
@@ -327,6 +368,10 @@ export class Application extends EventEmitter {
       this.session.kind === "auto"
         ? inferKind(text, previous?.kind)
         : this.session.kind;
+    const access = inferAccess(
+      text,
+      previous?.access ?? this.session.access ?? "read-only",
+    );
     const binding = sha256(
       canonical({
         conversation: this.session.id,
@@ -338,6 +383,7 @@ export class Application extends EventEmitter {
         strategy: this.session.strategy,
         model: this.session.model,
         reviewer: this.session.reviewer,
+        access,
         imageIds: images.map((ref) => ref.id),
       }),
     );
@@ -353,6 +399,7 @@ export class Application extends EventEmitter {
       strategy: this.session.strategy,
       model: this.session.model,
       reviewer: this.session.reviewer,
+      access,
     };
   }
   async previewInput(text: string): Promise<InputPreview> {
@@ -365,6 +412,7 @@ export class Application extends EventEmitter {
       destinations,
       dataClass: snapshot.dataClass,
       localOnly: snapshot.localOnly,
+      access: snapshot.access,
     };
     this.previews.set(preview, snapshot);
     return preview;
@@ -380,6 +428,7 @@ export class Application extends EventEmitter {
       | "strategy"
       | "model"
       | "reviewer"
+      | "access"
     >,
   ): string[] {
     if (!images.length) return [];
@@ -389,6 +438,7 @@ export class Application extends EventEmitter {
       mode: snapshot.strategy,
       dataClass: snapshot.dataClass,
       localOnly: snapshot.localOnly,
+      access: snapshot.access,
       images,
       inputs: snapshot.attachments
         .filter((attachment) => !attachment.mimeType)
@@ -494,7 +544,8 @@ export class Application extends EventEmitter {
       canonical(preview.attachments) !== canonical(snapshot.attachments) ||
       canonical(preview.images) !== canonical(snapshot.images) ||
       preview.dataClass !== snapshot.dataClass ||
-      preview.localOnly !== snapshot.localOnly
+      preview.localOnly !== snapshot.localOnly ||
+      preview.access !== snapshot.access
     )
       throw new AgentError(
         "IMAGE_PREVIEW",
@@ -535,6 +586,7 @@ export class Application extends EventEmitter {
         strategy: this.session.strategy,
         model: this.session.model,
         reviewer: this.session.reviewer,
+        access: snapshot.access,
         imageIds: snapshot.images.map((ref) => ref.id),
       }),
     );
@@ -544,7 +596,11 @@ export class Application extends EventEmitter {
         kind !== snapshot.kind ||
         this.session.strategy !== snapshot.strategy ||
         this.session.model !== snapshot.model ||
-        this.session.reviewer !== snapshot.reviewer)
+        this.session.reviewer !== snapshot.reviewer ||
+        inferAccess(
+          text,
+          previous?.access ?? this.session.access ?? "read-only",
+        ) !== snapshot.access)
     )
       throw new AgentError(
         "IMAGE_PREVIEW_STALE",
@@ -611,6 +667,7 @@ export class Application extends EventEmitter {
       previewModel: snapshot.model,
       previewStrategy: snapshot.strategy,
       previewReviewer: snapshot.reviewer,
+      previewAccess: snapshot.access,
     };
     if (!this.session.latestRunId && this.session.name === "新しい会話")
       this.session.name = text.split("\n")[0]!;
@@ -652,6 +709,7 @@ export class Application extends EventEmitter {
     item.previewModel = snapshot?.model;
     item.previewStrategy = snapshot?.strategy;
     item.previewReviewer = snapshot?.reviewer;
+    item.previewAccess = snapshot?.access;
     if (snapshot) this.session.images = structuredClone(snapshot.images);
     this.save();
   }
@@ -713,6 +771,12 @@ export class Application extends EventEmitter {
       this.session.kind === "auto"
         ? inferKind(input.text, previous?.kind)
         : this.session.kind;
+    const access =
+      input.previewAccess ??
+      inferAccess(
+        input.text,
+        previous?.access ?? this.session.access ?? "read-only",
+      );
     const refs = await this.textAttachments(input.text);
     const retained = new Map(
       (this.session.images ?? []).map((reference) => [reference.id, reference]),
@@ -746,6 +810,7 @@ export class Application extends EventEmitter {
           strategy: input.previewStrategy,
           model: input.previewModel,
           reviewer: input.previewReviewer,
+          access,
           imageIds: images.map((ref) => ref.id),
         }),
       );
@@ -757,6 +822,7 @@ export class Application extends EventEmitter {
         input.previewStrategy !== this.session.strategy ||
         input.previewModel !== this.session.model ||
         input.previewReviewer !== this.session.reviewer ||
+        input.previewAccess !== access ||
         disclosure.dataClass !== input.previewDataClass ||
         disclosure.localOnly !== input.previewLocalOnly
       )
@@ -768,6 +834,7 @@ export class Application extends EventEmitter {
         dataClass: disclosure.dataClass,
         localOnly: disclosure.localOnly,
         kind,
+        access,
         attachments: fileReferences(input.text)
           .filter((path) => !isImagePath(path))
           .map((path) => ({ path, bytes: 0 })),
@@ -808,11 +875,17 @@ export class Application extends EventEmitter {
           );
       },
     );
-    const contextRun = this.session.contextRunId
-      ? this.store.get(this.session.contextRunId)
-      : undefined;
+    const contextRunId = this.session.contextRunId ?? this.session.latestRunId;
+    const contextRun = contextRunId ? this.store.get(contextRunId) : undefined;
     const previousSessions: NonNullable<Run["previousSessions"]> = {};
-    if (!this.session.compacted && contextRun?.kind === kind)
+    if (
+      !this.session.compacted &&
+      contextRun?.kind === kind &&
+      contextRun.access === access &&
+      contextRun.mode === this.session.strategy &&
+      contextRun.dataClass === requestDisclosure.dataClass &&
+      contextRun.localOnly === requestDisclosure.localOnly
+    )
       for (const task of contextRun.tasks)
         if (task.sessionFile && task.model)
           previousSessions[task.id] = {
@@ -831,24 +904,74 @@ export class Application extends EventEmitter {
         ["writing", "research"].includes(kind))
         ? parentRunId
         : undefined;
+    const contextState = normalizeConversationContext(this.session.context);
+    const instructions = this.conversations
+      .messages(this.session.id)
+      .map((message) => ({
+        seq: message.seq,
+        role: message.role,
+        text: message.text,
+        ...(message.run_id ? { runId: message.run_id } : {}),
+      }));
+    instructions.push({
+      seq: Number.MAX_SAFE_INTEGER,
+      role: "user",
+      text: input.text,
+    });
+    contextState.instructions = instructions;
+    contextState.imageIds = images.map((image) => image.id);
+    contextState.originalRunIds = [
+      ...new Set([
+        ...contextState.originalRunIds,
+        ...(this.session.contextRunId ? [this.session.contextRunId] : []),
+      ]),
+    ];
     // A context handoff carries verified status and references; Pi alone owns model turns.
-    const context =
-      this.session.handoff ??
-      (contextRun
-        ? canonical({
-            objective: contextRun.objective,
-            state: contextRun.state,
-            reason: contextRun.reason,
-            tasks: contextRun.tasks.map((t) => ({
-              role: t.role,
-              model: t.model,
-              result: t.result,
-            })),
-            artifacts: this.store
-              .artifacts(contextRun.id)
-              .map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
-          })
-        : undefined);
+    let legacyHandoff: unknown;
+    if (!this.session.handoff && contextRun) {
+      const path = join(this.store.runDir(contextRun.id), "handoff.json");
+      try {
+        const info = await lstat(path);
+        if (
+          !info.isFile() ||
+          info.isSymbolicLink() ||
+          (info.mode & 0o077) !== 0 ||
+          (process.getuid && info.uid !== process.getuid()) ||
+          info.size > this.config.limits.maxInputBytes
+        )
+          throw new AgentError(
+            "UNSAFE_STORAGE",
+            "Legacy handoff must be a bounded private regular file",
+          );
+        legacyHandoff = JSON.parse(await readFile(path, "utf8")) as unknown;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    const context = canonical({
+      version: 2,
+      conversationContext: contextState,
+      handoff:
+        this.session.handoff ??
+        legacyHandoff ??
+        (contextRun
+          ? {
+              objective: contextRun.objective,
+              state: contextRun.state,
+              reason: contextRun.reason,
+              tasks: contextRun.tasks.map((t) => ({
+                role: t.role,
+                model: t.model,
+                result: t.result,
+              })),
+              artifacts: this.store
+                .artifacts(contextRun.id)
+                .map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
+            }
+          : undefined),
+    });
+    const inspectRepository =
+      access === "read-only" && repositoryIntent(input.text);
     const run = await harness.create({
       extraPaths:
         kind === "coding" && this.session.appliedRunId
@@ -870,10 +993,19 @@ export class Application extends EventEmitter {
       dataClass: requestDisclosure.dataClass,
       localOnly: requestDisclosure.localOnly,
       images,
-      workspace: kind === "coding" ? this.session.workspace : undefined,
+      workspace:
+        kind === "coding" || inspectRepository
+          ? this.session.workspace
+          : undefined,
       parentRunId: usableParent,
+      snapshotRunId: inspectRepository ? this.session.workRunId : undefined,
       previousSessions,
       context,
+      contextState,
+      conversationId: this.session.id,
+      constraints: contextState.constraints,
+      access,
+      compactions: contextState.compactions,
       includeUntracked: this.session.includeUntracked,
       model: this.session.model,
       reviewer: this.session.reviewer,
@@ -884,6 +1016,8 @@ export class Application extends EventEmitter {
     this.store.transaction(() => {
       this.conversations.link(this.session, run);
       this.session.latestRunId = run.id;
+      this.session.access = access;
+      this.session.context = contextState;
       if (kind === "coding") this.session.workRunId = run.id;
       if (kind === "writing" || kind === "research")
         this.session.documentRunId = run.id;
@@ -929,6 +1063,81 @@ export class Application extends EventEmitter {
       },
     );
     this.session.contextRunId = result.id;
+    const contextState = normalizeConversationContext(
+      result.contextState ?? this.session.context,
+    );
+    contextState.instructions = this.conversations
+      .messages(this.session.id)
+      .map((message) => ({
+        seq: message.seq,
+        role: message.role,
+        text: message.text,
+        ...(message.run_id ? { runId: message.run_id } : {}),
+      }));
+    contextState.imageIds = [
+      ...new Set([
+        ...contextState.imageIds,
+        ...(result.images ?? []).map((image) => image.id),
+      ]),
+    ];
+    contextState.originalRunIds = [
+      ...new Set([
+        ...contextState.originalRunIds,
+        ...this.conversations.runs(this.session.id),
+      ]),
+    ];
+    contextState.compactions = [
+      ...contextState.compactions,
+      ...(result.compactions ?? []),
+    ].filter(
+      (record, index, records) =>
+        records.findIndex((candidate) => candidate.id === record.id) === index,
+    );
+    const artifacts = this.store.artifacts(result.id);
+    const currentWork = {
+      runId: result.id,
+      status: result.state,
+      checks: result.checks,
+      hashes: Object.fromEntries(
+        artifacts.map((artifact) => [artifact.name, artifact.sha256]),
+      ),
+      artifacts: artifacts.map((artifact) => artifact.id),
+      operations: this.store
+        .operations(result.id)
+        .map(({ id: operationId, task_id, name, status, args_hash }) => ({
+          id: operationId,
+          taskId: task_id,
+          name,
+          status,
+          argsHash: args_hash,
+        })),
+      results: result.tasks.map((task) => ({
+        role: task.role,
+        model: task.model,
+        summary: task.result?.summary,
+        unresolved: task.result?.unresolved,
+        author: "model" as const,
+        trusted: false as const,
+      })),
+    };
+    contextState.sourceIds = [
+      ...new Set([
+        ...contextState.sourceIds,
+        ...artifacts
+          .filter((artifact) => artifact.kind === "source")
+          .map((artifact) => artifact.id),
+      ]),
+    ];
+    contextState.workingState = {
+      ...currentWork,
+      history: [
+        ...contextState.workingState.history.filter(
+          (entry) => entry.runId !== result.id,
+        ),
+        currentWork,
+      ],
+    };
+    this.session.context = contextState;
     this.session.compacted = false;
     this.session.handoff = undefined;
     const summary =
@@ -1089,30 +1298,277 @@ export class Application extends EventEmitter {
     }
     this.publish("changed");
   }
+  pins(): ContextNote[] {
+    return normalizeConversationContext(this.session.context).pins.filter(
+      (note) => note.author === "user" && note.trusted,
+    );
+  }
+  addPin(text: string): void {
+    this.idle();
+    if (!text.trim()) throw new AgentError("INPUT", "Pin text is required");
+    const context = normalizeConversationContext(this.session.context);
+    context.pins.push({
+      id: id(),
+      text,
+      kind: "pin",
+      author: "user",
+      trusted: true,
+      updatedAt: Date.now(),
+    });
+    this.session.context = context;
+    this.save();
+  }
+  addContextNote(kind: "decision" | "question", text: string): void {
+    this.idle();
+    if (!text.trim()) throw new AgentError("INPUT", "Context note is required");
+    const context = normalizeConversationContext(this.session.context);
+    const target =
+      kind === "decision" ? context.decisions : context.openQuestions;
+    target.push({
+      id: id(),
+      text,
+      kind,
+      author: "user",
+      trusted: true,
+      updatedAt: Date.now(),
+    });
+    this.session.context = context;
+    this.save();
+  }
+  addConstraint(text: string): void {
+    this.idle();
+    if (!text.trim()) throw new AgentError("INPUT", "Constraint is required");
+    const context = normalizeConversationContext(this.session.context);
+    context.constraints.push(text);
+    this.session.context = context;
+    this.save();
+  }
+  removeConstraint(index: number): void {
+    this.idle();
+    const context = normalizeConversationContext(this.session.context);
+    if (
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= context.constraints.length
+    )
+      throw new AgentError("CONTEXT", "Constraint not found");
+    context.constraints.splice(index, 1);
+    this.session.context = context;
+    this.save();
+  }
+  editPin(noteId: string, text: string): void {
+    this.idle();
+    const context = normalizeConversationContext(this.session.context);
+    const note = context.pins.find(
+      (candidate) =>
+        candidate.id === noteId &&
+        candidate.author === "user" &&
+        candidate.trusted,
+    );
+    if (!note) throw new AgentError("CONTEXT", "User pin not found");
+    if (!text.trim()) throw new AgentError("INPUT", "Pin text is required");
+    note.text = text;
+    note.updatedAt = Date.now();
+    this.session.context = context;
+    this.save();
+  }
+  editContextNote(noteId: string, text: string): void {
+    this.idle();
+    if (!text.trim()) throw new AgentError("INPUT", "Context note is required");
+    const context = normalizeConversationContext(this.session.context);
+    const note = [
+      ...context.pins,
+      ...context.decisions,
+      ...context.openQuestions,
+    ].find(
+      (candidate) =>
+        candidate.id === noteId &&
+        candidate.author === "user" &&
+        candidate.trusted,
+    );
+    if (!note) throw new AgentError("CONTEXT", "User context note not found");
+    note.text = text;
+    note.updatedAt = Date.now();
+    this.session.context = context;
+    this.save();
+  }
+  removePin(noteId: string): void {
+    this.idle();
+    const context = normalizeConversationContext(this.session.context);
+    const before = context.pins.length;
+    context.pins = context.pins.filter(
+      (note) => note.id !== noteId || note.author !== "user" || !note.trusted,
+    );
+    if (context.pins.length === before)
+      throw new AgentError("CONTEXT", "User pin not found");
+    this.session.context = context;
+    this.save();
+  }
+  contextDetails(): string {
+    const context = normalizeConversationContext(this.session.context);
+    return JSON.stringify(
+      {
+        pins: context.pins.filter(
+          (note) => note.author === "user" && note.trusted,
+        ),
+        decisions: context.decisions.filter(
+          (note) => note.author === "user" && note.trusted,
+        ),
+        openQuestions: context.openQuestions.filter(
+          (note) => note.author === "user" && note.trusted,
+        ),
+        constraints: context.constraints,
+        compactions: context.compactions,
+        imageIds: context.imageIds,
+        sourceIds: context.sourceIds,
+        workingState: context.workingState,
+        instructionCount: context.instructions.length,
+        originalExcerpts: context.instructions
+          .slice(-50)
+          .map((instruction) => ({
+            seq: instruction.seq,
+            role: instruction.role,
+            text: instruction.text.slice(0, 200),
+            runId: instruction.runId,
+          })),
+      },
+      null,
+      2,
+    );
+  }
+  contextOriginal(seq: number, start = 0, bytes = 32_000): string {
+    const instruction = normalizeConversationContext(
+      this.session.context,
+    ).instructions.find((item) => item.seq === seq);
+    if (!instruction)
+      throw new AgentError(
+        "CONTEXT",
+        "Original conversation excerpt not found",
+      );
+    if (
+      !Number.isInteger(start) ||
+      start < 0 ||
+      !Number.isInteger(bytes) ||
+      bytes < 1 ||
+      bytes > 32_000
+    )
+      throw new AgentError("CONTEXT", "Original excerpt range is invalid");
+    return Buffer.from(instruction.text)
+      .subarray(start, start + bytes)
+      .toString("utf8");
+  }
+  async readContext(archiveId: string, start = 0): Promise<string> {
+    this.idle();
+    if (!Number.isSafeInteger(start) || start < 0)
+      throw new AgentError(
+        "CONTEXT_ARCHIVE",
+        "Context archive offset is invalid",
+      );
+    const runIds = this.conversations.runs(this.session.id);
+    for (const runId of runIds) {
+      try {
+        const content = await readContextArchive(
+          this.paths,
+          this.store.get(runId),
+          archiveId,
+          32_000,
+          start,
+        );
+        return content;
+      } catch (error) {
+        if (error instanceof AgentError && error.code === "CONTEXT_ARCHIVE")
+          continue;
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+    }
+    throw new AgentError(
+      "CONTEXT_ARCHIVE",
+      "Context archive is not in this conversation",
+    );
+  }
   async compact(): Promise<void> {
     this.idle();
-    const runId = this.session.contextRunId;
+    const runId = this.session.contextRunId ?? this.session.latestRunId;
     if (!runId) return;
+    this.store.assertIdle(runId);
     const run = this.store.get(runId);
+    const context = {
+      messages: this.conversations.messages(this.session.id),
+      conversationContext: normalizeConversationContext(this.session.context),
+      run: {
+        objective: run.objective,
+        state: run.state,
+        reason: run.reason,
+        results: run.tasks.map((t) => ({
+          model: t.model,
+          summary: t.result?.summary,
+          unresolved: t.result?.unresolved,
+          author: "model" as const,
+          trusted: false as const,
+        })),
+        artifacts: this.store.artifacts(runId).map((a) => ({
+          id: a.id,
+          name: a.name,
+          kind: a.kind,
+          sha256: a.sha256,
+        })),
+        operations: this.store
+          .operations(runId)
+          .map(({ id: operationId, task_id, name, status, args_hash }) => ({
+            id: operationId,
+            taskId: task_id,
+            name,
+            status,
+            argsHash: args_hash,
+          })),
+        workingCopy: this.session.workRunId,
+        checks: run.checks,
+      },
+    };
+    const selected = run.model
+      ? this.config.models[run.model]
+      : Object.values(this.config.models)[0];
+    if (!selected)
+      throw new AgentError(
+        "CONTEXT_LIMIT",
+        "No configured model is available to establish a context handoff",
+      );
+    const compacted = await compactContext(
+      this.paths,
+      { ...run, conversationId: this.session.id },
+      context,
+      {
+        config: this.config,
+        contextWindow: selected.contextWindow,
+        maxOutputTokens: selected.maxOutputTokens,
+        trigger: "manual",
+        force: true,
+      },
+    );
+    if (!compacted) return;
+    this.store.assertIdle(runId);
     const handoff = canonical({
-      objective: run.objective,
+      version: 2,
       state: run.state,
-      reason: run.reason,
-      results: run.tasks.map((t) => ({
-        model: t.model,
-        summary: t.result?.summary,
-        unresolved: t.result?.unresolved,
-      })),
-      artifacts: this.store.artifacts(runId).map((a) => ({
-        id: a.id,
-        name: a.name,
-        kind: a.kind,
-        sha256: a.sha256,
-      })),
+      objective: run.objective,
+      context: compacted.context,
+      archiveId: compacted.record.archiveId,
+      results: context.run.results,
+      artifacts: context.run.artifacts,
       workingCopy: this.session.workRunId,
       checks: run.checks,
     });
     await atomicWrite(join(this.store.runDir(runId), "handoff.json"), handoff);
+    const state = normalizeConversationContext(this.session.context);
+    state.compactions = [
+      ...state.compactions.filter(
+        (record) => record.id !== compacted.record.id,
+      ),
+      compacted.record,
+    ];
+    state.originalRunIds = [...new Set([...state.originalRunIds, runId])];
+    this.session.context = state;
     this.session.compacted = true;
     this.session.handoff = handoff;
     this.save();
@@ -1281,6 +1737,9 @@ export class Application extends EventEmitter {
             limit: number;
             model: string;
             taskId: string;
+            imageCount: number;
+            estimatedImageTokens: number;
+            imageUsage?: string;
           })
         : undefined,
       usage: run && this.store.usage(run.id),

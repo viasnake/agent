@@ -4,6 +4,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   Application,
+  inferAccess,
   inferKind,
   fileReferences,
   type AppEvent,
@@ -22,6 +23,7 @@ import {
 import { safeText, markdown } from "../src/tui/components.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { PiRuntime } from "../src/runtime/pi.js";
+import type { Runtime } from "../src/types.js";
 
 const until = async (condition: () => boolean) => {
   const deadline = Date.now() + 5000;
@@ -50,6 +52,225 @@ test("simple conversation uses one model without planning, shell or document req
       app.conversations.messages(app.session.id).at(-1)?.text,
       "こんにちは。",
     );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("repository exploration stays read-only across planning and coding-copy transitions", async (t) => {
+  const runtime = new ScriptedRuntime(async (request, index) => {
+    if (request.tools.some((tool) => tool.name === "write_file")) {
+      await call(request, "write_file", {
+        path: "draft.md",
+        content: "pending coding copy",
+        expectedSha256: null,
+      });
+      return completed(["draft.md"]);
+    }
+    assert.ok(request.tools.some((tool) => tool.name === "read_file"));
+    assert.ok(!request.tools.some((tool) => tool.name === "write_file"));
+    await assert.rejects(
+      call(request, "write_file", {
+        path: "forbidden.md",
+        content: "must not be written",
+        expectedSha256: null,
+      }),
+      /Tool unavailable/,
+    );
+    if (index === 0 || index === 1)
+      assert.match(
+        await call(request, "read_file", { path: "README.md" }),
+        /original workspace/,
+      );
+    if (index === 3)
+      assert.match(
+        await call(request, "read_file", { path: "draft.md" }),
+        /pending coding copy/,
+      );
+    return "read-only findings";
+  });
+  const f = await fixture(runtime);
+  t.mock.method(Sandbox.prototype, "probe", async () => ({
+    ok: true,
+    detail: "unit fixture",
+  }));
+  t.mock.method(Sandbox.prototype, "execute", async () => ({
+    code: 0,
+    stdout: "",
+    stderr: "",
+    truncated: false,
+  }));
+  f.config.checks = {
+    test: { command: "true", protectedPaths: [] },
+  };
+  const origin = await gitWorkspace(f.root, {
+    "README.md": "original workspace\n",
+  });
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    origin,
+    async () => runtime,
+  );
+  try {
+    await app.initialize();
+    app.addPin("Keep the public API stable.");
+    app.addConstraint("Never modify the original workspace.");
+    await app.submit("Explain this repository");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.access, "read-only");
+
+    await app.submit("Review the plan; まだ変更しない");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.kind, "chat");
+    assert.equal(app.currentRun()?.access, "read-only");
+
+    await app.submit("実装して add feature");
+    await app.waitForIdle();
+    const codingRun = app.currentRun()!;
+    assert.equal(codingRun.kind, "coding");
+    assert.equal(codingRun.access, "change");
+    assert.equal(
+      await readFile(join(origin, "draft.md")).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+
+    await app.submit("まだ変更しないで説明して");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.kind, "chat");
+    assert.equal(app.currentRun()?.access, "read-only");
+    assert.equal(app.session.workRunId, codingRun.id);
+    assert.deepEqual(
+      runtime.requests.map((request) => request.tools.length > 0),
+      [true, true, true, true],
+    );
+    for (const request of runtime.requests) {
+      assert.deepEqual(request.constraints, [
+        "Never modify the original workspace.",
+      ]);
+      assert.match(request.objective, /Keep the public API stable/);
+    }
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("explicit no-change prohibitions take precedence over change verbs", () => {
+  assert.equal(inferKind("まだ変更しないが、修正案を説明して"), "chat");
+  assert.equal(
+    inferAccess("まだ変更しないが implement を説明して"),
+    "read-only",
+  );
+  assert.equal(inferAccess("implement this fix"), "change");
+  assert.equal(inferAccess("ambiguous follow-up"), "read-only");
+});
+
+test("user context notes and constraints survive a conversation restart without changing privacy policy", async () => {
+  const runtime = new ScriptedRuntime(async () => "unused");
+  const f = await fixture(runtime);
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  let reopened: Application | undefined;
+  try {
+    await app.initialize();
+    const sessionId = app.session.id;
+    const policy = {
+      dataClass: app.session.dataClass,
+      localOnly: app.session.localOnly,
+    };
+    app.addPin("Keep the original API stable.");
+    app.addContextNote("decision", "Use the local database.");
+    app.addContextNote("question", "Which platforms need support?");
+    app.addConstraint("Do not change the public endpoint.");
+    await app.close();
+
+    reopened = new Application(
+      f.config,
+      f.p,
+      f.store,
+      f.root,
+      async () => runtime,
+    );
+    await reopened.initialize();
+    reopened.openSession(sessionId);
+    assert.equal(reopened.pins()[0]?.text, "Keep the original API stable.");
+    const context = reopened.session.context!;
+    assert.equal(context.pins[0]?.author, "user");
+    assert.equal(context.pins[0]?.trusted, true);
+    assert.equal(context.decisions[0]?.text, "Use the local database.");
+    assert.equal(
+      context.openQuestions[0]?.text,
+      "Which platforms need support?",
+    );
+    assert.deepEqual(context.constraints, [
+      "Do not change the public endpoint.",
+    ]);
+    assert.deepEqual(
+      {
+        dataClass: reopened.session.dataClass,
+        localOnly: reopened.session.localOnly,
+      },
+      policy,
+    );
+  } finally {
+    if (reopened) await reopened.close();
+    else await app.close();
+    await f.cleanup();
+  }
+});
+
+test("status keeps context estimates separate from unknown provider usage", async () => {
+  const runtime: Runtime = {
+    async run(request) {
+      request.signal.throwIfAborted();
+      const reservation = request.beforeRequest(
+        Buffer.byteLength(request.objective),
+      );
+      request.afterRequest(reservation, {
+        input: null,
+        output: null,
+        costUsd: null,
+      });
+      return "answer";
+    },
+    async close() {},
+  };
+  const f = await fixture(runtime);
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  try {
+    await app.initialize();
+    await app.submit("Give a short answer");
+    await app.waitForIdle();
+    const view = app.view();
+    assert.ok(view.context);
+    assert.ok(view.context.bytes > 0);
+    assert.equal(view.usage?.input, null);
+    assert.equal(view.usage?.output, null);
+    assert.equal(view.usage?.usageComplete, false);
+    const connectionUsage = f.store.usageByConnection(app.currentRun()!.id)[0]!;
+    assert.equal(connectionUsage.inputTokens, null);
+    assert.equal(connectionUsage.outputTokens, null);
+    assert.equal(connectionUsage.usageComplete, false);
+    const report = app.session.context?.workingState.history.at(-1)?.results[0];
+    assert.equal(report?.author, "model");
+    assert.equal(report?.trusted, false);
   } finally {
     await app.close();
     await f.cleanup();
@@ -372,9 +593,18 @@ test("compaction creates a deterministic handoff without extra inference or dele
       ).state,
       "succeeded",
     );
+    await writeFile(
+      join(f.store.runDir(runId), "handoff.json"),
+      JSON.stringify({ state: "succeeded", objective: "legacy handoff" }),
+      { mode: 0o600 },
+    );
+    app.session.handoff = undefined;
+    app.session.contextRunId = undefined;
+    app.save();
     await app.submit("続けて質問");
     await app.waitForIdle();
     assert.ok(app.currentRun()?.context);
+    assert.match(runtime.requests[1]!.objective, /legacy handoff/);
     assert.equal(app.conversations.messages(app.session.id).length, 4);
   } finally {
     await app.close();

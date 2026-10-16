@@ -18,13 +18,14 @@ export class Planner {
     let plannedTasks: Task[] = [];
     if (
       run.kind === "chat" ||
+      run.access === "read-only" ||
       run.mode === "single" ||
       run.mode === "reviewed"
     ) {
       const writer = await this.router.select(
         run,
         "worker",
-        run.kind !== "chat" || run.inputs.length > 0,
+        run.kind !== "chat" || run.inputs.length > 0 || !!run.workspace,
         signal,
         run.model,
       );
@@ -35,12 +36,16 @@ export class Planner {
           objective: run.objective,
           model: writer,
           dependsOn: [],
-          write: run.kind !== "chat",
+          write: run.access === "change" && run.kind !== "chat",
           state: "pending",
           attempts: 0,
         },
       ];
-      if (run.mode === "reviewed" && run.kind !== "chat") {
+      if (
+        run.mode === "reviewed" &&
+        run.kind !== "chat" &&
+        run.access === "change"
+      ) {
         const reviewer = await this.router.select(
           run,
           "reviewer",

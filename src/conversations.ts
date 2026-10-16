@@ -2,10 +2,16 @@ import { Store } from "./storage.js";
 import {
   AgentError,
   type DataClass,
+  type ConversationContext,
   type ImageReference,
   type Run,
+  type RequestAccess,
   type WorkKind,
 } from "./types.js";
+import {
+  emptyConversationContext,
+  normalizeConversationContext,
+} from "./context.js";
 import { id } from "./util.js";
 
 export interface PendingInput {
@@ -22,6 +28,7 @@ export interface PendingInput {
   previewModel?: string;
   previewStrategy?: Run["mode"];
   previewReviewer?: string;
+  previewAccess?: RequestAccess;
 }
 export interface Conversation {
   id: string;
@@ -45,6 +52,8 @@ export interface Conversation {
   compacted?: boolean;
   handoff?: string;
   images?: ImageReference[];
+  context?: ConversationContext;
+  access?: RequestAccess;
 }
 export interface ConversationMessage {
   seq: number;
@@ -77,6 +86,8 @@ export class Conversations {
       kind: "auto",
       localOnly: false,
       includeUntracked: false,
+      context: emptyConversationContext(),
+      access: "read-only",
       ...defaults,
     };
     this.store.db
@@ -91,14 +102,14 @@ export class Conversations {
           "SELECT payload FROM conversations WHERE workspace=? ORDER BY updated_at DESC LIMIT 30 OFFSET ?",
         )
         .all(workspace, offset) as { payload: string }[]
-    ).map((r) => JSON.parse(r.payload) as Conversation);
+    ).map((r) => this.normalize(JSON.parse(r.payload) as Conversation));
   }
   get(sessionId: string): Conversation {
     const row = this.store.db
       .prepare("SELECT payload FROM conversations WHERE id=?")
       .get(sessionId) as { payload: string } | undefined;
     if (!row) throw new AgentError("SESSION", "Conversation not found");
-    return JSON.parse(row.payload) as Conversation;
+    return this.normalize(JSON.parse(row.payload) as Conversation);
   }
   acquire(sessionId: string): Conversation {
     return this.store.transaction(() => {
@@ -121,7 +132,7 @@ export class Conversations {
       this.store.db
         .prepare("UPDATE conversations SET owner=?,heartbeat=? WHERE id=?")
         .run(this.owner, Date.now(), sessionId);
-      return JSON.parse(row.payload) as Conversation;
+      return this.normalize(JSON.parse(row.payload) as Conversation);
     });
   }
   save(session: Conversation): void {
@@ -161,14 +172,29 @@ export class Conversations {
   messages(
     sessionId: string,
     before = Number.MAX_SAFE_INTEGER,
+    limit = Number.MAX_SAFE_INTEGER,
   ): ConversationMessage[] {
     return (
       this.store.db
         .prepare(
-          "SELECT seq,role,text,run_id,at FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT 30",
+          "SELECT seq,role,text,run_id,at FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?",
         )
-        .all(sessionId, before) as unknown as ConversationMessage[]
+        .all(sessionId, before, limit) as unknown as ConversationMessage[]
     ).reverse();
+  }
+  private normalize(session: Conversation): Conversation {
+    session.context = normalizeConversationContext(session.context);
+    session.access ??= "read-only";
+    return session;
+  }
+  runs(sessionId: string): string[] {
+    return (
+      this.store.db
+        .prepare(
+          "SELECT run_id FROM conversation_runs WHERE session_id=? ORDER BY rowid",
+        )
+        .all(sessionId) as { run_id: string }[]
+    ).map((row) => row.run_id);
   }
   link(session: Conversation, run: Run): void {
     this.store.db

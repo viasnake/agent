@@ -1,4 +1,5 @@
 export type DataClass = "public" | "private" | "restricted";
+export type RequestAccess = "read-only" | "change";
 export type WorkKind = "coding" | "research" | "writing" | "chat";
 export type Role = "lead" | "worker" | "reviewer";
 export type RunState =
@@ -47,9 +48,83 @@ export interface RuntimeImage {
   reference: ImageReference;
   data: Buffer;
 }
+export interface ContextNote {
+  id: string;
+  text: string;
+  kind: "pin" | "decision" | "question";
+  author: "user" | "host" | "model";
+  trusted: boolean;
+  updatedAt: number;
+}
+export interface ContextCompaction {
+  id: string;
+  archiveId: string;
+  at: number;
+  beforeBytes: number;
+  afterBytes: number;
+  trigger: "automatic" | "manual";
+  heuristic: "bytes/3+images*8192";
+}
+export interface ConversationContext {
+  pins: ContextNote[];
+  decisions: ContextNote[];
+  openQuestions: ContextNote[];
+  constraints: string[];
+  instructions: Array<{
+    seq: number;
+    role: string;
+    text: string;
+    runId?: string;
+  }>;
+  sourceIds: string[];
+  imageIds: string[];
+  originalRunIds: string[];
+  workingState: {
+    runId?: string;
+    status?: string;
+    checks: string[];
+    hashes: Record<string, string>;
+    artifacts: string[];
+    operations: Array<{
+      id: string;
+      taskId: string;
+      name: string;
+      status: string;
+      argsHash: string;
+    }>;
+    history: Array<{
+      runId: string;
+      status: string;
+      checks: string[];
+      hashes: Record<string, string>;
+      artifacts: string[];
+      operations: Array<{
+        id: string;
+        taskId: string;
+        name: string;
+        status: string;
+        argsHash: string;
+      }>;
+      results: Array<{
+        role: string;
+        model?: string;
+        summary?: string;
+        unresolved?: string[];
+        author: "model";
+        trusted: false;
+      }>;
+    }>;
+  };
+  compactions: ContextCompaction[];
+}
 export interface Run {
   parentRunId?: string;
+  conversationId?: string;
   context?: string;
+  contextState?: ConversationContext;
+  constraints?: string[];
+  access?: RequestAccess;
+  compactions?: ContextCompaction[];
   previousSessions?: Record<string, { model: string; file: string }>;
   prepared: boolean;
   id: string;
@@ -102,12 +177,18 @@ export interface RuntimeRequest {
   model: string;
   role: Role;
   objective: string;
+  access?: RequestAccess;
+  constraints?: string[];
   images?: RuntimeImage[];
   system: string;
   sessionDir: string;
   sessionFile?: string;
   tools: ToolSpec[];
   signal: AbortSignal;
+  transformContext?: (
+    context: unknown,
+    signal: AbortSignal,
+  ) => Promise<unknown>;
   onSession(file: string): void;
   beforeRequest(
     inputBytes: number,

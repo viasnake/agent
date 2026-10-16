@@ -32,8 +32,9 @@ export interface UsageSummary {
   knownCostUsd: number;
   unknownCostRequests: number;
   heldUsd: number;
-  input: number;
-  output: number;
+  input: number | null;
+  output: number | null;
+  usageComplete: boolean;
 }
 export class Store {
   readonly db: DatabaseSync;
@@ -451,25 +452,58 @@ export class Store {
       .run(connection, until);
   }
   usage(runId: string): UsageSummary {
-    return this.db
+    const row = this.db
       .prepare(
         `SELECT count(*) AS requests, coalesce(sum(cost_usd),0) AS knownCostUsd,
       coalesce(sum(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END),0) AS unknownCostRequests,
       coalesce(sum(CASE WHEN cost_usd IS NULL THEN reserved_usd ELSE 0 END),0) AS heldUsd,
-      coalesce(sum(input_tokens),0) AS input, coalesce(sum(output_tokens),0) AS output FROM requests WHERE run_id=?`,
+      sum(input_tokens) AS input, sum(output_tokens) AS output,
+      sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownUsageRequests
+      FROM requests WHERE run_id=?`,
       )
-      .get(runId) as unknown as UsageSummary;
+      .get(runId) as unknown as UsageSummary & {
+      unknownUsageRequests: number;
+    };
+    return {
+      requests: row.requests,
+      knownCostUsd: row.knownCostUsd,
+      unknownCostRequests: row.unknownCostRequests,
+      heldUsd: row.heldUsd,
+      input: row.requests && !row.unknownUsageRequests ? row.input : null,
+      output: row.requests && !row.unknownUsageRequests ? row.output : null,
+      usageComplete: Boolean(row.requests && !row.unknownUsageRequests),
+    };
   }
   usageByConnection(runId: string): Array<Record<string, unknown>> {
-    return this.db
+    const rows = this.db
       .prepare(
-        `SELECT connection,model,count(*) AS requests,coalesce(sum(input_tokens),0) AS inputTokens,
-      coalesce(sum(output_tokens),0) AS outputTokens,sum(cost_usd) AS knownCostUsd,
+        `SELECT connection,model,count(*) AS requests,sum(input_tokens) AS inputTokens,
+      sum(output_tokens) AS outputTokens,
+      sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownUsageRequests,
+      sum(cost_usd) AS knownCostUsd,
       sum(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unknownCostRequests,
       sum(CASE WHEN cost_usd IS NULL THEN reserved_usd ELSE 0 END) AS heldUsd
       FROM requests WHERE run_id=? GROUP BY connection,model`,
       )
-      .all(runId);
+      .all(runId) as unknown as Array<{
+      connection: string;
+      model: string;
+      requests: number;
+      inputTokens: number | null;
+      outputTokens: number | null;
+      unknownUsageRequests: number;
+      knownCostUsd: number | null;
+      unknownCostRequests: number;
+      heldUsd: number | null;
+    }>;
+    return rows.map((row) => ({
+      ...row,
+      inputTokens:
+        row.requests && !row.unknownUsageRequests ? row.inputTokens : null,
+      outputTokens:
+        row.requests && !row.unknownUsageRequests ? row.outputTokens : null,
+      usageComplete: Boolean(row.requests && !row.unknownUsageRequests),
+    }));
   }
   events(
     runId: string,

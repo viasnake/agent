@@ -110,6 +110,12 @@ export function guardModelStream(
             "MODEL_SWITCH",
             "Model changes inside a task are forbidden",
           );
+        const transformedContext = (
+          request.transformContext
+            ? await request.transformContext(context, request.signal)
+            : context
+        ) as typeof context;
+        request.signal.throwIfAborted();
         const imageData = new Map<string, { data: Buffer; mimeType: string }>();
         let imageOccurrences = 0;
         let occurrenceBytes = 0;
@@ -191,7 +197,7 @@ export function guardModelStream(
           }
           for (const item of Object.values(record)) visitImages(item);
         };
-        visitImages(context);
+        visitImages(transformedContext);
         if (imageOccurrences && !model.input.includes("image"))
           throw new AgentError(
             "NO_IMAGE_MODEL",
@@ -199,7 +205,9 @@ export function guardModelStream(
           );
         for (const image of imageData.values())
           await validateImage(image.data, image.mimeType);
-        const textContext = JSON.parse(JSON.stringify(context)) as unknown;
+        const textContext = JSON.parse(
+          JSON.stringify(transformedContext),
+        ) as unknown;
         const removeImageData = (value: unknown): void => {
           if (!value || typeof value !== "object") return;
           if (Array.isArray(value)) {
@@ -246,7 +254,7 @@ export function guardModelStream(
               );
           },
         );
-        const stream = originalStream(requested, context, {
+        const stream = originalStream(requested, transformedContext, {
           ...options,
           signal,
           maxTokens: model.maxTokens,

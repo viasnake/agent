@@ -17,6 +17,8 @@ import {
   AgentError,
   type DataClass,
   type ImageReference,
+  type ConversationContext,
+  type RequestAccess,
   type Run,
   type Runtime,
   type WorkKind,
@@ -47,7 +49,13 @@ import {
 export interface NewRun {
   extraPaths?: string[];
   parentRunId?: string;
+  snapshotRunId?: string;
   context?: string;
+  contextState?: ConversationContext;
+  conversationId?: string;
+  constraints?: string[];
+  access?: RequestAccess;
+  compactions?: Run["compactions"];
   previousSessions?: Run["previousSessions"];
   objective: string;
   kind: WorkKind;
@@ -135,7 +143,13 @@ export class Harness {
         );
     const run: Run = {
       parentRunId: options.parentRunId,
+      conversationId: options.conversationId,
       context: options.context,
+      contextState: options.contextState,
+      constraints: options.constraints,
+      access:
+        options.access ?? (options.kind === "chat" ? "read-only" : "change"),
+      compactions: options.compactions,
       previousSessions: options.previousSessions,
       prepared: false,
       id: id(),
@@ -175,7 +189,25 @@ export class Harness {
     heartbeat.unref();
     try {
       await privateDirectory(directory);
-      if (options.parentRunId) {
+      if (options.snapshotRunId) {
+        this.store.assertIdle(options.snapshotRunId);
+        const source = this.store.get(options.snapshotRunId);
+        if (
+          !source.prepared ||
+          source.kind !== "coding" ||
+          source.workspace !== workspace
+        )
+          throw new AgentError(
+            "CONTINUATION",
+            "Latest coding copy cannot be used as a read-only snapshot",
+          );
+        await continueWorkspace(
+          this.store.runDir(source.id),
+          directory,
+          this.config,
+        );
+        this.store.inheritSources(source.id, owned.id);
+      } else if (options.parentRunId) {
         this.store.assertIdle(options.parentRunId);
         const parent = this.store.get(options.parentRunId);
         if (
