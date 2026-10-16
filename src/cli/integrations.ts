@@ -7,7 +7,9 @@ import { loginMcp } from "../mcp-auth.js";
 import { McpTools } from "../mcp.js";
 import { Sandbox } from "../sandbox.js";
 import type { CliContext } from "./context.js";
+import { registerComparisonCommands } from "./evaluation.js";
 export function registerIntegrationsCommands(cli: CliContext): void {
+  registerComparisonCommands(cli);
   const { program, signal, print, context, harness } = cli;
   const mcp = program
     .command("mcp")

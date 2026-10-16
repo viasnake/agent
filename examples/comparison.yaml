@@ -1,0 +1,19 @@
+schemaVersion: 1
+name: japanese-notice-matched-comparison
+repeats: 3
+cases:
+  - id: notice
+    kind: writing
+    objective: >-
+      社内向けのお知らせを Markdown で作成してください。
+      架空の検証用事実は「青葉会議」「2026年11月5日」「14:30」「第2会議室」「参加費0円」です。
+      読者は初参加の社員、目的は参加案内です。事実を追加せず、敬体で簡潔にしてください。
+    dataClass: public
+    mustKeep: [青葉会議, 2026年11月5日, "14:30", 第2会議室, 参加費0円]
+variants:
+  - id: single
+    mode: single
+  - id: reviewed
+    mode: reviewed
+  - id: assisted
+    mode: assisted

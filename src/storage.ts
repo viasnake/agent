@@ -472,19 +472,23 @@ export class Store {
       coalesce(sum(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END),0) AS unknownCostRequests,
       coalesce(sum(CASE WHEN cost_usd IS NULL THEN reserved_usd ELSE 0 END),0) AS heldUsd,
       sum(input_tokens) AS input, sum(output_tokens) AS output,
+      sum(CASE WHEN input_tokens IS NULL THEN 1 ELSE 0 END) AS unknownInputRequests,
+      sum(CASE WHEN output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownOutputRequests,
       sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownUsageRequests
       FROM requests WHERE run_id=?`,
       )
       .get(runId) as unknown as UsageSummary & {
       unknownUsageRequests: number;
+      unknownInputRequests: number;
+      unknownOutputRequests: number;
     };
     return {
       requests: row.requests,
       knownCostUsd: row.knownCostUsd,
       unknownCostRequests: row.unknownCostRequests,
       heldUsd: row.heldUsd,
-      input: row.requests && !row.unknownUsageRequests ? row.input : null,
-      output: row.requests && !row.unknownUsageRequests ? row.output : null,
+      input: row.requests && !row.unknownInputRequests ? row.input : null,
+      output: row.requests && !row.unknownOutputRequests ? row.output : null,
       usageComplete: Boolean(row.requests && !row.unknownUsageRequests),
     };
   }
@@ -493,6 +497,8 @@ export class Store {
       .prepare(
         `SELECT connection,model,count(*) AS requests,sum(input_tokens) AS inputTokens,
       sum(output_tokens) AS outputTokens,
+      sum(CASE WHEN input_tokens IS NULL THEN 1 ELSE 0 END) AS unknownInputRequests,
+      sum(CASE WHEN output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownOutputRequests,
       sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownUsageRequests,
       sum(cost_usd) AS knownCostUsd,
       sum(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unknownCostRequests,
@@ -506,6 +512,8 @@ export class Store {
       inputTokens: number | null;
       outputTokens: number | null;
       unknownUsageRequests: number;
+      unknownInputRequests: number;
+      unknownOutputRequests: number;
       knownCostUsd: number | null;
       unknownCostRequests: number;
       heldUsd: number | null;
@@ -513,9 +521,9 @@ export class Store {
     return rows.map((row) => ({
       ...row,
       inputTokens:
-        row.requests && !row.unknownUsageRequests ? row.inputTokens : null,
+        row.requests && !row.unknownInputRequests ? row.inputTokens : null,
       outputTokens:
-        row.requests && !row.unknownUsageRequests ? row.outputTokens : null,
+        row.requests && !row.unknownOutputRequests ? row.outputTokens : null,
       usageComplete: Boolean(row.requests && !row.unknownUsageRequests),
     }));
   }
