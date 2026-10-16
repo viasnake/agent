@@ -1,4 +1,17 @@
 import { matchesKey, type KeyId } from "@earendil-works/pi-tui";
+import { AgentError } from "../types.js";
+
+export function commandPath(argument: string): string {
+  let path = argument.trim();
+  if (path.startsWith('"') || path.startsWith("'")) {
+    if (path.length < 2 || path.at(-1) !== path[0])
+      throw new AgentError("INPUT_PATH", "パスを囲む引用符を閉じてください。");
+    path = path.slice(1, -1);
+  }
+  if (!path)
+    throw new AgentError("INPUT_PATH", "画像の相対パスを指定してください。");
+  return path;
+}
 export const actions = {
   palette: {
     keys: ["ctrl+p"],
@@ -49,9 +62,14 @@ export const actions = {
   string,
   { keys: KeyId[]; description: string; command: string }
 >;
-export function actionFor(data: string): keyof typeof actions | undefined {
-  return (Object.keys(actions) as Array<keyof typeof actions>).find((key) =>
-    actions[key].keys.some((k) => matchesKey(data, k)),
+export type ActionName = keyof typeof actions;
+export type KeyOverrides = Partial<Record<ActionName, KeyId[]>>;
+export function actionFor(
+  data: string,
+  overrides: KeyOverrides = {},
+): ActionName | undefined {
+  return (Object.keys(actions) as ActionName[]).find((key) =>
+    (overrides[key] ?? actions[key].keys).some((k) => matchesKey(data, k)),
   );
 }
 export const commands = [
@@ -67,9 +85,12 @@ export const commands = [
   ["diff", "変更と差分"],
   ["apply", "確認して適用"],
   ["artifacts", "文書・出典・検査結果"],
-  ["images", "保存・編集・除外する画像"],
+  ["images", "画像を送信前に追加・編集・除外"],
   ["clipboard", "クリップボード画像をローカル保存"],
   ["git", "ブランチ・状態・最近のコミットを参照"],
+  ["editor", "外部エディタで下書き・成果物の改訂案を編集"],
+  ["editor-config", "外部エディタの起動引数を設定"],
+  ["keys", "キー割当を表示・変更"],
   ["settings", "接続・権限・上限"],
   ["login", "認証"],
   ["doctor", "ローカル診断"],
