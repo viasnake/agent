@@ -1070,9 +1070,8 @@ function validateMatchLocator(text: string, hit: SearchHit): void {
   const end = hit.matchOffset + hit.matchLength;
   if (
     end > text.length ||
-    (hit.matchOffset > 0 &&
-      text.charCodeAt(hit.matchOffset - 1) >= 0xdc00 &&
-      text.charCodeAt(hit.matchOffset - 1) <= 0xdfff) ||
+    (text.charCodeAt(hit.matchOffset) >= 0xdc00 &&
+      text.charCodeAt(hit.matchOffset) <= 0xdfff) ||
     (end < text.length &&
       text.charCodeAt(end) >= 0xdc00 &&
       text.charCodeAt(end) <= 0xdfff)
@@ -1216,9 +1215,10 @@ export async function readSearchResultLocal(
     const text = readConversationName(context, hit.id);
     if (sha256(Buffer.from(text)) !== hit.hash)
       fail("SEARCH_STALE", "Conversation changed since this result was found");
+    validateMatchLocator(text, hit);
     return {
       title: boundedDisplay(text),
-      text: readWindow(text),
+      text: readWindow(text, hit.matchOffset, hit.matchLength),
     };
   }
   if (hit.kind === "runs") {

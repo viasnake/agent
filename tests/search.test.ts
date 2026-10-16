@@ -213,7 +213,7 @@ test("search reads runs, events and artifacts while omitting raw and bounded bod
 test("search centers late body matches and keeps conversation names independent", async () => {
   const f = await setup();
   try {
-    const body = "前".repeat(30_000) + "late needle";
+    const body = "前".repeat(30_000) + "😀late needle";
     f.app.conversations.message(f.app.session, "user", body);
     const messagePage = await f.app.search({
       kind: "messages",
@@ -225,6 +225,13 @@ test("search centers late body matches and keeps conversation names independent"
     const message = await f.app.readSearchResult(messagePage.hits[0]!);
     assert.match(message.text, /1: .*late needle/);
     assert.ok(Buffer.byteLength(message.text) <= 32_000);
+    await assert.rejects(
+      f.app.readSearchResult({
+        ...messagePage.hits[0]!,
+        matchOffset: messagePage.hits[0]!.matchOffset! - 1,
+      }),
+      { code: "SEARCH_INPUT" },
+    );
 
     const named = f.app.conversations.create(f.app.session.workspace, {
       dataClass: "private",
@@ -243,6 +250,21 @@ test("search centers late body matches and keeps conversation names independent"
       (await f.app.readSearchResult(namePage.hits[0]!)).title,
       named.name,
     );
+    const longNamed = f.app.conversations.create(f.app.session.workspace, {
+      dataClass: "private",
+      checks: [],
+    });
+    longNamed.name = "前".repeat(15_000) + "名前末尾";
+    f.app.conversations.save(longNamed);
+    f.app.conversations.release(longNamed.id);
+    const longNamePage = await f.app.search({
+      kind: "conversations",
+      text: "名前末尾",
+    });
+    const longNameResult = await f.app.readSearchResult(longNamePage.hits[0]!);
+    assert.match(longNameResult.text, /名前末尾/);
+    assert.ok(Buffer.byteLength(longNameResult.text) <= 32_000);
+    assert.ok(Buffer.byteLength(longNameResult.title) <= 400);
   } finally {
     await f.app.close();
     await f.cleanup();
