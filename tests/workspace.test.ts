@@ -166,6 +166,26 @@ test("redacted originals stay out of continued tool work and cannot be reapplied
               ),
           { code: "IMAGE_REDACTED" },
         );
+      const aliasedWork = join(directory, "work-alias");
+      await symlink(join(directory, "work"), aliasedWork, "dir");
+      const aliasedTools = new TaskTools(
+        f.config,
+        f.store,
+        owned,
+        task,
+        aliasedWork,
+        new Sandbox(f.config.execution),
+      ).all();
+      await assert.rejects(
+        () =>
+          aliasedTools
+            .find((tool) => tool.name === "read_file")!
+            .execute(
+              { path: "assets/original.png", startLine: 1, lines: 10 },
+              new AbortController().signal,
+            ),
+        { code: "IMAGE_REDACTED" },
+      );
     } finally {
       f.store.release(owned);
     }

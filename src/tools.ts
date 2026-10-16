@@ -1,4 +1,4 @@
-import { lstat, readFile, rm, mkdtemp } from "node:fs/promises";
+import { lstat, readFile, rm, mkdtemp, realpath } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { z } from "zod";
 import type { Config } from "./config.js";
@@ -105,8 +105,9 @@ export class TaskTools {
     };
   }
   private async file(path: string, write = false): Promise<string> {
-    const projectedTarget = await safePath(this.root, path, true),
-      normalized = relative(this.root, projectedTarget).split(sep).join("/"),
+    const root = await realpath(this.root),
+      projectedTarget = await safePath(root, path, true),
+      normalized = relative(root, projectedTarget).split(sep).join("/"),
       snapshot = await readSnapshot(this.store.runDir(this.run.id));
     if (snapshot.redactedPaths?.includes(normalized))
       throw new AgentError(
