@@ -44,6 +44,7 @@ export interface PublicFetchResult {
 }
 
 export interface PublicFetchDependencies {
+  excludedUrls?: readonly string[];
   request?: (
     url: URL,
     init: Parameters<typeof undiciFetch>[1],
@@ -101,6 +102,11 @@ export async function fetchPublic(
     let current = url;
     for (let redirect = 0; redirect <= 5; redirect++) {
       signal.throwIfAborted();
+      if (dependencies.excludedUrls?.includes(current.href))
+        throw new AgentError(
+          "SOURCE_EXCLUDED",
+          "This URL belongs to an excluded source family",
+        );
       if (
         current.protocol !== "https:" ||
         current.username ||

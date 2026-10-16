@@ -426,6 +426,9 @@ export class TaskTools {
             const excludedHashes = new Set(
               this.run.contextState?.excludedSourceHashes ?? [],
             );
+            const excludedUrls = new Set(
+              this.run.contextState?.excludedSourceUrls ?? [],
+            );
             if (
               this.store
                 .artifacts(this.run.id)
@@ -453,7 +456,16 @@ export class TaskTools {
               AbortSignal.any([signal, AbortSignal.timeout(30000)]),
               this.config.web.allowedHosts,
               this.config.limits.maxFileBytes,
+              { excludedUrls: [...excludedUrls] },
             );
+            if (
+              excludedUrls.has(result.url) ||
+              excludedUrls.has(requested.href)
+            )
+              throw new AgentError(
+                "SOURCE_EXCLUDED",
+                "This URL belongs to an excluded source family",
+              );
             const rawSha256 = sha256(result.body);
             const extracted = decodeResponse(
               result,
@@ -542,12 +554,28 @@ export class TaskTools {
               );
             const url = new URL(configured.endpoint);
             url.searchParams.set(configured.queryParam, args.query);
+            const excludedUrls = new Set(
+              this.run.contextState?.excludedSourceUrls ?? [],
+            );
+            if (excludedUrls.has(url.href))
+              throw new AgentError(
+                "SOURCE_EXCLUDED",
+                "This URL belongs to an excluded source family",
+              );
             const result = await this.publicFetcher(
               url,
               AbortSignal.any([signal, AbortSignal.timeout(30000)]),
               this.config.web.allowedHosts,
               this.config.limits.maxFileBytes,
+              {
+                excludedUrls: [...excludedUrls],
+              },
             );
+            if (excludedUrls.has(result.url) || excludedUrls.has(url.href))
+              throw new AgentError(
+                "SOURCE_EXCLUDED",
+                "This URL belongs to an excluded source family",
+              );
             const decoded = decodeResponse(
               result,
               Math.min(this.config.limits.maxInputBytes, 200_000),
@@ -578,6 +606,19 @@ export class TaskTools {
             );
             return JSON.stringify(report);
           },
+        ),
+      );
+    if (
+      this.run.kind === "research" ||
+      this.run.contextState?.researchCheckpoint
+    )
+      tools.push(
+        this.wrap(
+          "read_research_checkpoint",
+          "Read the current host-retained research checkpoint.",
+          z.strictObject({}),
+          async () =>
+            JSON.stringify(this.run.contextState?.researchCheckpoint ?? null),
         ),
       );
     if (this.run.kind === "research") {
@@ -659,13 +700,6 @@ export class TaskTools {
             return serialized;
           },
         ),
-        this.wrap(
-          "read_research_checkpoint",
-          "Read the current host-retained research checkpoint.",
-          z.strictObject({}),
-          async () =>
-            JSON.stringify(this.run.contextState?.researchCheckpoint ?? null),
-        ),
       );
     }
     if (this.run.kind === "writing" || this.run.kind === "research")
@@ -743,11 +777,23 @@ export class TaskTools {
                 ...review,
                 findings: review.findings.map((finding) => ({
                   ...finding,
-                  location: {
-                    ...finding.location,
-                    sourceId: source.id,
-                    selectedTextSha256: sha256(sourceText),
-                  },
+                  location:
+                    finding.location.document === "source"
+                      ? {
+                          ...finding.location,
+                          sourceId: source.id,
+                          selectedTextSha256: sha256(sourceText),
+                        }
+                      : finding.location.document === "candidate"
+                        ? {
+                            ...finding.location,
+                            candidatePath: args.path,
+                            candidateSha256: sha256(candidateText),
+                          }
+                        : {
+                            ...finding.location,
+                            requirementIndex: finding.location.line - 1,
+                          },
                 })),
               },
               heuristicOnly: true,
@@ -798,13 +844,9 @@ export class TaskTools {
           "search_files",
           "read_context",
           ...(this.run.kind === "research"
-            ? [
-                "fetch_source",
-                "search_web",
-                "research_checkpoint",
-                "read_research_checkpoint",
-              ]
+            ? ["fetch_source", "search_web", "research_checkpoint"]
             : []),
+          "read_research_checkpoint",
           ...(this.run.kind === "writing" || this.run.kind === "research"
             ? ["check_writing"]
             : []),

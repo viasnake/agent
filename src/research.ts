@@ -24,6 +24,7 @@ const blockTags = new Set([
   "h4",
   "h5",
   "h6",
+  "header",
   "li",
   "main",
   "ol",
@@ -32,12 +33,11 @@ const blockTags = new Set([
   "section",
   "table",
   "tbody",
-  "td",
   "tfoot",
-  "th",
   "thead",
   "tr",
   "ul",
+  "footer",
 ]);
 const skippedTags = new Set(["nav", "script", "style", "template"]);
 const preservedTags = new Set(["code", "pre"]);
@@ -88,6 +88,8 @@ export function decodeResponse(
     );
   let decoded: string;
   try {
+    if (charset === "us-ascii" && response.body.some((byte) => byte > 0x7f))
+      throw new Error("non-ASCII byte");
     decoded = new TextDecoder(charset, {
       fatal: true,
       ignoreBOM: true,
@@ -248,6 +250,11 @@ function extractHtml(
           newline();
         }
         if (blockTags.has(tag)) newline();
+        if (/^h[1-6]$/.test(tag)) {
+          newline();
+          append(`${"#".repeat(Number(tag[1]))} `);
+        }
+        if (tag === "tr") newline();
         if (preservedTags.has(tag)) preservedDepth++;
         if (tag === "td" || tag === "th") append(" | ");
       },
@@ -271,6 +278,7 @@ function extractHtml(
         if (frame.skipped) return;
         if (preservedTags.has(tag))
           preservedDepth = Math.max(0, preservedDepth - 1);
+        if (tag === "tr") newline();
         if (blockTags.has(tag)) newline();
       },
     },

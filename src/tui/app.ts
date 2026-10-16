@@ -7,6 +7,7 @@ import {
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { SettingsDialog } from "./settings.js";
+import { ResearchBrowser } from "./research-browser.js";
 import {
   SettingsEditor,
   type SettingsField,
@@ -1175,6 +1176,30 @@ export class TerminalApp {
             argument === "list",
           );
         break;
+      case "sources":
+      case "versions":
+      case "research": {
+        const browser = new ResearchBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        });
+        if (command === "versions")
+          await browser.versions(argument || undefined);
+        else if (command === "research") await browser.research();
+        else if (!argument) await browser.sources();
+        else if (args[0] === "exclude" && args.length === 2)
+          await browser.excludeSource(args[1]!);
+        else
+          throw new AgentError(
+            "SOURCE",
+            "/sources または /sources exclude <資料ID> を指定してください。",
+          );
+        break;
+      }
       case "compact":
         await app.compact();
         break;

@@ -108,7 +108,7 @@ test("research fetch stores raw and deterministic extracted sources while search
     const source = JSON.parse(fetched) as { sourceId: string; text: string };
     assert.match(source.text, /Header/);
     assert.match(source.text, /Facts/);
-    assert.match(source.text, /3:  \| Key\n4:  \| Value/);
+    assert.match(source.text, /3:  \| Key \| Value/);
     assert.match(source.text, /untrusted alt text/);
     assert.match(source.text, /Footer/);
     assert.doesNotMatch(fetched, /RAW_ONLY_SECRET/);
@@ -257,6 +257,32 @@ test("search endpoint configuration and extracted output enforce strict bounds",
     () => decodeResponse({ ...source, charset: "unsupported-charset" }, 100),
     (error) => error instanceof AgentError && error.code === "SOURCE_ENCODING",
   );
+  assert.throws(
+    () =>
+      decodeResponse(
+        {
+          ...source,
+          body: Buffer.from([0x80]),
+          charset: "us-ascii",
+          contentType: "text/plain; charset=us-ascii",
+        },
+        100,
+      ),
+    { code: "SOURCE_ENCODING" },
+  );
+  assert.throws(
+    () =>
+      decodeResponse(
+        {
+          ...source,
+          body: Buffer.from([0x82]),
+          charset: "shift_jis",
+          contentType: "text/plain; charset=shift_jis",
+        },
+        100,
+      ),
+    { code: "SOURCE_ENCODING" },
+  );
 });
 
 test("public fetch captures bounded response bytes through an injected transport", async () => {
@@ -281,6 +307,48 @@ test("public fetch captures bounded response bytes through an injected transport
   assert.equal(calls, 1);
   assert.equal(result.body.toString("utf8"), "captured body");
   assert.equal(result.lastModified, "Wed, 02 Oct 2024 00:00:00 GMT");
+});
+
+test("public fetch stops before requesting excluded redirect destinations", async () => {
+  let calls = 0;
+  await assert.rejects(
+    fetchPublic(
+      new URL("https://example.com/alias"),
+      new AbortController().signal,
+      ["example.com", "excluded.example"],
+      1000,
+      {
+        excludedUrls: ["https://excluded.example/private"],
+        request: async () => {
+          calls++;
+          return new Response(null, {
+            status: 302,
+            headers: { location: "https://excluded.example/private" },
+          }) as never;
+        },
+      },
+    ),
+    { code: "SOURCE_EXCLUDED" },
+  );
+  assert.equal(calls, 1);
+  calls = 0;
+  await assert.rejects(
+    fetchPublic(
+      new URL("https://excluded.example/private"),
+      new AbortController().signal,
+      ["excluded.example"],
+      1000,
+      {
+        excludedUrls: ["https://excluded.example/private"],
+        request: async () => {
+          calls++;
+          throw new Error("Excluded URL must not be requested");
+        },
+      },
+    ),
+    { code: "SOURCE_EXCLUDED" },
+  );
+  assert.equal(calls, 0);
 });
 
 test("research checkpoints authorize source references and check_writing keeps host literals", async () => {
@@ -376,6 +444,31 @@ test("research checkpoints authorize source references and check_writing keeps h
       .map((artifact) => artifact.name);
     assert.ok(reports.some((name) => name.startsWith("research/checkpoint-")));
     assert.ok(reports.some((name) => name.startsWith("writing/check-")));
+    const followup = await f.harness.create({
+      kind: "chat",
+      access: "read-only",
+      objective: "Read retained research context",
+      dataClass: "private",
+      contextState: owned.contextState,
+    });
+    const followupOwned = f.store.claim(followup.id);
+    const followupTools = new TaskTools(
+      config,
+      f.store,
+      followupOwned,
+      fixtureTask(),
+      f.store.runDir(followup.id),
+      new Sandbox(config.execution),
+    ).all();
+    const carriedCheckpoint = JSON.parse(
+      await followupTools
+        .find((tool) => tool.name === "read_research_checkpoint")!
+        .execute({}, new AbortController().signal),
+    );
+    assert.equal(carriedCheckpoint.summary, "A retained summary");
+    assert.equal(carriedCheckpoint.author, "model");
+    assert.equal(carriedCheckpoint.trusted, false);
+    f.store.release(followupOwned);
     f.store.release(owned);
   } finally {
     await f.cleanup();

@@ -6,6 +6,7 @@ import { Application } from "../src/application.js";
 import { Conversations } from "../src/conversations.js";
 import { Sandbox } from "../src/sandbox.js";
 import { TaskTools } from "../src/tools.js";
+import { storePreparedText } from "../src/documents.js";
 import {
   AgentError,
   type ConversationContext,
@@ -81,10 +82,21 @@ test("source exclusion binds and removes a transitive source family from future 
       "source-raw",
       pdfRawBytes,
     );
-    const pdfReferenceIds = [
-      `doc-${sha256("page one selector")}`,
-      `doc-${sha256("page two selector")}`,
-    ];
+    const pdfPrepared = await Promise.all(
+      ["pages=1", "pages=2"].map((selector, index) =>
+        storePreparedText(
+          f.p,
+          "report.pdf",
+          "pdf",
+          selector,
+          pdfRawBytes,
+          `Selected PDF page ${index + 1}\n`,
+          `pages ${index + 1}-${index + 1}`,
+          false,
+        ),
+      ),
+    );
+    const pdfReferenceIds = pdfPrepared.map(({ reference }) => reference.id);
     const pdfSources = await Promise.all(
       pdfReferenceIds.map((sourceId, index) => {
         const selected = Buffer.from(`Selected PDF page ${index + 1}\n`);
@@ -118,6 +130,24 @@ test("source exclusion binds and removes a transitive source family from future 
       documentId: pdfReferenceIds[0],
     };
     owned.images = [pageImage];
+    owned.preparedInputs = [pdfPrepared[0]!.reference];
+    app.session.images = [pageImage];
+    app.session.queue = [
+      {
+        id: "queued-pdf",
+        text: "continue with queued PDF",
+        mode: "next",
+        images: [pageImage],
+        documents: [
+          {
+            ...pdfPrepared[0]!.reference,
+            imageIds: [pageImage.id],
+          },
+        ],
+        previewBinding: "stale-preview",
+        previewConfigHash: "stale-config",
+      },
+    ];
     owned.contextState = {
       ...app.session.context!,
       sourceIds: [
@@ -146,22 +176,22 @@ test("source exclusion binds and removes a transitive source family from future 
     f.store.transition(activeRun, "running");
     f.store.release(activeRun);
 
-    const stale = app.previewSourceExclusion(source.id);
+    const stale = await app.previewSourceExclusion(source.id);
     app.session.context!.excludedSourceUrls = ["https://stale.example/"];
-    assert.throws(
-      () => app.excludeSource(source.id, stale.binding),
+    await assert.rejects(
+      app.excludeSource(source.id, stale.binding),
       (error) => error instanceof AgentError && error.code === "SOURCE_BINDING",
     );
     delete app.session.context!.excludedSourceUrls;
     app.save();
 
-    const preview = app.previewSourceExclusion(source.id);
+    const preview = await app.previewSourceExclusion(source.id);
     assert.ok(preview.family.sourceIds.includes(source.id));
     assert.ok(preview.family.sourceIds.includes(identical.id));
     assert.ok(preview.family.sourceIds.includes(sameUrl.id));
     assert.ok(preview.family.rawArtifactIds.includes(raw.id));
     assert.ok(preview.family.hashes.includes(sha256(rawBytes)));
-    app.excludeSource(source.id, preview.binding);
+    await app.excludeSource(source.id, preview.binding);
     assert.ok(app.session.context!.excludedSourceIds!.includes(source.id));
     assert.ok(app.session.context!.excludedSourceIds!.includes(identical.id));
     assert.ok(app.session.context!.excludedSourceIds!.includes(raw.id));
@@ -174,14 +204,36 @@ test("source exclusion binds and removes a transitive source family from future 
       app.session.context!.researchCheckpoint!.decisions[0]!.sourceIds,
       [],
     );
-    const pdfPreview = app.previewSourceExclusion(pdfSources[0]!.id);
+    const pdfPreview = await app.previewSourceExclusion(pdfSources[0]!.id);
     assert.ok(
       pdfPreview.family.sourceIds.includes(pdfSources[1]!.id),
       "a different page selector from the same PDF belongs to the same family",
     );
     assert.ok(pdfPreview.family.imageIds.includes(pageImage.id));
     assert.ok(pdfPreview.family.hashes.includes(pageSha256));
-    app.excludeSource(pdfSources[0]!.id, pdfPreview.binding);
+    const mutableRun = f.store.claim(run.id);
+    app.session.images = [];
+    app.session.queue[0]!.images = [];
+    mutableRun.images = [];
+    f.store.save(mutableRun, "remove_queued_image");
+    const changedMembership = await app.previewSourceExclusion(
+      pdfSources[0]!.id,
+    );
+    assert.notEqual(changedMembership.binding, pdfPreview.binding);
+    app.session.images = [pageImage];
+    app.session.queue[0]!.images = [pageImage];
+    mutableRun.images = [pageImage];
+    f.store.save(mutableRun, "restore_queued_image");
+    f.store.release(mutableRun);
+    const currentPdfPreview = await app.previewSourceExclusion(
+      pdfSources[0]!.id,
+    );
+    assert.ok(currentPdfPreview.family.imageIds.includes(pageImage.id));
+    await app.excludeSource(pdfSources[0]!.id, currentPdfPreview.binding);
+    assert.deepEqual(app.session.images, []);
+    assert.deepEqual(app.session.queue[0]!.documents, []);
+    assert.deepEqual(app.session.queue[0]!.images, []);
+    assert.equal(app.session.queue[0]!.previewBinding, undefined);
     await assert.rejects(
       app.resume(),
       (error) =>
@@ -242,8 +294,8 @@ test("source exclusion binds and removes a transitive source family from future 
     assert.doesNotMatch(evidence, /example\.com|mirror\.example/);
     f.store.release(inheritedOwned);
     app.newSession();
-    assert.throws(
-      () => app.previewSourceExclusion(source.id),
+    await assert.rejects(
+      app.previewSourceExclusion(source.id),
       (error) => error instanceof AgentError && error.code === "SOURCE",
     );
   } finally {

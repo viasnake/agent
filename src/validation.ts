@@ -286,6 +286,17 @@ export class Evaluator {
         startLine: Number(match[2]),
         endLine: Number(match[3] ?? match[2]),
       }));
+      const unavailableCitedSourceIds = [
+        ...new Set(
+          citedSourceRanges
+            .map((range) => range.sourceId)
+            .filter(
+              (sourceId): sourceId is string =>
+                typeof sourceId === "string" &&
+                !availableSourceIds.includes(sourceId),
+            ),
+        ),
+      ].sort();
       await this.store.artifact(
         run,
         `provenance/${document.id}.json`,
@@ -300,6 +311,7 @@ export class Evaluator {
           parentRunId: run.parentRunId,
           availableInputSourceIds: availableSourceIds,
           citedSourceRanges,
+          unavailableCitedSourceIds,
           validationArtifactId: validationArtifact.id,
           semanticCorrectness: "not-established",
         }),

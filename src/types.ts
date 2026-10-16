@@ -239,6 +239,7 @@ export type ArtifactProvenance =
       parentRunId?: string;
       availableInputSourceIds: string[];
       citedSourceRanges: ArtifactProvenanceSourceRange[];
+      unavailableCitedSourceIds: string[];
       validation: {
         artifactId: string;
         sha256: string;

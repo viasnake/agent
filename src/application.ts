@@ -2140,13 +2140,13 @@ export class Application extends EventEmitter {
     }
     return result;
   }
-  private sourceFamily(sourceId: string): {
+  private async sourceFamily(sourceId: string): Promise<{
     sourceIds: string[];
     rawArtifactIds: string[];
     imageIds: string[];
     hashes: string[];
     urls: string[];
-  } {
+  }> {
     const authorized = this.conversationArtifacts(),
       source = authorized.get(sourceId);
     if (!source || source.artifact.kind !== "source")
@@ -2154,123 +2154,198 @@ export class Application extends EventEmitter {
         "SOURCE",
         "Source is not authorized in this conversation",
       );
+    const runs = this.conversations
+      .runs(this.session.id)
+      .map((runId) => this.store.get(runId));
     const sourceArtifacts = [...authorized.values()].filter(
       ({ artifact }) => artifact.kind === "source",
     );
-    const sources = new Map([[sourceId, source]]);
+    const allImages = [
+      ...runs.flatMap((run) => run.images ?? []),
+      ...(this.session.images ?? []),
+      ...this.session.queue.flatMap((item) => item.images ?? []),
+    ];
+    const images = new Map(allImages.map((image) => [image.id, image]));
+    const documents = new Map<
+      string,
+      { reference: DocumentReference; images: ImageReference[] }
+    >();
+    const loadReference = async (reference: DocumentReference) => {
+      const loaded = await loadPreparedInput(this.paths, reference);
+      const existing = documents.get(reference.id);
+      if (existing) {
+        if (
+          existing.reference.rawSha256 !== reference.rawSha256 ||
+          existing.reference.selectedSha256 !== reference.selectedSha256
+        )
+          throw new AgentError(
+            "INPUT_INTEGRITY",
+            "Prepared attachment references disagree",
+          );
+        return;
+      }
+      documents.set(reference.id, {
+        reference: loaded.reference,
+        images: (reference.imageIds ?? [])
+          .map((id) => images.get(id))
+          .filter((image): image is ImageReference => image !== undefined),
+      });
+    };
+    for (const run of runs)
+      for (const reference of run.preparedInputs ?? [])
+        await loadReference(reference);
+    for (const item of this.session.queue)
+      for (const reference of item.documents ?? [])
+        await loadReference(reference);
+    const verified = new Map<
+      string,
+      { hashes: Set<string>; urls: Set<string>; rawIds: Set<string> }
+    >();
+    for (const candidate of sourceArtifacts) {
+      const content = await this.store.content(candidate.artifact);
+      const selectedHash = sha256(content);
+      const declaredSelected = candidate.artifact.metadata.selectedSha256;
+      if (declaredSelected !== undefined && declaredSelected !== selectedHash)
+        throw new AgentError(
+          "SOURCE_INTEGRITY",
+          "Stored source selected hash does not match its content",
+        );
+      const hashes = new Set([candidate.artifact.sha256, selectedHash]);
+      const rawIds = new Set<string>();
+      const rawId = candidate.artifact.metadata.rawArtifactId;
+      if (typeof rawId === "string") {
+        const raw = authorized.get(rawId);
+        if (!raw || raw.artifact.kind !== "source-raw")
+          throw new AgentError(
+            "SOURCE_INTEGRITY",
+            "Stored source raw companion is unavailable",
+          );
+        const rawContent = await this.store.content(raw.artifact);
+        const rawHash = sha256(rawContent);
+        if (
+          rawHash !== raw.artifact.sha256 ||
+          rawHash !== candidate.artifact.metadata.rawSha256
+        )
+          throw new AgentError(
+            "SOURCE_INTEGRITY",
+            "Stored source raw companion hash does not match its content",
+          );
+        hashes.add(rawHash);
+        rawIds.add(rawId);
+      }
+      verified.set(candidate.artifact.id, {
+        hashes,
+        rawIds,
+        urls: new Set(
+          [
+            candidate.artifact.metadata.url,
+            candidate.artifact.metadata.requestedUrl,
+          ].filter(
+            (url): url is string => typeof url === "string" && url.length > 0,
+          ),
+        ),
+      });
+    }
+    const sourceIds = new Set<string>([sourceId]);
     const hashes = new Set<string>();
     const urls = new Set<string>();
-    const addHashes = (artifact: Artifact): boolean => {
-      const before = hashes.size;
-      for (const hash of [
-        artifact.sha256,
-        artifact.metadata.rawSha256,
-        artifact.metadata.selectedSha256,
-      ])
-        if (typeof hash === "string" && hash) hashes.add(hash);
-      return hashes.size !== before;
+    const rawArtifactIds = new Set<string>();
+    const imageIds = new Set<string>();
+    const documentIds = new Set<string>();
+    const addSource = (id: string) => {
+      const info = verified.get(id);
+      if (!info || sourceIds.has(id)) return false;
+      sourceIds.add(id);
+      for (const hash of info.hashes) hashes.add(hash);
+      for (const url of info.urls) urls.add(url);
+      for (const rawId of info.rawIds) rawArtifactIds.add(rawId);
+      const documentId = sourceArtifacts.find(
+        ({ artifact }) => artifact.id === id,
+      )?.artifact.metadata.sourceId;
+      if (typeof documentId === "string") documentIds.add(documentId);
+      return true;
     };
-    const addUrls = (artifact: Artifact): boolean => {
-      const before = urls.size;
-      for (const url of [artifact.metadata.url, artifact.metadata.requestedUrl])
-        if (typeof url === "string" && url) urls.add(url);
-      return urls.size !== before;
-    };
-    addHashes(source.artifact);
-    addUrls(source.artifact);
+    for (const hash of verified.get(sourceId)!.hashes) hashes.add(hash);
+    for (const url of verified.get(sourceId)!.urls) urls.add(url);
+    for (const rawId of verified.get(sourceId)!.rawIds)
+      rawArtifactIds.add(rawId);
+    if (typeof source.artifact.metadata.sourceId === "string")
+      documentIds.add(source.artifact.metadata.sourceId);
     let changed = true;
     while (changed) {
       changed = false;
       for (const candidate of sourceArtifacts) {
+        const info = verified.get(candidate.artifact.id)!;
+        const associatedDocument =
+          typeof candidate.artifact.metadata.sourceId === "string" &&
+          documentIds.has(candidate.artifact.metadata.sourceId);
         if (
-          !sources.has(candidate.artifact.id) &&
-          ([
-            candidate.artifact.sha256,
-            candidate.artifact.metadata.rawSha256,
-            candidate.artifact.metadata.selectedSha256,
-          ].some((hash) => typeof hash === "string" && hashes.has(hash)) ||
-            [
-              candidate.artifact.metadata.url,
-              candidate.artifact.metadata.requestedUrl,
-            ].some((url) => typeof url === "string" && urls.has(url)))
+          !sourceIds.has(candidate.artifact.id) &&
+          (associatedDocument ||
+            [...info.hashes].some((hash) => hashes.has(hash)) ||
+            [...info.urls].some((url) => urls.has(url)))
+        )
+          changed = addSource(candidate.artifact.id) || changed;
+      }
+      for (const [id, document] of documents) {
+        const associatedSource = sourceArtifacts.some(
+          ({ artifact }) =>
+            artifact.metadata.sourceId === id && sourceIds.has(artifact.id),
+        );
+        if (
+          !documentIds.has(id) &&
+          (associatedSource ||
+            hashes.has(document.reference.rawSha256) ||
+            hashes.has(document.reference.selectedSha256))
         ) {
-          sources.set(candidate.artifact.id, candidate);
-          if (addHashes(candidate.artifact)) changed = true;
-          if (addUrls(candidate.artifact)) changed = true;
+          documentIds.add(id);
+          hashes.add(document.reference.rawSha256);
+          hashes.add(document.reference.selectedSha256);
+          for (const image of document.images) imageIds.add(image.id);
           changed = true;
         }
       }
-      if (sources.size + hashes.size > 1000)
+      for (const image of images.values()) {
+        if (
+          !imageIds.has(image.id) &&
+          ((typeof image.sourceId === "string" &&
+            sourceIds.has(image.sourceId)) ||
+            (typeof image.documentId === "string" &&
+              documentIds.has(image.documentId)) ||
+            hashes.has(image.sha256))
+        ) {
+          imageIds.add(image.id);
+          hashes.add(image.sha256);
+          changed = true;
+        }
+      }
+      if (
+        sourceIds.size +
+          rawArtifactIds.size +
+          imageIds.size +
+          documentIds.size +
+          hashes.size +
+          urls.size >
+        1000
+      )
         throw new AgentError(
           "SOURCE_FAMILY_LIMIT",
           "Source family is too large to exclude safely",
         );
     }
-    const sourceList = [...sources.values()];
-    const rawArtifactIds = [...authorized.values()]
-      .filter(
-        ({ artifact }) =>
-          artifact.kind === "source-raw" &&
-          (sourceList.some(
-            ({ artifact: sourceArtifact }) =>
-              sourceArtifact.metadata.rawArtifactId === artifact.id,
-          ) ||
-            hashes.has(artifact.sha256) ||
-            (typeof artifact.metadata.rawSha256 === "string" &&
-              hashes.has(artifact.metadata.rawSha256))),
-      )
-      .map(({ artifact }) => artifact.id);
-    const sourceIds = [...sources.keys()];
-    const imageIds = [
-      ...new Set(
-        [...authorized.values()]
-          .flatMap(({ run }) => run.images ?? [])
-          .filter(
-            (image) =>
-              (image.sourceId !== undefined &&
-                sourceIds.includes(image.sourceId)) ||
-              (typeof image.documentId === "string" &&
-                sourceList.some(
-                  ({ artifact }) =>
-                    artifact.metadata.sourceId === image.documentId,
-                )),
-          )
-          .map((image) => image.id),
-      ),
-    ];
-    for (const id of rawArtifactIds) {
-      const raw = authorized.get(id)?.artifact;
-      if (raw) addHashes(raw);
-    }
-    for (const image of [...authorized.values()].flatMap(
-      ({ run }) => run.images ?? [],
-    ))
-      if (imageIds.includes(image.id)) hashes.add(image.sha256);
-    const excludedUrls = [...urls];
-    if (
-      sourceIds.length +
-        rawArtifactIds.length +
-        imageIds.length +
-        hashes.size +
-        excludedUrls.length >
-      1000
-    )
-      throw new AgentError(
-        "SOURCE_FAMILY_LIMIT",
-        "Source family is too large to exclude safely",
-      );
+    for (const id of documentIds) sourceIds.add(id);
     return {
-      sourceIds,
-      rawArtifactIds,
-      imageIds,
+      sourceIds: [...sourceIds],
+      rawArtifactIds: [...rawArtifactIds],
+      imageIds: [...imageIds],
       hashes: [...hashes],
-      urls: excludedUrls,
+      urls: [...urls],
     };
   }
-  previewSourceExclusion(sourceId: string): {
+  async previewSourceExclusion(sourceId: string): Promise<{
     sessionId: string;
     sourceId: string;
-    family: ReturnType<Application["sourceFamily"]>;
+    family: Awaited<ReturnType<Application["sourceFamily"]>>;
     policy: {
       excludedSourceIds: string[];
       excludedSourceHashes: string[];
@@ -2278,9 +2353,9 @@ export class Application extends EventEmitter {
     };
     binding: string;
     warning: string;
-  } {
+  }> {
     this.idle();
-    const family = this.sourceFamily(sourceId);
+    const family = await this.sourceFamily(sourceId);
     const policy = {
       excludedSourceIds: [
         ...(this.session.context?.excludedSourceIds ?? []),
@@ -2310,9 +2385,9 @@ export class Application extends EventEmitter {
         "Exclusion is forward-only; previously transmitted facts and remote data are not erased.",
     };
   }
-  excludeSource(sourceId: string, binding: string): void {
+  async excludeSource(sourceId: string, binding: string): Promise<void> {
     this.idle();
-    const preview = this.previewSourceExclusion(sourceId);
+    const preview = await this.previewSourceExclusion(sourceId);
     if (preview.sessionId !== this.session.id || preview.binding !== binding)
       throw new AgentError(
         "SOURCE_BINDING",
@@ -2368,19 +2443,42 @@ export class Application extends EventEmitter {
         ),
       }),
     );
-    this.session.queue = this.session.queue.map((queued) => ({
-      ...queued,
-      documents: queued.documents?.filter(
+    this.session.images = this.session.images?.filter(
+      (image) =>
+        !excludedIds.has(image.id) && !excludedHashes.has(image.sha256),
+    );
+    this.session.queue = this.session.queue.map((queued) => {
+      const documents = queued.documents?.filter(
         (document) =>
           !excludedIds.has(document.id) &&
           !excludedHashes.has(document.rawSha256) &&
           !excludedHashes.has(document.selectedSha256),
-      ),
-      images: queued.images?.filter(
+      );
+      const images = queued.images?.filter(
         (image) =>
           !excludedIds.has(image.id) && !excludedHashes.has(image.sha256),
-      ),
-    }));
+      );
+      const changed =
+        documents?.length !== queued.documents?.length ||
+        images?.length !== queued.images?.length;
+      return changed
+        ? {
+            ...queued,
+            documents,
+            images,
+            previewBinding: undefined,
+            previewConfigHash: undefined,
+            previewDataClass: undefined,
+            previewLocalOnly: undefined,
+            previewKind: undefined,
+            previewModel: undefined,
+            previewReviewer: undefined,
+            previewStrategy: undefined,
+            previewAccess: undefined,
+            previewAccessOverride: undefined,
+          }
+        : { ...queued, documents, images };
+    });
     this.session.context = context;
     this.session.contextRunId = undefined;
     this.session.handoff = undefined;
@@ -2395,13 +2493,29 @@ export class Application extends EventEmitter {
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000)
       throw new AgentError("ARTIFACT", "Artifact history range is invalid");
     const authorized = this.conversationArtifacts();
+    const savedAt = new Map<string, number>();
+    for (const runId of this.conversations.runs(this.session.id)) {
+      const rows = this.store.db
+        .prepare(
+          "SELECT seq,detail FROM events WHERE run_id=? AND type='artifact_saved'",
+        )
+        .all(runId) as { seq: number; detail: string }[];
+      for (const row of rows) {
+        const detail = JSON.parse(row.detail) as { artifactId?: unknown };
+        if (typeof detail.artifactId === "string")
+          savedAt.set(detail.artifactId, row.seq);
+      }
+    }
     const entries = [...authorized.values()]
       .filter(
         ({ artifact }) =>
           artifact.kind === "document" &&
           (name === undefined || artifact.name === name),
       )
-      .sort((a, b) => b.run.updatedAt - a.run.updatedAt)
+      .sort(
+        (a, b) =>
+          (savedAt.get(b.artifact.id) ?? 0) - (savedAt.get(a.artifact.id) ?? 0),
+      )
       .slice(offset, offset + 30);
     for (const { artifact } of entries) {
       if (artifact.bytes > this.config.limits.maxFileBytes)
@@ -2458,6 +2572,7 @@ export class Application extends EventEmitter {
         : undefined;
     const sourceIds = parsed.availableInputSourceIds;
     const citedRanges = parsed.citedSourceRanges;
+    const unavailableIds = parsed.unavailableCitedSourceIds;
     const parentRunId = parsed.parentRunId;
     if (
       parsed.version !== 1 ||
@@ -2482,11 +2597,14 @@ export class Application extends EventEmitter {
           Number((range as Record<string, unknown>).endLine) >=
             Number((range as Record<string, unknown>).startLine),
       ) ||
+      !Array.isArray(unavailableIds) ||
+      !unavailableIds.every((sourceId) => typeof sourceId === "string") ||
       parsed.semanticCorrectness !== "not-established" ||
       typeof parsed.validationArtifactId !== "string" ||
       !validation ||
       validation.artifact.kind !== "check" ||
-      validation.run.id !== document.run.id
+      validation.run.id !== document.run.id ||
+      (parentRunId ?? undefined) !== document.run.parentRunId
     )
       throw new AgentError(
         "ARTIFACT_CORRUPT",
@@ -2495,16 +2613,27 @@ export class Application extends EventEmitter {
     const availableInputSourceIds = sourceIds as string[],
       availableSources = new Set(
         [...authorized.values()]
-          .filter(({ artifact }) => artifact.kind === "source")
+          .filter(
+            ({ artifact, run }) =>
+              artifact.kind === "source" && run.id === document.run.id,
+          )
           .map(({ artifact }) => artifact.id),
       ),
       citedSourceRanges = citedRanges as ArtifactProvenanceSourceRange[];
+    const unavailableCitedSourceIds = [
+      ...new Set(unavailableIds as string[]),
+    ].filter((sourceId) => !availableSources.has(sourceId));
     if (
+      new Set(availableInputSourceIds).size !==
+        availableInputSourceIds.length ||
       availableInputSourceIds.some(
         (sourceId) => !availableSources.has(sourceId),
       ) ||
+      unavailableCitedSourceIds.length !== unavailableIds.length ||
       citedSourceRanges.some(
-        (range) => !availableInputSourceIds.includes(range.sourceId),
+        (range) =>
+          !availableInputSourceIds.includes(range.sourceId) &&
+          !unavailableCitedSourceIds.includes(range.sourceId),
       )
     )
       throw new AgentError(
@@ -2546,6 +2675,7 @@ export class Application extends EventEmitter {
       ...(parentRunId === undefined ? {} : { parentRunId }),
       availableInputSourceIds,
       citedSourceRanges,
+      unavailableCitedSourceIds,
       validation: {
         artifactId: validation.artifact.id,
         sha256: validation.artifact.sha256,
@@ -2602,6 +2732,11 @@ export class Application extends EventEmitter {
         "Document diff requires UTF-8 text",
       );
     }
+    if (oldBytes.includes(0) || newBytes.includes(0))
+      throw new AgentError(
+        "DIFF_ENCODING",
+        "Document diff requires UTF-8 text rather than binary content",
+      );
     const patch = createTwoFilesPatch(
       `a/${before.artifact.name}`,
       `b/${after.artifact.name}`,

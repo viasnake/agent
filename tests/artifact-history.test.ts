@@ -124,6 +124,46 @@ test("history, provenance and diffs are authorized and linked to actual validati
   }
 });
 
+test("history preserves failed and repaired document versions saved in one run", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const app = new Application(f.config, f.p, f.store, f.root, async () => {
+    throw new Error("No provider should be created");
+  });
+  try {
+    await app.initialize();
+    const run = await f.harness.create({
+      kind: "writing",
+      access: "change",
+      objective: "Repair a document",
+      dataClass: "private",
+      conversationId: app.session.id,
+    });
+    new Conversations(f.store).link(app.session, run);
+    const owned = f.store.claim(run.id);
+    const failed = await f.store.artifact(
+      owned,
+      "article.md",
+      "document",
+      "failed draft\n",
+    );
+    const repaired = await f.store.artifact(
+      owned,
+      "article.md",
+      "document",
+      "repaired draft\n",
+    );
+    f.store.release(owned);
+    const history = await app.artifactHistory("article.md");
+    assert.deepEqual(
+      history.map((entry) => entry.artifact.id),
+      [repaired.id, failed.id],
+    );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
 test("artifact diffs reject invalid UTF-8 and enforce byte limits", async () => {
   const f = await fixture(new ScriptedRuntime(async () => "unused"));
   const app = new Application(f.config, f.p, f.store, f.root, async () => {
@@ -152,9 +192,19 @@ test("artifact diffs reject invalid UTF-8 and enforce byte limits", async () => 
       "document",
       "valid text",
     );
+    const binary = await f.store.artifact(
+      owned,
+      "binary.txt",
+      "document",
+      Buffer.from("text\0with binary data"),
+    );
     f.store.release(owned);
     await assert.rejects(
       app.artifactDiff(invalid.id, valid.id),
+      (error) => error instanceof AgentError && error.code === "DIFF_ENCODING",
+    );
+    await assert.rejects(
+      app.artifactDiff(valid.id, binary.id),
       (error) => error instanceof AgentError && error.code === "DIFF_ENCODING",
     );
   } finally {

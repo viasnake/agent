@@ -194,6 +194,7 @@ export class TaskExecutor {
         chatTools.add(name);
     if (hasSources) chatTools.add("read_source");
     if (hasArchives) chatTools.add("read_context");
+    if (run.access === "read-only") chatTools.add("read_research_checkpoint");
     const tools =
       run.kind === "chat"
         ? dispatcher.all().filter((tool) => chatTools.has(tool.name))
@@ -208,13 +209,9 @@ export class TaskExecutor {
                   "search_files",
                   "read_context",
                   ...(run.kind === "research"
-                    ? [
-                        "fetch_source",
-                        "search_web",
-                        "research_checkpoint",
-                        "read_research_checkpoint",
-                      ]
+                    ? ["fetch_source", "search_web", "research_checkpoint"]
                     : []),
+                  "read_research_checkpoint",
                   ...(run.kind === "writing" || run.kind === "research"
                     ? ["check_writing"]
                     : []),

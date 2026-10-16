@@ -25,7 +25,15 @@ export interface WritingFinding {
     | "particle"
     | "long_sentence";
   severity: "error" | "review";
-  location: { document: "source" | "candidate" | "requirement"; line: number };
+  location: {
+    document: "source" | "candidate" | "requirement";
+    line: number;
+    sourceId?: string;
+    selectedTextSha256?: string;
+    candidatePath?: string;
+    candidateSha256?: string;
+    requirementIndex?: number;
+  };
   evidence: string;
   message: string;
 }
