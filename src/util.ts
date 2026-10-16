@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import {
   mkdir,
   writeFile,
   rename,
   lstat,
   realpath,
-  readFile,
   chmod,
   open,
   rm,
@@ -119,12 +119,61 @@ export async function readText(
   maxBytes = 1_000_000,
 ): Promise<string> {
   const stat = await lstat(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes)
+  if (
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.nlink !== 1 ||
+    stat.size > maxBytes
+  )
     throw new AgentError(
       "INPUT_SIZE",
       `Expected a regular file of at most ${maxBytes} bytes: ${path}`,
     );
-  const data = await readFile(path);
+  const file = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  let data: Buffer;
+  try {
+    const opened = await file.stat();
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.dev !== stat.dev ||
+      opened.ino !== stat.ino ||
+      opened.size !== stat.size ||
+      opened.mtimeMs !== stat.mtimeMs
+    )
+      throw new AgentError(
+        "INPUT_CHANGED",
+        `Input changed while opening: ${path}`,
+      );
+    const buffer = Buffer.alloc(opened.size + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = await file.read(
+        buffer,
+        length,
+        buffer.length - length,
+        length,
+      );
+      if (!read.bytesRead) break;
+      length += read.bytesRead;
+    }
+    const after = await file.stat();
+    if (
+      length !== opened.size ||
+      after.size !== opened.size ||
+      after.mtimeMs !== opened.mtimeMs
+    )
+      throw new AgentError(
+        "INPUT_CHANGED",
+        `Input changed while reading: ${path}`,
+      );
+    data = buffer.subarray(0, length);
+  } finally {
+    await file.close();
+  }
   if (data.includes(0))
     throw new AgentError(
       "BINARY_INPUT",
