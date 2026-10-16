@@ -9,6 +9,7 @@ import {
   ScriptedRuntime,
   testConfig,
 } from "./helpers.js";
+import { searchLocal } from "../src/search.js";
 
 async function setup() {
   const runtime = new ScriptedRuntime(async () => "unused");
@@ -75,7 +76,7 @@ test("search paginates literal message matches without executing runtime", async
 test("search enforces workspace ownership and rejects forged IDs", async () => {
   const f = await setup();
   try {
-    const other = f.app.conversations.create(f.workspace, {
+    const other = f.app.conversations.create(f.app.session.workspace, {
       dataClass: "private",
       checks: [],
     });
@@ -202,6 +203,103 @@ test("search reads runs, events and artifacts while omitting raw and bounded bod
     await assert.rejects(
       f.app.readSearchResult(artifactPage.hits[0]!),
       (error: { code?: string }) => error.code === "ARTIFACT_CORRUPT",
+    );
+  } finally {
+    await f.app.close();
+    await f.cleanup();
+  }
+});
+
+test("search centers late body matches and keeps conversation names independent", async () => {
+  const f = await setup();
+  try {
+    const body = "前".repeat(30_000) + "late needle";
+    f.app.conversations.message(f.app.session, "user", body);
+    const messagePage = await f.app.search({
+      kind: "messages",
+      text: "late needle",
+    });
+    assert.equal(messagePage.hits.length, 1);
+    assert.ok((messagePage.hits[0]?.matchOffset ?? 0) > 20_000);
+    assert.match(messagePage.hits[0]!.excerpt, /late needle/);
+    const message = await f.app.readSearchResult(messagePage.hits[0]!);
+    assert.match(message.text, /1: .*late needle/);
+    assert.ok(Buffer.byteLength(message.text) <= 32_000);
+
+    const named = f.app.conversations.create(f.app.session.workspace, {
+      dataClass: "private",
+      checks: [],
+    });
+    named.name = "tiny searchable conversation";
+    named.handoff = "x".repeat(1_100_000);
+    f.app.conversations.save(named);
+    f.app.conversations.release(named.id);
+    const namePage = await f.app.search({
+      kind: "conversations",
+      text: "tiny searchable",
+    });
+    assert.equal(namePage.hits.length, 1);
+    assert.equal(
+      (await f.app.readSearchResult(namePage.hits[0]!)).title,
+      named.name,
+    );
+  } finally {
+    await f.app.close();
+    await f.cleanup();
+  }
+});
+
+test("search reserves complete run payloads before continuing on the page budget", async () => {
+  const f = await setup();
+  try {
+    for (let index = 0; index < 9; index++) {
+      const run = await f.harness.create({
+        kind: "coding",
+        objective: `budget marker ${index}`,
+        workspace: f.workspace,
+        conversationId: f.app.session.id,
+        includeUntracked: true,
+      });
+      f.app.conversations.link(f.app.session, run);
+      const owner = f.store.claim(run.id);
+      owner.context = "x".repeat(1_000_000);
+      f.store.save(owner, "fixture_event", { index });
+      f.store.release(owner);
+    }
+    const first = await f.app.search({ kind: "runs", text: "budget marker" });
+    assert.equal(first.hits.length, 8);
+    assert.ok(first.cursor);
+    const second = await f.app.search({
+      kind: "runs",
+      text: "budget marker",
+      cursor: first.cursor,
+    });
+    assert.equal(second.hits.length, 1);
+    assert.equal(second.cursor, undefined);
+  } finally {
+    await f.app.close();
+    await f.cleanup();
+  }
+});
+
+test("search reports a limit when the clock expires before its first candidate", async () => {
+  const f = await setup();
+  try {
+    f.app.conversations.message(f.app.session, "user", "clock marker");
+    let tick = 0;
+    await assert.rejects(
+      searchLocal(
+        {
+          store: f.store,
+          workspace: f.app.session.workspace,
+          currentConversationId: f.app.session.id,
+          currentWorkRunId: undefined,
+          maxWorkspaceBytes: f.config.limits.maxWorkspaceBytes,
+          now: () => (tick++ === 0 ? 0 : 5_001),
+        },
+        { kind: "messages", text: "clock marker" },
+      ),
+      (error: { code?: string }) => error.code === "SEARCH_LIMIT",
     );
   } finally {
     await f.app.close();

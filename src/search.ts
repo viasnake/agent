@@ -25,6 +25,8 @@ export interface SearchHit {
   label: string;
   excerpt: string;
   line?: number;
+  matchOffset?: number;
+  matchLength?: number;
 }
 
 export interface SearchPage {
@@ -40,6 +42,7 @@ export interface SearchContext {
   currentConversationId: string;
   currentWorkRunId?: string;
   maxWorkspaceBytes: number;
+  now?: () => number;
 }
 
 const maxHits = 30;
@@ -47,6 +50,9 @@ const maxCandidates = 100;
 const maxContentBytes = 8 * 1024 * 1024;
 const maxRecordBytes = 1 * 1024 * 1024;
 const maxResultBytes = 32_000;
+const maxWindowBytes = 24_000;
+const maxWindowLines = 400;
+const maxLabelBytes = 400;
 const maxExcerptChars = 500;
 const deadlineMs = 5_000;
 const idPattern =
@@ -88,12 +94,14 @@ interface ScanState {
   warnings: Set<string>;
   query: string;
   stopBefore?: boolean;
+  timedOut?: boolean;
 }
 
 interface Match {
   found: boolean;
   line?: number;
   excerpt: string;
+  offset?: number;
 }
 
 function fail(code: string, message: string): never {
@@ -192,12 +200,28 @@ function firstLine(text: string, offset: number): number {
   return line;
 }
 
-function excerpt(text: string, offset: number): string {
-  const start = Math.max(0, text.lastIndexOf("\n", offset) + 1);
-  const end = text.indexOf("\n", offset);
-  return text
-    .slice(start, end < 0 ? start + maxExcerptChars : end)
-    .slice(0, maxExcerptChars);
+function previousCodePointStart(text: string, offset: number): number {
+  if (offset <= 0) return 0;
+  const previous = text.charCodeAt(offset - 1);
+  return offset - (previous >= 0xdc00 && previous <= 0xdfff ? 2 : 1);
+}
+
+function excerpt(text: string, offset: number, matchLength: number): string {
+  const matchChars = [...text.slice(offset, offset + matchLength)].length;
+  const before = Math.floor(Math.max(0, maxExcerptChars - matchChars) / 2);
+  let start = offset;
+  for (let index = 0; index < before; index++)
+    start = previousCodePointStart(text, start);
+  let end = start;
+  let count = 0;
+  while (end < text.length && count < maxExcerptChars) {
+    const codePoint = text.codePointAt(end)!;
+    end += codePoint > 0xffff ? 2 : 1;
+    count++;
+  }
+  const matchEnd = offset + matchLength;
+  if (end < matchEnd) end = matchEnd;
+  return text.slice(start, end);
 }
 
 function matchText(text: string, query: string): Match {
@@ -206,7 +230,8 @@ function matchText(text: string, query: string): Match {
   return {
     found: true,
     line: firstLine(text, offset),
-    excerpt: excerpt(text, offset),
+    excerpt: excerpt(text, offset, query.length),
+    offset,
   };
 }
 
@@ -217,10 +242,24 @@ function matchFields(
 ): Match & { nameMatch: boolean } {
   const nameMatch = matchText(name, query);
   if (nameMatch.found)
-    return { ...nameMatch, line: undefined, nameMatch: true };
+    return {
+      ...nameMatch,
+      line: undefined,
+      offset: undefined,
+      nameMatch: true,
+    };
   if (body !== undefined)
     return { ...matchText(body, query), nameMatch: false };
   return { found: false, excerpt: "", nameMatch: false };
+}
+
+function matchLocation(match: Match, query: string) {
+  return {
+    ...(match.line ? { line: match.line } : {}),
+    ...(match.offset !== undefined
+      ? { matchOffset: match.offset, matchLength: query.length }
+      : {}),
+  };
 }
 
 function boundedText(value: string): string | undefined {
@@ -240,8 +279,12 @@ function addWarning(state: ScanState, warning: string): void {
   state.warnings.add(warning);
 }
 
+function recordSizeAllowed(bytes: number): boolean {
+  return Number.isSafeInteger(bytes) && bytes >= 0 && bytes <= maxRecordBytes;
+}
+
 function reserveContent(state: ScanState, bytes: number): boolean {
-  if (bytes > maxRecordBytes) return false;
+  if (!recordSizeAllowed(bytes)) return false;
   if (bytes > maxContentBytes - state.contentBytes) {
     state.stopBefore = true;
     addWarning(
@@ -254,11 +297,113 @@ function reserveContent(state: ScanState, bytes: number): boolean {
   return true;
 }
 
-function timedOut(state: ScanState): boolean {
+function reserveRecord(
+  state: ScanState,
+  bytes: number,
+  warning: string,
+): boolean {
+  if (!recordSizeAllowed(bytes)) {
+    addWarning(state, warning);
+    return false;
+  }
+  return reserveContent(state, bytes);
+}
+
+function now(context: SearchContext): number {
+  return context.now?.() ?? performance.now();
+}
+
+function timedOut(context: SearchContext, state: ScanState): boolean {
   return (
-    performance.now() - state.started >= deadlineMs ||
+    now(context) - state.started >= deadlineMs ||
     state.contentBytes >= maxContentBytes
   );
+}
+
+function boundedDisplay(value: string, maxBytes = maxLabelBytes): string {
+  const source = Buffer.from(value, "utf8");
+  if (source.byteLength <= maxBytes) return value;
+  const marker = Buffer.from("…", "utf8");
+  let end = maxBytes - marker.byteLength;
+  while (end > 0 && (source[end]! & 0xc0) === 0x80) end--;
+  return `${source.subarray(0, end).toString("utf8")}…`;
+}
+
+function countLineBreaks(bytes: Buffer, end: number): number {
+  let lines = 0;
+  for (let index = 0; index < end; index++) if (bytes[index] === 10) lines++;
+  return lines;
+}
+
+function readWindow(
+  text: string,
+  offset?: number,
+  matchLength?: number,
+): string {
+  const source = Buffer.from(text, "utf8");
+  if (source.byteLength <= maxWindowBytes && !text.includes("\n"))
+    return `1: ${text}`;
+
+  const byteOffset =
+    offset === undefined ? 0 : Buffer.byteLength(text.slice(0, offset));
+  const byteLength =
+    offset === undefined || matchLength === undefined
+      ? 0
+      : Buffer.byteLength(text.slice(offset, offset + matchLength));
+  let start = Math.max(0, byteOffset - Math.floor(maxWindowBytes / 2));
+  if (start + maxWindowBytes < byteOffset + byteLength)
+    start = byteOffset + byteLength - maxWindowBytes;
+  let end = Math.min(source.byteLength, start + maxWindowBytes);
+  while (start > 0 && (source[start]! & 0xc0) === 0x80) start--;
+  while (end < source.byteLength && (source[end]! & 0xc0) === 0x80) end++;
+
+  const startsAtLineStart = start === 0 || source[start - 1] === 10;
+  const endsAtLineEnd = end === source.byteLength || source[end - 1] === 10;
+  const window = source.subarray(start, end);
+  let lines = window.toString("utf8").split("\n");
+  const windowLineCount = lines.length;
+  const matchLineIndex = countLineBreaks(
+    window,
+    Math.max(0, byteOffset - start),
+  );
+  let firstLineIndex = 0;
+  let leadingLinesOmitted = false;
+  let trailingLinesOmitted = false;
+  if (lines.length > maxWindowLines) {
+    firstLineIndex = Math.max(
+      0,
+      Math.min(
+        matchLineIndex - Math.floor(maxWindowLines / 2),
+        lines.length - maxWindowLines,
+      ),
+    );
+    const lastLineIndex = firstLineIndex + maxWindowLines;
+    leadingLinesOmitted = firstLineIndex > 0;
+    trailingLinesOmitted = lastLineIndex < lines.length;
+    lines = lines.slice(firstLineIndex, lastLineIndex);
+  }
+  const lineNumber = countLineBreaks(source, start) + 1 + firstLineIndex;
+  const rendered = [
+    ...(start > 0 ? ["[前方の内容を省略しました]"] : []),
+    ...(leadingLinesOmitted ? ["[前方の行を省略しました]"] : []),
+    ...lines.map((line, index) => {
+      const partialStart =
+        index === 0 && firstLineIndex === 0 && !startsAtLineStart ? "…" : "";
+      const partialEnd =
+        index === lines.length - 1 &&
+        !trailingLinesOmitted &&
+        lines.length === windowLineCount &&
+        !endsAtLineEnd
+          ? "…"
+          : "";
+      return `${lineNumber + index}: ${partialStart}${line}${partialEnd}`;
+    }),
+    ...(trailingLinesOmitted ? ["[後方の行を省略しました]"] : []),
+    ...(end < source.byteLength ? ["[後方の内容を省略しました]"] : []),
+  ].join("\n");
+  if (Buffer.byteLength(rendered) > maxResultBytes)
+    fail("SEARCH_LIMIT", "Rendered search result exceeded its output limit");
+  return rendered;
 }
 
 async function yieldToCaller(): Promise<void> {
@@ -290,6 +435,37 @@ function assertRun(
       .get(conversationId, runId)
   )
     fail("SEARCH_SCOPE", "Run does not belong to this conversation");
+}
+
+function conversationNameBytes(
+  context: SearchContext,
+  conversationId: string,
+): number | undefined {
+  const row = context.store.db
+    .prepare(
+      "SELECT length(CAST(json_extract(payload,'$.name') AS BLOB)) AS bytes FROM conversations WHERE id=? AND workspace=?",
+    )
+    .get(conversationId, context.workspace) as
+    { bytes: number | null } | undefined;
+  if (!row) return undefined;
+  return row.bytes ?? Buffer.byteLength(conversationId);
+}
+
+function readConversationName(
+  context: SearchContext,
+  conversationId: string,
+): string {
+  const row = context.store.db
+    .prepare(
+      "SELECT CASE WHEN length(CAST(json_extract(payload,'$.name') AS BLOB))<=? THEN json_extract(payload,'$.name') END AS name,length(CAST(json_extract(payload,'$.name') AS BLOB)) AS bytes FROM conversations WHERE id=? AND workspace=?",
+    )
+    .get(maxRecordBytes, conversationId, context.workspace) as
+    { name: string | null; bytes: number | null } | undefined;
+  if (!row) fail("SEARCH_STALE", "Conversation no longer exists");
+  const bytes = row.bytes ?? Buffer.byteLength(conversationId);
+  if (!recordSizeAllowed(bytes) || row.name === null)
+    fail("SEARCH_OMITTED", "Conversation name is too large");
+  return row.name;
 }
 
 function candidateRows(
@@ -414,31 +590,36 @@ async function artifactCandidate(
   candidate: Candidate,
   state: ScanState,
 ): Promise<SearchHit | undefined> {
+  const runId =
+    candidate.runId ?? fail("SEARCH_SCOPE", "Artifact has no owning run");
+  const sizeRow = context.store.db
+    .prepare(
+      "SELECT length(CAST(payload AS BLOB)) AS bytes FROM artifacts WHERE id=? AND run_id=?",
+    )
+    .get(candidate.id, runId) as { bytes: number } | undefined;
+  if (!sizeRow) return undefined;
+  if (!reserveRecord(state, sizeRow.bytes, "省略した大きな資料記録"))
+    return undefined;
   const row = context.store.db
     .prepare(
-      "SELECT CASE WHEN length(CAST(payload AS BLOB))<=? THEN payload END AS payload,length(CAST(payload AS BLOB)) AS bytes FROM artifacts WHERE id=? AND run_id=?",
+      "SELECT CASE WHEN length(CAST(payload AS BLOB))<=? THEN payload END AS payload FROM artifacts WHERE id=? AND run_id=?",
     )
-    .get(
-      maxRecordBytes,
-      candidate.id,
-      candidate.runId ?? fail("SEARCH_SCOPE", "Artifact has no owning run"),
-    ) as { payload: string | null; bytes: number } | undefined;
-  if (!row) return undefined;
-  if (row.bytes > maxRecordBytes) {
-    addWarning(state, "省略した大きな資料記録");
-    return undefined;
-  }
-  if (row.payload === null) return undefined;
+    .get(maxRecordBytes, candidate.id, runId) as
+    { payload: string | null } | undefined;
+  if (!row || row.payload === null) return undefined;
   const artifact = JSON.parse(row.payload) as Artifact;
-  const nameMatch = matchText(artifact.name, state.query);
   let body: string | undefined;
   if (artifact.bytes > maxRecordBytes) {
     await assertArtifactFile(context, artifact);
     addWarning(state, `省略した大きな資料: ${artifact.name}`);
-  } else if (!reserveContent(state, artifact.bytes)) {
-    if (!nameMatch.found) return undefined;
-    state.stopBefore = false;
-    addWarning(state, `省略した資料内容: ${artifact.name}`);
+  } else if (
+    !reserveRecord(
+      state,
+      artifact.bytes,
+      `省略した大きな資料: ${artifact.name}`,
+    )
+  ) {
+    return undefined;
   } else {
     try {
       const content = await readBoundedFile(
@@ -471,9 +652,9 @@ async function artifactCandidate(
     runId: candidate.runId,
     id: artifact.id,
     hash: artifact.sha256,
-    label: artifact.name,
+    label: boundedDisplay(artifact.name),
     excerpt: match.excerpt || artifact.name.slice(0, maxExcerptChars),
-    ...(match.line ? { line: match.line } : {}),
+    ...matchLocation(match, state.query),
   };
 }
 
@@ -485,7 +666,6 @@ async function fileCandidate(
 ): Promise<SearchHit | undefined> {
   const entry = files[candidate.id];
   if (!entry || secretPath(candidate.id)) return undefined;
-  const nameMatch = matchText(candidate.id, state.query);
   const workRoot = join(context.store.runDir(candidate.runId!), "work");
   let path: string;
   try {
@@ -499,10 +679,14 @@ async function fileCandidate(
   let body: string | undefined;
   if (entry.bytes > maxRecordBytes) {
     addWarning(state, `省略した大きなファイル: ${candidate.id}`);
-  } else if (!reserveContent(state, entry.bytes)) {
-    if (!nameMatch.found) return undefined;
-    state.stopBefore = false;
-    addWarning(state, `省略したファイル内容: ${candidate.id}`);
+  } else if (
+    !reserveRecord(
+      state,
+      entry.bytes,
+      `省略した大きなファイル: ${candidate.id}`,
+    )
+  ) {
+    return undefined;
   } else {
     try {
       const content = await readBoundedFile(path, maxRecordBytes, {
@@ -533,9 +717,9 @@ async function fileCandidate(
     runId: candidate.runId,
     id: candidate.id,
     hash: entry.hash,
-    label: candidate.id,
+    label: boundedDisplay(candidate.id),
     excerpt: match.excerpt || candidate.id,
-    ...(match.line ? { line: match.line } : {}),
+    ...matchLocation(match, state.query),
   };
 }
 
@@ -547,19 +731,11 @@ async function databaseCandidate(
 ): Promise<SearchHit | undefined> {
   switch (request.kind) {
     case "conversations": {
-      const row = context.store.db
-        .prepare(
-          "SELECT json_extract(payload,'$.name') AS name,length(CAST(json_extract(payload,'$.name') AS BLOB)) AS bytes FROM conversations WHERE id=? AND workspace=?",
-        )
-        .get(candidate.id, context.workspace) as
-        { name: string | null; bytes: number | null } | undefined;
-      if (!row) return undefined;
-      if (row.bytes !== null && row.bytes > maxRecordBytes) {
-        addWarning(state, "省略した大きな会話名");
+      const bytes = conversationNameBytes(context, candidate.id);
+      if (bytes === undefined) return undefined;
+      if (!reserveRecord(state, bytes, "省略した大きな会話名"))
         return undefined;
-      }
-      const name = row.name ?? candidate.id;
-      if (!reserveContent(state, Buffer.byteLength(name))) return undefined;
+      const name = readConversationName(context, candidate.id);
       const match = matchText(name, state.query);
       if (!match.found) return undefined;
       return {
@@ -567,38 +743,29 @@ async function databaseCandidate(
         conversationId: candidate.conversationId,
         id: candidate.id,
         hash: sha256(Buffer.from(name)),
-        label: name,
+        label: boundedDisplay(name),
         excerpt: match.excerpt,
+        ...matchLocation(match, state.query),
       };
     }
     case "runs": {
+      const sizeRow = context.store.db
+        .prepare(
+          "SELECT length(CAST(payload AS BLOB)) AS bytes FROM runs WHERE id=?",
+        )
+        .get(candidate.id) as { bytes: number } | undefined;
+      if (!sizeRow) return undefined;
+      if (!reserveRecord(state, sizeRow.bytes, "省略した大きな依頼記録"))
+        return undefined;
       const row = context.store.db
         .prepare(
-          "SELECT CASE WHEN length(CAST(payload AS BLOB))<=? THEN payload END AS payload,length(CAST(payload AS BLOB)) AS bytes FROM runs WHERE id=?",
+          "SELECT CASE WHEN length(CAST(payload AS BLOB))<=? THEN payload END AS payload FROM runs WHERE id=?",
         )
         .get(maxRecordBytes, candidate.id) as
-        { payload: string | null; bytes: number } | undefined;
+        { payload: string | null } | undefined;
       if (!row) return undefined;
-      if (row.bytes > maxRecordBytes) {
-        addWarning(state, "省略した大きな依頼記録");
-        return undefined;
-      }
-      if (row.bytes > maxContentBytes - state.contentBytes) {
-        state.stopBefore = true;
-        addWarning(
-          state,
-          "このページでは内容上限に達しました。続きを検索してください。",
-        );
-        return undefined;
-      }
       if (row.payload === null) return undefined;
       const rendered = renderRun(JSON.parse(row.payload) as Run);
-      const textBytes = Buffer.byteLength(rendered.text);
-      if (textBytes > maxRecordBytes) {
-        addWarning(state, "省略した大きな依頼記録");
-        return undefined;
-      }
-      if (!reserveContent(state, textBytes)) return undefined;
       const match = matchText(rendered.text, state.query);
       if (!match.found) return undefined;
       return {
@@ -607,43 +774,38 @@ async function databaseCandidate(
         runId: candidate.runId,
         id: candidate.id,
         hash: sha256(Buffer.from(rendered.text)),
-        label: rendered.name || candidate.id,
+        label: boundedDisplay(rendered.name || candidate.id),
         excerpt: match.excerpt,
-        ...(match.line ? { line: match.line } : {}),
+        ...matchLocation(match, state.query),
       };
     }
     case "messages": {
+      const sizeRow = context.store.db
+        .prepare(
+          "SELECT length(CAST(text AS BLOB)) AS bytes FROM messages WHERE seq=? AND session_id=?",
+        )
+        .get(Number(candidate.id), candidate.conversationId) as
+        { bytes: number } | undefined;
+      if (!sizeRow) return undefined;
+      if (!reserveRecord(state, sizeRow.bytes, "省略した大きな会話本文"))
+        return undefined;
       const row = context.store.db
         .prepare(
-          "SELECT role,run_id,length(CAST(text AS BLOB)) AS bytes,CASE WHEN length(CAST(text AS BLOB))<=? THEN text END AS text FROM messages WHERE seq=? AND session_id=?",
+          "SELECT role,run_id,CASE WHEN length(CAST(text AS BLOB))<=? THEN text END AS text FROM messages WHERE seq=? AND session_id=?",
         )
         .get(maxRecordBytes, Number(candidate.id), candidate.conversationId) as
         | {
             role: string;
             run_id: string | null;
-            bytes: number;
             text: string | null;
           }
         | undefined;
       if (!row) return undefined;
-      if (row.bytes > maxRecordBytes) {
-        addWarning(state, "省略した大きな会話本文");
-        return undefined;
-      }
-      if (row.bytes > maxContentBytes - state.contentBytes) {
-        state.stopBefore = true;
-        addWarning(
-          state,
-          "このページでは内容上限に達しました。続きを検索してください。",
-        );
-        return undefined;
-      }
       const text = row.text;
       if (text === null || boundedText(text) === undefined) {
         addWarning(state, "省略した会話本文");
         return undefined;
       }
-      if (!reserveContent(state, row.bytes)) return undefined;
       const match = matchText(text, state.query);
       if (!match.found) return undefined;
       return {
@@ -652,45 +814,47 @@ async function databaseCandidate(
         ...(candidate.runId ? { runId: candidate.runId } : {}),
         id: candidate.id,
         hash: sha256(Buffer.from(text)),
-        label: row.role,
+        label: boundedDisplay(row.role),
         excerpt: match.excerpt,
-        ...(match.line ? { line: match.line } : {}),
+        ...matchLocation(match, state.query),
       };
     }
     case "events": {
+      const sizeRow = context.store.db
+        .prepare(
+          "SELECT length(CAST(e.detail AS BLOB)) AS bytes,length(CAST(e.type AS BLOB)) AS typeBytes FROM events e JOIN conversation_runs cr ON cr.run_id=e.run_id JOIN conversations c ON c.id=cr.session_id WHERE e.seq=? AND c.id=? AND c.workspace=?",
+        )
+        .get(
+          Number(candidate.id),
+          candidate.conversationId,
+          context.workspace,
+        ) as { bytes: number; typeBytes: number } | undefined;
+      if (!sizeRow) return undefined;
+      if (
+        !reserveRecord(
+          state,
+          sizeRow.bytes + sizeRow.typeBytes + 1,
+          "省略した大きなイベント記録",
+        )
+      )
+        return undefined;
       const row = context.store.db
         .prepare(
-          "SELECT e.type,e.run_id AS runId,length(CAST(e.detail AS BLOB)) AS bytes,CASE WHEN length(CAST(e.detail AS BLOB))<=? THEN e.detail END AS detail FROM events e JOIN conversation_runs cr ON cr.run_id=e.run_id JOIN conversations c ON c.id=cr.session_id WHERE e.seq=? AND c.id=? AND c.workspace=?",
+          "SELECT e.type,e.run_id AS runId,CASE WHEN length(CAST(e.detail AS BLOB))<=? THEN e.detail END AS detail FROM events e JOIN conversation_runs cr ON cr.run_id=e.run_id JOIN conversations c ON c.id=cr.session_id WHERE e.seq=? AND c.id=? AND c.workspace=?",
         )
         .get(
           maxRecordBytes,
           Number(candidate.id),
           candidate.conversationId,
           context.workspace,
-        ) as
-        | { type: string; runId: string; bytes: number; detail: string | null }
-        | undefined;
+        ) as { type: string; runId: string; detail: string | null } | undefined;
       if (!row) return undefined;
-      const totalBytes = row.bytes + Buffer.byteLength(row.type) + 1;
-      if (totalBytes > maxRecordBytes) {
-        addWarning(state, "省略した大きなイベント記録");
-        return undefined;
-      }
-      if (totalBytes > maxContentBytes - state.contentBytes) {
-        state.stopBefore = true;
-        addWarning(
-          state,
-          "このページでは内容上限に達しました。続きを検索してください。",
-        );
-        return undefined;
-      }
       if (row.detail === null) return undefined;
       const text = boundedText(renderEvent(row.type, row.detail));
       if (!text) {
         addWarning(state, "省略した大きなイベント記録");
         return undefined;
       }
-      if (!reserveContent(state, Buffer.byteLength(text))) return undefined;
       const match = matchText(text, state.query);
       if (!match.found) return undefined;
       return {
@@ -699,9 +863,9 @@ async function databaseCandidate(
         ...(candidate.runId ? { runId: candidate.runId } : {}),
         id: candidate.id,
         hash: sha256(Buffer.from(text)),
-        label: row.type,
+        label: boundedDisplay(row.type),
         excerpt: match.excerpt,
-        ...(match.line ? { line: match.line } : {}),
+        ...matchLocation(match, state.query),
       };
     }
     case "artifacts":
@@ -715,9 +879,10 @@ async function scanDatabase(
   context: SearchContext,
   request: SearchRequest,
   after: number,
+  started: number,
 ): Promise<SearchPage> {
   const state: ScanState = {
-    started: performance.now(),
+    started,
     contentBytes: 0,
     scanned: 0,
     hits: [],
@@ -726,18 +891,30 @@ async function scanDatabase(
   };
   const rows = candidateRows(context, request, after);
   for (const row of rows.slice(0, maxCandidates)) {
-    if (state.hits.length >= maxHits || timedOut(state)) break;
+    if (state.hits.length >= maxHits || timedOut(context, state)) {
+      state.timedOut = true;
+      break;
+    }
     await yieldToCaller();
+    if (timedOut(context, state)) {
+      state.timedOut = true;
+      break;
+    }
     const hit = await databaseCandidate(context, request, row, state);
     if (state.stopBefore) break;
     state.scanned++;
     state.last = row.cursor;
     if (hit) state.hits.push(hit);
   }
+  if (state.scanned === 0 && rows.length > 0 && state.timedOut)
+    fail(
+      "SEARCH_LIMIT",
+      "Search deadline expired before inspecting a candidate",
+    );
   const hasRemaining =
     state.scanned < rows.length ||
     rows.length > maxCandidates ||
-    timedOut(state);
+    state.timedOut;
   return {
     hits: state.hits,
     scanned: state.scanned,
@@ -763,9 +940,10 @@ async function scanFiles(
   request: SearchRequest,
   state: Awaited<ReturnType<typeof fileState>>,
   after: number | string,
+  started: number,
 ): Promise<SearchPage> {
   const scan: ScanState = {
-    started: performance.now(),
+    started,
     contentBytes: 0,
     scanned: 0,
     hits: [],
@@ -777,8 +955,15 @@ async function scanFiles(
     typeof after === "string" ? paths.findIndex((path) => path > after) : 0;
   if (start < 0) start = paths.length;
   for (const path of paths.slice(start, start + maxCandidates)) {
-    if (scan.hits.length >= maxHits || timedOut(scan)) break;
+    if (scan.hits.length >= maxHits || timedOut(context, scan)) {
+      scan.timedOut = true;
+      break;
+    }
     await yieldToCaller();
+    if (timedOut(context, scan)) {
+      scan.timedOut = true;
+      break;
+    }
     const hit = await fileCandidate(
       context,
       {
@@ -795,12 +980,14 @@ async function scanFiles(
     scan.last = path;
     if (hit) scan.hits.push(hit);
   }
+  if (scan.scanned === 0 && start < paths.length && scan.timedOut)
+    fail("SEARCH_LIMIT", "Search deadline expired before inspecting a file");
   const index =
     typeof scan.last === "string" ? paths.indexOf(scan.last) + 1 : start;
   const more =
     index < paths.length ||
     scan.scanned < Math.min(maxCandidates, paths.length - start) ||
-    timedOut(scan);
+    scan.timedOut;
   return {
     hits: scan.hits,
     scanned: scan.scanned,
@@ -826,6 +1013,7 @@ export async function searchLocal(
   context: SearchContext,
   rawRequest: SearchRequest,
 ): Promise<SearchPage> {
+  const started = now(context);
   const request = validateRequest(rawRequest);
   if (request.conversationId)
     assertConversation(context, request.conversationId);
@@ -834,16 +1022,8 @@ export async function searchLocal(
   const cursor = decodeCursor(request.cursor);
   const after = checkCursor(cursor, request, context, fileContext?.fingerprint);
   if (request.kind === "files")
-    return scanFiles(context, request, fileContext!, after);
-  return scanDatabase(context, request, Number(after));
-}
-
-function boundedResult(text: string): string {
-  if (Buffer.byteLength(text) <= maxResultBytes) return text;
-  let result = text;
-  while (Buffer.byteLength(result) > maxResultBytes - 80)
-    result = result.slice(0, Math.max(0, result.length - 256));
-  return `${result}\n\n[検索結果を${maxResultBytes}バイト以内に省略しました]`;
+    return scanFiles(context, request, fileContext!, after, started);
+  return scanDatabase(context, request, Number(after), started);
 }
 
 function assertHit(hit: SearchHit): SearchHit {
@@ -871,7 +1051,33 @@ function assertHit(hit: SearchHit): SearchHit {
     fail("SEARCH_INPUT", "Run result ID does not match its owner");
   if (typeof hit.hash !== "string" || !hashPattern.test(hit.hash))
     fail("SEARCH_INPUT", "Invalid search result hash");
+  if ((hit.matchOffset === undefined) !== (hit.matchLength === undefined))
+    fail("SEARCH_INPUT", "Incomplete search result match locator");
+  if (
+    hit.matchOffset !== undefined &&
+    (!Number.isSafeInteger(hit.matchOffset) ||
+      hit.matchOffset < 0 ||
+      !Number.isSafeInteger(hit.matchLength) ||
+      hit.matchLength! <= 0 ||
+      hit.matchLength! > 2_000)
+  )
+    fail("SEARCH_INPUT", "Invalid search result match locator");
   return hit;
+}
+
+function validateMatchLocator(text: string, hit: SearchHit): void {
+  if (hit.matchOffset === undefined || hit.matchLength === undefined) return;
+  const end = hit.matchOffset + hit.matchLength;
+  if (
+    end > text.length ||
+    (hit.matchOffset > 0 &&
+      text.charCodeAt(hit.matchOffset - 1) >= 0xdc00 &&
+      text.charCodeAt(hit.matchOffset - 1) <= 0xdfff) ||
+    (end < text.length &&
+      text.charCodeAt(end) >= 0xdc00 &&
+      text.charCodeAt(end) <= 0xdfff)
+  )
+    fail("SEARCH_INPUT", "Search result match locator is outside the source");
 }
 
 async function readArtifact(
@@ -902,7 +1108,7 @@ async function readArtifact(
   if (artifact.bytes > maxRecordBytes) {
     await assertArtifactFile(context, artifact);
     return {
-      title: artifact.name,
+      title: boundedDisplay(artifact.name),
       text: "[検索結果を省略しました: 大きすぎる資料です]",
       hash: artifact.sha256,
     };
@@ -919,24 +1125,26 @@ async function readArtifact(
   }
   if (content.includes(0))
     return {
-      title: artifact.name,
+      title: boundedDisplay(artifact.name),
       text: "[検索結果を省略しました: バイナリ資料です]",
       hash: artifact.sha256,
     };
+  let text: string;
   try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
-    return {
-      title: artifact.name,
-      text: boundedResult(text),
-      hash: artifact.sha256,
-    };
+    text = new TextDecoder("utf-8", { fatal: true }).decode(content);
   } catch {
     return {
-      title: artifact.name,
+      title: boundedDisplay(artifact.name),
       text: "[検索結果を省略しました: UTF-8ではない資料です]",
       hash: artifact.sha256,
     };
   }
+  validateMatchLocator(text, hit);
+  return {
+    title: boundedDisplay(artifact.name),
+    text: readWindow(text, hit.matchOffset, hit.matchLength),
+    hash: artifact.sha256,
+  };
 }
 
 export async function readSearchResultLocal(
@@ -966,7 +1174,7 @@ export async function readSearchResultLocal(
       fail("SEARCH_STALE", "Working copy changed since this result was found");
     if (entry.bytes > maxRecordBytes)
       return {
-        title: hit.id,
+        title: boundedDisplay(hit.id),
         text: "[検索結果を省略しました: 大きすぎるファイルです]",
       };
     let content: Buffer;
@@ -982,42 +1190,36 @@ export async function readSearchResultLocal(
     }
     if (content.includes(0))
       return {
-        title: hit.id,
+        title: boundedDisplay(hit.id),
         text: "[検索結果を省略しました: バイナリファイルです]",
       };
+    let text: string;
     try {
-      return {
-        title: hit.id,
-        text: boundedResult(
-          new TextDecoder("utf-8", { fatal: true }).decode(content),
-        ),
-      };
+      text = new TextDecoder("utf-8", { fatal: true }).decode(content);
     } catch {
       return {
-        title: hit.id,
+        title: boundedDisplay(hit.id),
         text: "[検索結果を省略しました: UTF-8ではないファイルです]",
       };
     }
+    validateMatchLocator(text, hit);
+    return {
+      title: boundedDisplay(hit.id),
+      text: readWindow(text, hit.matchOffset, hit.matchLength),
+    };
   }
   if (hit.kind === "artifacts") {
     const result = await readArtifact(context, hit);
     return { title: result.title, text: result.text };
   }
   if (hit.kind === "conversations") {
-    const row = context.store.db
-      .prepare(
-        "SELECT CASE WHEN length(CAST(payload AS BLOB))<=? THEN payload END AS payload,length(CAST(payload AS BLOB)) AS bytes FROM conversations WHERE id=? AND workspace=?",
-      )
-      .get(maxRecordBytes, hit.id, context.workspace) as
-      { payload: string | null; bytes: number } | undefined;
-    if (!row) fail("SEARCH_STALE", "Conversation no longer exists");
-    if (row.bytes > maxRecordBytes || row.payload === null)
-      fail("SEARCH_OMITTED", "Conversation is too large");
-    const session = JSON.parse(row.payload) as { name?: string };
-    const text = session.name ?? hit.id;
+    const text = readConversationName(context, hit.id);
     if (sha256(Buffer.from(text)) !== hit.hash)
       fail("SEARCH_STALE", "Conversation changed since this result was found");
-    return { title: text, text };
+    return {
+      title: boundedDisplay(text),
+      text: readWindow(text),
+    };
   }
   if (hit.kind === "runs") {
     const row = context.store.db
@@ -1034,9 +1236,10 @@ export async function readSearchResultLocal(
     const rendered = renderRun(JSON.parse(row.payload) as Run);
     if (sha256(Buffer.from(rendered.text)) !== hit.hash)
       fail("SEARCH_STALE", "Run changed since this result was found");
+    validateMatchLocator(rendered.text, hit);
     return {
-      title: rendered.name || hit.id,
-      text: boundedResult(rendered.text),
+      title: boundedDisplay(rendered.name || hit.id),
+      text: readWindow(rendered.text, hit.matchOffset, hit.matchLength),
     };
   }
   if (hit.kind === "messages") {
@@ -1064,7 +1267,11 @@ export async function readSearchResultLocal(
       fail("SEARCH_OMITTED", "Message is too large or binary");
     if (sha256(Buffer.from(row.text)) !== hit.hash)
       fail("SEARCH_STALE", "Message changed since this result was found");
-    return { title: row.role, text: boundedResult(row.text) };
+    validateMatchLocator(row.text, hit);
+    return {
+      title: boundedDisplay(row.role),
+      text: readWindow(row.text, hit.matchOffset, hit.matchLength),
+    };
   }
   const event = context.store.db
     .prepare(
@@ -1088,5 +1295,9 @@ export async function readSearchResultLocal(
     fail("SEARCH_OMITTED", "Event is too large or binary");
   if (sha256(Buffer.from(text)) !== hit.hash)
     fail("SEARCH_STALE", "Event changed since this result was found");
-  return { title: event.type, text: boundedResult(text) };
+  validateMatchLocator(text, hit);
+  return {
+    title: boundedDisplay(event.type),
+    text: readWindow(text, hit.matchOffset, hit.matchLength),
+  };
 }

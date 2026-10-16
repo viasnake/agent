@@ -74,8 +74,10 @@ export class SearchBrowser {
       });
       const warning = page.warnings.join(" / ");
       if (!page.hits.length && !page.cursor) {
+        if (warning)
+          await this.dialogs.show(literal(warning), "検索範囲・省略の記録");
         this.dialogs.notice(
-          `この検索ページに一致はありません。${warning ? ` ${warning}` : ""}`,
+          `この検索ページに一致はありません。${warning ? " 省略した内容があります。" : ""}`,
         );
         return;
       }
