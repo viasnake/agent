@@ -164,6 +164,111 @@ test("history preserves failed and repaired document versions saved in one run",
   }
 });
 
+test("failed citations retain validation and provenance after repair and later source inheritance", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const app = new Application(f.config, f.p, f.store, f.root, async () => {
+    throw new Error("No provider should be created");
+  });
+  try {
+    await app.initialize();
+    const run = await f.harness.create({
+      kind: "research",
+      access: "change",
+      objective: "Write a sourced report",
+      conversationId: app.session.id,
+      dataClass: "private",
+    });
+    app.conversations.link(app.session, run);
+    const owner = f.store.claim(run.id);
+    const source = await f.store.artifact(
+      owner,
+      "facts.txt",
+      "source",
+      "One fact\nSecond fact\n",
+    );
+    const missing = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const work = join(f.store.runDir(run.id), "work");
+    await mkdir(work, { recursive: true });
+    const invalid = `[source:${source.id}:L0-L1]\n[source:${missing}:L1]\n[source:${source.id}:L999999999999999999999999999999999999]\n`;
+    await writeFile(join(work, "report.md"), invalid);
+    owner.tasks = [
+      {
+        id: "fixture-worker",
+        objective: "Report",
+        role: "worker",
+        dependsOn: [],
+        model: "worker",
+        write: true,
+        state: "succeeded",
+        attempts: 1,
+        result: {
+          outcome: "completed",
+          summary: "synthetic report",
+          artifacts: ["report.md"],
+          unresolved: [],
+        },
+      },
+    ];
+    f.store.save(owner, "fixture_output");
+    const evaluator = new Evaluator(
+      f.config,
+      f.store,
+      new Sandbox(f.config.execution),
+    );
+    const failed = await evaluator.validate(
+      owner,
+      new AbortController().signal,
+    );
+    assert.equal(failed.filter((check) => !check.passed).length, 3);
+    const first = (await app.artifactHistory("report.md"))[0]!.artifact;
+    const firstProvenance = await app.artifactProvenance(first.id);
+    assert.equal(firstProvenance.status, "available");
+    if (firstProvenance.status !== "available")
+      throw new Error("Missing failed provenance");
+    assert.deepEqual(firstProvenance.unavailableCitedSourceIds, [missing]);
+    assert.equal(firstProvenance.citedSourceRanges[0]!.startLine, 0);
+    assert.equal(firstProvenance.citedSourceRanges[2]!.startLine, null);
+    assert.ok(
+      firstProvenance.citedSourceRanges[2]!.rawCitation?.includes(
+        "999999999999",
+      ),
+    );
+    assert.equal(
+      firstProvenance.validation.checks.filter((check) => !check.passed).length,
+      3,
+    );
+    await writeFile(
+      join(work, "report.md"),
+      `Corrected report [source:${source.id}:L1-L2]\n`,
+    );
+    const passed = await evaluator.validate(
+      owner,
+      new AbortController().signal,
+    );
+    assert.ok(passed.every((check) => check.passed));
+    f.store.release(owner);
+    const later = await f.harness.create({
+      kind: "chat",
+      objective: "Continue",
+      conversationId: app.session.id,
+      sourceRunIds: [run.id],
+      dataClass: "private",
+    });
+    app.conversations.link(app.session, later);
+    const history = await app.artifactHistory("report.md");
+    assert.equal(history.length, 2);
+    assert.equal(history[1]!.artifact.id, first.id);
+    assert.deepEqual(await app.artifactProvenance(first.id), firstProvenance);
+    const corrected = await app.artifactProvenance(history[0]!.artifact.id);
+    assert.equal(corrected.status, "available");
+    if (corrected.status === "available")
+      assert.ok(corrected.validation.checks.every((check) => check.passed));
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
 test("artifact diffs reject invalid UTF-8 and enforce byte limits", async () => {
   const f = await fixture(new ScriptedRuntime(async () => "unused"));
   const app = new Application(f.config, f.p, f.store, f.root, async () => {

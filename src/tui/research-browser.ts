@@ -40,10 +40,19 @@ export function provenanceText(provenance: ArtifactProvenance): string {
     literal(
       provenance.citedSourceRanges
         .map(
-          (range) => `${range.sourceId}:L${range.startLine}-L${range.endLine}`,
+          (range) =>
+            range.rawCitation ??
+            `${range.sourceId}:L${range.startLine}-L${range.endLine}`,
         )
         .join("\n") || "なし",
     ),
+    ...(provenance.unavailableCitedSourceIds.length
+      ? [
+          "## 生成時に利用可能な資料として確認できない引用 ID",
+          literal(provenance.unavailableCitedSourceIds.join("\n")),
+          "この ID の記載は資料へのアクセス許可や引用の裏付けではありません。",
+        ]
+      : []),
     "## 保存された検査",
     `検査 ID: ${provenance.validation.artifactId}`,
     `検査 SHA-256: ${provenance.validation.sha256}`,
@@ -183,7 +192,7 @@ export class ResearchBrowser {
       [
         "## 今後の送信から資料を除外",
         `選択した資料: ${sourceId}`,
-        `対象: 抽出本文 ${family.sourceIds.length} 件 / HTTP 原文 ${family.rawArtifactIds.length} 件 / 関連画像 ${family.imageIds.length} 件`,
+        `対象: 資料・選択範囲 ID ${family.sourceIds.length} 件 / HTTP 原文 ${family.rawArtifactIds.length} 件 / 関連画像 ${family.imageIds.length} 件`,
         "同じ原資料の別ページ・選択範囲も対象です。古いモデルセッションや除外前の作業からは再開せず、新しい依頼で続けてください。",
         "原本・過去の発言・引用・要約・送信済みデータは消去されません。外部サービスからの削除や、言い換えられた記述の除去を保証する操作ではありません。",
         "### 対象 ID",

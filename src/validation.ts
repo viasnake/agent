@@ -198,22 +198,33 @@ export class Evaluator {
         passed: citations.length > 0,
         detail: `${citations.length} source citations`,
       });
-      for (const citation of citations) {
+      for (const [index, citation] of citations.entries()) {
         const source = sources.find((s) => s.id === citation[1]);
-        if (!source)
-          throw new AgentError(
-            "INVALID_CITATION",
-            `Unknown source ${citation[1]}`,
-          );
+        if (!source) {
+          results.push({
+            id: `research-citation-${index + 1}`,
+            passed: false,
+            detail: `Unknown source ${citation[1]}`,
+          });
+          continue;
+        }
         const text = (await this.store.content(source)).toString("utf8"),
           lines = text.split("\n").length;
         const first = Number(citation[2]),
           last = Number(citation[3] ?? citation[2]);
-        if (first < 1 || last < first || last > lines)
-          throw new AgentError(
-            "INVALID_CITATION",
-            "Citation is outside the stored source",
-          );
+        const passed =
+          Number.isSafeInteger(first) &&
+          Number.isSafeInteger(last) &&
+          first >= 1 &&
+          last >= first &&
+          last <= lines;
+        results.push({
+          id: `research-citation-${index + 1}`,
+          passed,
+          detail: passed
+            ? `${source.id}:L${first}-L${last} is within the stored source (meaning not verified)`
+            : `Citation is outside the stored source: ${citation[0]}`,
+        });
       }
     }
     if (run.kind === "coding") {
@@ -283,8 +294,13 @@ export class Evaluator {
         ),
       ].map((match) => ({
         sourceId: match[1],
-        startLine: Number(match[2]),
-        endLine: Number(match[3] ?? match[2]),
+        startLine: Number.isSafeInteger(Number(match[2]))
+          ? Number(match[2])
+          : null,
+        endLine: Number.isSafeInteger(Number(match[3] ?? match[2]))
+          ? Number(match[3] ?? match[2])
+          : null,
+        rawCitation: match[0],
       }));
       const unavailableCitedSourceIds = [
         ...new Set(

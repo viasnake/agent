@@ -196,6 +196,33 @@ export function fileReferences(text: string): string[] {
   ];
 }
 
+function isProvenanceSourceRange(
+  value: unknown,
+): value is ArtifactProvenanceSourceRange {
+  if (!value || typeof value !== "object") return false;
+  const range = value as Record<string, unknown>;
+  if (typeof range.sourceId !== "string") return false;
+  if (range.rawCitation !== undefined) {
+    if (typeof range.rawCitation !== "string") return false;
+    const match = /^\[source:([a-f0-9-]{36}):L(\d+)(?:-L(\d+))?\]$/.exec(
+      range.rawCitation,
+    );
+    if (!match || match[1] !== range.sourceId) return false;
+    const first = Number(match[2]),
+      last = Number(match[3] ?? match[2]);
+    return (
+      range.startLine === (Number.isSafeInteger(first) ? first : null) &&
+      range.endLine === (Number.isSafeInteger(last) ? last : null)
+    );
+  }
+  return (
+    Number.isSafeInteger(range.startLine) &&
+    Number(range.startLine) >= 0 &&
+    Number.isSafeInteger(range.endLine) &&
+    Number(range.endLine) >= 0
+  );
+}
+
 export class Application extends EventEmitter {
   readonly conversations: Conversations;
   session!: Conversation;
@@ -2182,6 +2209,11 @@ export class Application extends EventEmitter {
             "INPUT_INTEGRITY",
             "Prepared attachment references disagree",
           );
+        for (const id of reference.imageIds ?? []) {
+          const image = images.get(id);
+          if (image && !existing.images.some((item) => item.id === id))
+            existing.images.push(image);
+        }
         return;
       }
       documents.set(reference.id, {
@@ -2252,6 +2284,7 @@ export class Application extends EventEmitter {
     const rawArtifactIds = new Set<string>();
     const imageIds = new Set<string>();
     const documentIds = new Set<string>();
+    const expandedDocuments = new Set<string>();
     const addSource = (id: string) => {
       const info = verified.get(id);
       if (!info || sourceIds.has(id)) return false;
@@ -2293,19 +2326,25 @@ export class Application extends EventEmitter {
             artifact.metadata.sourceId === id && sourceIds.has(artifact.id),
         );
         if (
-          !documentIds.has(id) &&
-          (associatedSource ||
+          !expandedDocuments.has(id) &&
+          (documentIds.has(id) ||
+            associatedSource ||
             hashes.has(document.reference.rawSha256) ||
             hashes.has(document.reference.selectedSha256))
         ) {
+          expandedDocuments.add(id);
           documentIds.add(id);
           hashes.add(document.reference.rawSha256);
           hashes.add(document.reference.selectedSha256);
-          for (const image of document.images) imageIds.add(image.id);
+          for (const image of document.images) {
+            await loadStoredImage(this.paths, image);
+            imageIds.add(image.id);
+            hashes.add(image.sha256);
+          }
           changed = true;
         }
       }
-      for (const image of images.values()) {
+      for (const image of allImages) {
         if (
           !imageIds.has(image.id) &&
           ((typeof image.sourceId === "string" &&
@@ -2314,6 +2353,7 @@ export class Application extends EventEmitter {
               documentIds.has(image.documentId)) ||
             hashes.has(image.sha256))
         ) {
+          await loadStoredImage(this.paths, image);
           imageIds.add(image.id);
           hashes.add(image.sha256);
           changed = true;
@@ -2355,7 +2395,14 @@ export class Application extends EventEmitter {
     warning: string;
   }> {
     this.idle();
+    const sessionId = this.session.id;
     const family = await this.sourceFamily(sourceId);
+    this.idle();
+    if (sessionId !== this.session.id)
+      throw new AgentError(
+        "SOURCE_BINDING",
+        "Conversation changed during source verification",
+      );
     const policy = {
       excludedSourceIds: [
         ...(this.session.context?.excludedSourceIds ?? []),
@@ -2388,6 +2435,7 @@ export class Application extends EventEmitter {
   async excludeSource(sourceId: string, binding: string): Promise<void> {
     this.idle();
     const preview = await this.previewSourceExclusion(sourceId);
+    this.idle();
     if (preview.sessionId !== this.session.id || preview.binding !== binding)
       throw new AgentError(
         "SOURCE_BINDING",
@@ -2586,17 +2634,7 @@ export class Application extends EventEmitter {
       !Array.isArray(sourceIds) ||
       !sourceIds.every((sourceId) => typeof sourceId === "string") ||
       !Array.isArray(citedRanges) ||
-      !citedRanges.every(
-        (range): range is ArtifactProvenanceSourceRange =>
-          !!range &&
-          typeof range === "object" &&
-          typeof (range as Record<string, unknown>).sourceId === "string" &&
-          Number.isSafeInteger((range as Record<string, unknown>).startLine) &&
-          Number.isSafeInteger((range as Record<string, unknown>).endLine) &&
-          Number((range as Record<string, unknown>).startLine) > 0 &&
-          Number((range as Record<string, unknown>).endLine) >=
-            Number((range as Record<string, unknown>).startLine),
-      ) ||
+      !citedRanges.every(isProvenanceSourceRange) ||
       !Array.isArray(unavailableIds) ||
       !unavailableIds.every((sourceId) => typeof sourceId === "string") ||
       parsed.semanticCorrectness !== "not-established" ||
@@ -2612,17 +2650,15 @@ export class Application extends EventEmitter {
       );
     const availableInputSourceIds = sourceIds as string[],
       availableSources = new Set(
-        [...authorized.values()]
-          .filter(
-            ({ artifact, run }) =>
-              artifact.kind === "source" && run.id === document.run.id,
-          )
-          .map(({ artifact }) => artifact.id),
+        this.store
+          .artifacts(document.run.id)
+          .filter((artifact) => artifact.kind === "source")
+          .map((artifact) => artifact.id),
       ),
       citedSourceRanges = citedRanges as ArtifactProvenanceSourceRange[];
     const unavailableCitedSourceIds = [
       ...new Set(unavailableIds as string[]),
-    ].filter((sourceId) => !availableSources.has(sourceId));
+    ].filter((sourceId) => !availableInputSourceIds.includes(sourceId));
     if (
       new Set(availableInputSourceIds).size !==
         availableInputSourceIds.length ||

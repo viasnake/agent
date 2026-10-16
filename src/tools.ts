@@ -181,6 +181,12 @@ export class TaskTools {
                 a.id === args.id &&
                 a.kind === "source" &&
                 !excluded.has(a.id) &&
+                !this.run.contextState?.excludedSourceUrls?.includes(
+                  String(a.metadata.url ?? ""),
+                ) &&
+                !this.run.contextState?.excludedSourceUrls?.includes(
+                  String(a.metadata.requestedUrl ?? ""),
+                ) &&
                 !excludedHashes.has(a.sha256) &&
                 !excludedHashes.has(String(a.metadata.selectedSha256 ?? "")) &&
                 !excludedHashes.has(String(a.metadata.rawSha256 ?? "")),

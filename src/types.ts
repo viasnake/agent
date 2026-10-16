@@ -217,8 +217,9 @@ export interface ArtifactValidationCheck {
 }
 export interface ArtifactProvenanceSourceRange {
   sourceId: string;
-  startLine: number;
-  endLine: number;
+  startLine: number | null;
+  endLine: number | null;
+  rawCitation?: string;
 }
 export type ArtifactProvenance =
   | {

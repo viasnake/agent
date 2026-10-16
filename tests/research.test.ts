@@ -4,6 +4,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { validateConfig } from "../src/config.js";
 import { TaskTools } from "../src/tools.js";
+import { Application } from "../src/application.js";
+import { Store } from "../src/storage.js";
 import { fetchPublic, type PublicFetchResult } from "../src/network.js";
 import { decodeResponse } from "../src/research.js";
 import { Sandbox } from "../src/sandbox.js";
@@ -15,7 +17,13 @@ import {
   researchGuidelines,
 } from "../src/guidelines.js";
 import { AgentError, type Task } from "../src/types.js";
-import { fixture, ScriptedRuntime, testConfig } from "./helpers.js";
+import {
+  fixture,
+  ScriptedRuntime,
+  testConfig,
+  call,
+  completed,
+} from "./helpers.js";
 
 function response(
   url: string,
@@ -45,6 +53,103 @@ function fixtureTask(role: Task["role"] = "worker", write = false): Task {
     attempts: 0,
   };
 }
+
+test("research checkpoint survives application completion, compaction, reopen and kind change without refetch", async () => {
+  const config = testConfig();
+  config.models.worker!.kinds.push("chat");
+  let sourceId = "";
+  const runtime = new ScriptedRuntime(async (request, index) => {
+    if (index === 0) {
+      const artifact = f.store
+        .artifacts(app.currentRun()!.id)
+        .find((item) => item.kind === "source");
+      assert.ok(artifact);
+      sourceId = artifact.id;
+      await call(request, "research_checkpoint", {
+        summary: "Restorable offline checkpoint",
+        searchedScopes: ["Attached local text"],
+        openQuestions: ["Publication date unverified"],
+        decisions: [{ text: "Compare later", sourceIds: [sourceId] }],
+      });
+    } else {
+      assert.ok(
+        !request.tools.some(
+          (tool) => tool.name === "fetch_source" || tool.name === "search_web",
+        ),
+      );
+      const restored = JSON.parse(
+        await call(request, "read_research_checkpoint", {}),
+      );
+      assert.equal(restored.summary, "Restorable offline checkpoint");
+      assert.deepEqual(restored.decisions[0].sourceIds, [sourceId]);
+      assert.equal(restored.author, "model");
+      assert.equal(restored.trusted, false);
+    }
+    return completed([], "Synthetic offline fixture only");
+  });
+  const f = await fixture(runtime, config);
+  let app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  let reopened: Store | undefined;
+  try {
+    await app.initialize();
+    await writeFile(
+      join(f.root, "facts.txt"),
+      "Preserved exact fact 2026-10-15\n",
+    );
+    app.addPin("ユーザーの禁止事項を優先する");
+    app.addConstraint("変更しない");
+    app.session.kind = "research";
+    app.session.localOnly = true;
+    app.save();
+    await app.submit("この資料を調査して。変更しない @facts.txt");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.state, "succeeded");
+    const id = app.session.id;
+    const checkpoint = JSON.parse(
+      JSON.stringify(app.session.context!.researchCheckpoint),
+    );
+    assert.ok(checkpoint);
+    const pins = structuredClone(app.session.context!.pins);
+    const constraints = structuredClone(app.session.context!.constraints);
+    await app.compact();
+    assert.ok(app.session.compacted);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(app.session.context!.researchCheckpoint)),
+      checkpoint,
+    );
+    await app.close();
+    reopened = new Store(f.p);
+    app = new Application(f.config, f.p, reopened, f.root, async () => runtime);
+    await app.initialize();
+    app.openSession(id);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(app.session.context!.researchCheckpoint)),
+      checkpoint,
+    );
+    app.session.kind = "chat";
+    app.save();
+    await app.submit("この会話の調査メモを読み返して。変更しない");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.state, "succeeded");
+    assert.equal(runtime.requests.length, 2);
+    assert.deepEqual(app.session.context!.pins, pins);
+    assert.deepEqual(app.session.context!.constraints, constraints);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(app.session.context!.researchCheckpoint)),
+      checkpoint,
+    );
+  } finally {
+    await app.close();
+    reopened?.close();
+    await f.cleanup();
+  }
+});
 
 test("research fetch stores raw and deterministic extracted sources while search remains discovery-only", async () => {
   const config = testConfig();
