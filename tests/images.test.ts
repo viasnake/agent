@@ -10,6 +10,7 @@ import { storePreparedText } from "../src/documents.js";
 import {
   maxImageBytes,
   maxImagePixels,
+  mergeImageReferences,
   saveImage,
   transformImage,
   validateImage,
@@ -254,6 +255,62 @@ test("PDF-linked page images cannot be cropped or masked", async () => {
     assert.equal(restaged.localOnly, documentPage.localOnly);
     await assert.rejects(
       app.editImage(page.id, "mask", { x: 0, y: 0, width: 1, height: 1 }),
+      /PDF-linked images cannot be masked or cropped/,
+    );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("a PDF page arriving after its duplicate standalone image keeps provenance", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused")),
+    app = new Application(
+      f.config,
+      f.p,
+      f.store,
+      f.root,
+      async () => f.harness.runtime,
+    );
+  try {
+    await app.initialize();
+    const bytes = (await fixtures())[0]!,
+      standalone = await saveImage(
+        f.p,
+        "standalone.png",
+        bytes,
+        "private",
+        false,
+      ),
+      storedPage = await saveImage(f.p, "page.png", bytes, "restricted", true),
+      documentPage: ImageReference = {
+        ...storedPage,
+        dataClass: "restricted",
+        documentId: "doc-".padEnd(68, "b"),
+        localOnly: true,
+        sourceId: "pdf-source",
+        transformation: "PDF page 1",
+      };
+    app.session.images = [standalone];
+    app.session.images = mergeImageReferences(app.session.images, [
+      documentPage,
+    ]);
+    assert.equal(app.session.images[0]?.id, standalone.id);
+    assert.equal(app.session.images[0]?.documentId, documentPage.documentId);
+    assert.equal(app.session.images[0]?.sourceId, documentPage.sourceId);
+    assert.equal(
+      app.session.images[0]?.transformation,
+      documentPage.transformation,
+    );
+    assert.equal(app.session.images[0]?.dataClass, "restricted");
+    assert.equal(app.session.images[0]?.localOnly, true);
+    await assert.rejects(
+      app.editImage(standalone.id, "mask", {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+      }),
       /PDF-linked images cannot be masked or cropped/,
     );
   } finally {

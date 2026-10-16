@@ -66,6 +66,7 @@ PNG・JPEG・WebP 画像も同じ `@path` 形式で添付できます。対応�
 `/keys` で現在のキー割当を確認し、`/keys palette ctrl+g` のように変更できます。キーを省略するとその操作の割当を解除し、`/keys reset` で全割当を既定へ戻します。通常の文字入力・改行と Ctrl+J は保護され、ダイアログは Esc でも閉じられます。設定は非公開保存先の `terminal.json` に保存し、モデルや課金の設定とは分離します。SSH・tmux が先に消費するキーには、別の割当を選んでください。
 
 `@path` で文書を選択して添付できます。形式・選択子・Git 入力・PDF sandbox 要件・clipboard fallback は [docs/attachments.md](docs/attachments.md) を参照してください。
+Git 添付の差分は保存された raw bytes を比較し、Git attributes・filters・working-tree encoding・改行正規化は適用しません。未追跡ファイルは名前のみを示し、内容は添付しません。
 
 会話にはユーザーが追加した固定メモ・決定・未解決の質問と、元の指示、作業結果・検査・出典・画像参照を個別に保存します。`/pins add|edit|remove` と `/context add|edit|constraint` でユーザー所有の記録を編集できます。`/context` は会話原文、参照 ID、圧縮記録を表示し、`/context original <seq>` と `/context read <archive-id>` で保存済みの原文を範囲付きで読み返せます。編集は会話が idle のときだけ行え、接続許可・送信区分は変更しません。これらの記録は会話ごとであり、会話をまたぐ恒久メモリではありません。
 

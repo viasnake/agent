@@ -235,6 +235,7 @@ function paragraphs(source: Buffer | undefined): string[] {
 function relationships(
   source: Buffer | undefined,
   base = "",
+  archive?: Map<string, Buffer>,
 ): Map<string, string> {
   const map = new Map<string, string>();
   parseXml(
@@ -261,7 +262,12 @@ function relationships(
             "DOCUMENT_ARCHIVE",
             "Office relationship is missing identifiers or is duplicated",
           );
-        safeTarget(base, target);
+        const path = safeTarget(base, target);
+        if (path && archive && !archive.has(path))
+          throw new AgentError(
+            "DOCUMENT_ARCHIVE",
+            `Office relationship target is missing: ${path}`,
+          );
         map.set(id, target);
       }
     },
@@ -272,25 +278,48 @@ function relationships(
 }
 
 function relationshipBase(name: string): string {
+  if (name.startsWith("_rels/")) return "";
   const marker = name.lastIndexOf("/_rels/");
   if (marker < 0) return "";
-  const part = name.slice(marker + "/_rels/".length).replace(/\.rels$/, "");
+  const part = name.slice(marker + "/_rels/".length).replace(/\.rels$/i, "");
   return posix.join(name.slice(0, marker), posix.dirname(part));
 }
 
-function safeTarget(base: string, target: string): string {
+function safeTarget(base: string, target: string): string | undefined {
+  const fragment = target.indexOf("#");
+  const encodedPath = fragment < 0 ? target : target.slice(0, fragment);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(encodedPath);
+  } catch {
+    throw new AgentError(
+      "DOCUMENT_ARCHIVE",
+      "Office relationship target has invalid URI encoding",
+    );
+  }
+  if (!encodedPath && fragment === 0) return undefined;
   if (
-    !target ||
-    target.startsWith("/") ||
-    target.includes("\\") ||
-    target.includes("\0") ||
-    target.includes(":")
+    /%(?:2e|2f|5c)/i.test(encodedPath) &&
+    decoded.split(/[\\/]/).some((part) => part === "..")
+  )
+    throw new AgentError(
+      "DOCUMENT_ARCHIVE",
+      "Encoded Office relationship traversal is not permitted",
+    );
+  if (
+    !decoded ||
+    decoded.startsWith("/") ||
+    decoded.startsWith("//") ||
+    decoded.includes("\\") ||
+    decoded.includes("\0") ||
+    decoded.includes(":") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(decoded)
   )
     throw new AgentError(
       "DOCUMENT_ARCHIVE",
       "Office relationship target is unsafe",
     );
-  const normalized = posix.normalize(posix.join(base, target));
+  const normalized = posix.normalize(posix.join(base, decoded));
   if (
     normalized.startsWith("../") ||
     normalized === ".." ||
@@ -342,12 +371,14 @@ export async function extractOffice(
         "DOCUMENT_ARCHIVE",
         "Office macros and embedded programs are not permitted",
       );
-    if (name.endsWith(".xml") || name.endsWith(".rels")) {
+    const lowerName = name.toLowerCase();
+    if (lowerName.endsWith(".xml") || lowerName.endsWith(".rels")) {
       parseXml(
         source,
         (tag) => {
           if (
-            (name === "[Content_Types].xml" || name.endsWith(".rels")) &&
+            (lowerName === "[content_types].xml" ||
+              lowerName.endsWith(".rels")) &&
             Object.values(tag.attributes).some((attribute) =>
               /macroEnabled|vbaProject|oleObject|activeX|embeddedPackage|embeddedObject/i.test(
                 attribute.value,
@@ -362,7 +393,8 @@ export async function extractOffice(
         () => {},
         () => {},
       );
-      if (name.endsWith(".rels")) relationships(source, relationshipBase(name));
+      if (lowerName.endsWith(".rels"))
+        relationships(source, relationshipBase(name), files);
     }
   }
   let result: string[],
@@ -408,6 +440,11 @@ export async function extractOffice(
           `Missing slide relationship for slide ${index + 1}`,
         );
       const path = safeTarget("ppt", target);
+      if (!path)
+        throw new AgentError(
+          "DOCUMENT_PARSE",
+          "Slide target cannot be a fragment",
+        );
       if (!files.has(path))
         throw new AgentError("DOCUMENT_PARSE", `Missing slide part: ${path}`);
       return path;
@@ -436,14 +473,20 @@ export async function extractOffice(
         );
         const relsPath = `ppt/slides/_rels/${path.slice("ppt/slides/".length)}.rels`;
         const notesTarget = [
-          ...relationships(files.get(relsPath), "ppt/slides").values(),
-        ].find((target) => target.includes("notesSlides/"));
+          ...relationships(files.get(relsPath), "ppt/slides", files).values(),
+        ].find((target) =>
+          safeTarget("ppt/slides", target)?.includes("notesSlides/"),
+        );
         if (notesTarget) {
           const notesPath = safeTarget("ppt/slides", notesTarget);
-          if (files.has(notesPath))
-            result.push(
-              `slide ${index} notes: ${paragraphs(files.get(notesPath)).join("\n")}`,
+          if (!notesPath || !files.has(notesPath))
+            throw new AgentError(
+              "DOCUMENT_PARSE",
+              `Missing slide notes part: ${notesPath ?? notesTarget}`,
             );
+          result.push(
+            `slide ${index} notes: ${paragraphs(files.get(notesPath)).join("\n")}`,
+          );
         }
       }
       locator = `slides ${start}-${end}`;
@@ -480,6 +523,11 @@ export async function extractOffice(
           `Missing worksheet relationship: ${item.name}`,
         );
       const path = safeTarget("xl", target);
+      if (!path)
+        throw new AgentError(
+          "DOCUMENT_PARSE",
+          `Worksheet target cannot be a fragment: ${item.name}`,
+        );
       const sheetSource = files.get(path);
       if (!sheetSource)
         throw new AgentError(
@@ -512,6 +560,11 @@ export async function extractOffice(
       );
     else {
       const path = safeTarget("xl", rels.get(sheet.rel) ?? "");
+      if (!path)
+        throw new AgentError(
+          "DOCUMENT_PARSE",
+          `Worksheet target cannot be a fragment: ${sheet.name}`,
+        );
       const sheetResult = parseSheet(files.get(path), shared, selector.rows);
       result = sheetResult.lines;
       if (sheetResult.partial)
@@ -639,7 +692,13 @@ function parseSheet(
     source,
     (tag) => {
       if (tag.local === "row") {
-        rowNumber = Number(attr(tag, "r") ?? rowNumber + 1);
+        const declaredRow = attr(tag, "r");
+        rowNumber =
+          declaredRow === undefined
+            ? rowNumber + 1
+            : /^[1-9]\d*$/.test(declaredRow)
+              ? Number(declaredRow)
+              : NaN;
         if (
           !Number.isInteger(rowNumber) ||
           rowNumber <= previousRow ||
@@ -676,7 +735,7 @@ function parseSheet(
         const column = columnNumber(current.ref);
         const cellRow = Number(/^[A-Z]+(\d+)$/.exec(current.ref)?.[1] ?? 0);
         if (
-          !/^[A-Z]{1,3}\d+$/.test(current.ref) ||
+          !/^[A-Z]{1,3}[1-9]\d*$/.test(current.ref) ||
           !Number.isInteger(cellRow) ||
           cellRow !== rowNumber ||
           column < 1 ||

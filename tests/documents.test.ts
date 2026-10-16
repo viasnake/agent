@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  readFile,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import sharp from "sharp";
@@ -10,12 +18,17 @@ import {
   parseDocumentToken,
   prepareDocument,
 } from "../src/documents.js";
-import { prepareGitInput } from "../src/git-input.js";
+import {
+  prepareGitInput,
+  readGitStatus,
+  selectGitInput,
+} from "../src/git-input.js";
 import { extractOffice } from "../src/office.js";
 import { extractPdf } from "../src/pdf.js";
 import { emptyConversationContext } from "../src/context.js";
 import { Sandbox } from "../src/sandbox.js";
 import { AgentError } from "../src/types.js";
+import { cleanEnvironment, runProcess } from "../src/process.js";
 import {
   completed,
   fixture,
@@ -493,7 +506,96 @@ test("PPTX and XLSX preserve namespaced relationships, formulas, and safe indexe
     );
     await assert.rejects(
       prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
-      /Missing slide part/,
+      /Office relationship target is missing/,
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        ["ppt/_rels/presentation.xml.rels", presentationRels],
+        ["ppt/slides/slide1.xml", slide],
+        [
+          "ppt/slides/_rels/slide1.xml.rels",
+          Buffer.from(
+            '<Relationships><Relationship Id="notes" Target="../notesSlides/notesSlide1.xml"/></Relationships>',
+          ),
+        ],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      /Office relationship target is missing/,
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        ["ppt/_rels/presentation.xml.rels", presentationRels],
+        ["ppt/slides/slide1.xml", slide],
+        [
+          "custom/_rels/unused.xml.rels",
+          Buffer.from(
+            '<Relationships><Relationship Id="unused" Target="missing.xml"/></Relationships>',
+          ),
+        ],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      /Office relationship target is missing/,
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        ["ppt/_rels/presentation.xml.rels", presentationRels],
+        ["ppt/slides/slide1.xml", slide],
+        [
+          "ppt/_rels/unused.xml.RELS",
+          Buffer.from(
+            '<Relationships><Relationship Id="external" Target="https://example.invalid/unused" TargetMode="External"/></Relationships>',
+          ),
+        ],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      /External Office relationships are not permitted/,
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        [
+          "_rels/.rels",
+          Buffer.from(
+            '<Relationships><Relationship Id="root" Target="missing.xml"/></Relationships>',
+          ),
+        ],
+        ["ppt/presentation.xml", presentation],
+        ["ppt/_rels/presentation.xml.rels", presentationRels],
+        ["ppt/slides/slide1.xml", slide],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      /Office relationship target is missing: missing\.xml/,
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        [
+          "ppt/_rels/presentation.xml.rels",
+          Buffer.from(
+            '<Relationships><Relationship Id="s1" Target="%2e%2e%2f%2e%2e%2foutside.xml"/></Relationships>',
+          ),
+        ],
+        ["ppt/slides/slide1.xml", slide],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      /Encoded Office relationship traversal/,
     );
   } finally {
     await f.cleanup();
@@ -596,7 +698,7 @@ test("XLSX rejects invalid row coordinates, columns, shared strings and parts", 
     );
     await assert.rejects(
       prepareDocument(f.p, path, "invalid.xlsx", 10_000),
-      /Missing worksheet part/,
+      /Office relationship target is missing/,
     );
   } finally {
     await f.cleanup();
@@ -715,6 +817,257 @@ test("Git attachments are bounded diffs and clipboard failure gives the file fal
     await assert.rejects(
       readClipboardPng("freebsd"),
       /Save the image as a PNG/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Git input never executes repository filters or diff and fsmonitor helpers", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const workspace = await gitWorkspace(f.root, {
+      ".gitattributes":
+        "probe.txt filter=probe\n*.probe diff=probe\nREADME.md text\n",
+      "README.md": "before\n",
+      "probe.txt": "baseline\n",
+      "helper.probe": "base\n",
+      ":(glob)literal.txt": "literal before\n",
+      "diagram.png": "image before\n",
+      "delete-me.txt": "tracked before\n",
+      "mode.txt": "same bytes\n",
+    });
+    const env = {
+      ...cleanEnvironment,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    };
+    const git = async (args: string[]) => {
+      const result = await runProcess("git", args, {
+        cwd: workspace,
+        env,
+        timeoutMs: 5000,
+        maxBytes: 100_000,
+      });
+      assert.equal(result.code, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    const first = await git(["rev-parse", "HEAD"]);
+    await writeFile(join(workspace, "README.md"), "before\ncommitted\n");
+    const stage = await runProcess("git", ["add", "README.md"], {
+      cwd: workspace,
+      env,
+      timeoutMs: 5000,
+    });
+    assert.equal(stage.code, 0, stage.stderr);
+    const commit = await runProcess(
+      "git",
+      [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "second",
+      ],
+      { cwd: workspace, env, timeoutMs: 5000 },
+    );
+    assert.equal(commit.code, 0, commit.stderr);
+    const second = await git(["rev-parse", "HEAD"]);
+    await writeFile(
+      join(workspace, "README.md"),
+      "before\ncommitted\nworking\n",
+    );
+    await writeFile(join(workspace, ":(glob)literal.txt"), "literal after\n");
+    await writeFile(
+      join(workspace, "delete-me.txt"),
+      "untracked secret content\n",
+    );
+    const removeFromIndex = await runProcess(
+      "git",
+      ["rm", "--cached", "--", "delete-me.txt"],
+      { cwd: workspace, env, timeoutMs: 5000 },
+    );
+    assert.equal(removeFromIndex.code, 0, removeFromIndex.stderr);
+    await chmod(join(workspace, "mode.txt"), 0o755);
+    await writeFile(join(workspace, "staged.txt"), "staged version\n");
+    const stageNew = await runProcess("git", ["add", "staged.txt"], {
+      cwd: workspace,
+      env,
+      timeoutMs: 5000,
+    });
+    assert.equal(stageNew.code, 0, stageNew.stderr);
+    await writeFile(join(workspace, "staged.txt"), "working version\n");
+    const marker = join(f.root, "git-helper-marker");
+    const helper = join(f.root, "git-helper.js");
+    const helperSource = `const fs = require("node:fs");
+const expectedParent = ${process.pid};
+let pid = process.ppid;
+for (let depth = 0; depth < 8 && pid > 1; depth++) {
+  if (process.platform !== "linux" || pid === expectedParent) {
+    fs.appendFileSync(${JSON.stringify(marker)}, String(process.argv[2]) + "\\n");
+    break;
+  }
+  try {
+    const stat = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
+    pid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+  } catch {
+    break;
+  }
+}
+`;
+    await writeFile(helper, helperSource);
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    const invocation = `${quote(process.execPath)} ${quote(helper)}`;
+    const helperInvocation = (name: string) => `${invocation} ${name}`;
+    await appendFile(
+      join(workspace, ".git", "config"),
+      `\n[filter "probe"]\n\tclean = ${helperInvocation("clean")}\n\tprocess = ${helperInvocation("process")}\n\trequired = true\n[diff "probe"]\n\tcommand = ${helperInvocation("diff")}\n\ttextconv = ${helperInvocation("textconv")}\n[diff]\n\texternal = ${helperInvocation("external")}\n[core]\n\tfsmonitor = ${helperInvocation("fsmonitor")}\n`,
+    );
+    const assertNoHelper = async () => {
+      const markers = await readFile(marker, "utf8").catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+        throw error;
+      });
+      assert.equal(markers, "", `Git invoked configured helper: ${markers}`);
+    };
+
+    const working = await selectGitInput(
+      workspace,
+      "git:working",
+      100_000,
+      AbortSignal.timeout(10000),
+    );
+    assert.match(working.text, /\+working/);
+    assert.match(working.text, /\+working version/);
+    assert.match(working.text, /:\(glob\)literal\.txt/);
+    assert.match(working.text, /staged\.txt/);
+    assert.match(working.text, /deleted file mode 100644 "delete-me\.txt"/);
+    assert.match(working.text, /mode 100644 => 100755 "mode\.txt"/);
+    assert.doesNotMatch(working.text, /untracked secret content/);
+    await assertNoHelper();
+    const staged = await selectGitInput(
+      workspace,
+      "git:staged",
+      100_000,
+      AbortSignal.timeout(10000),
+    );
+    assert.match(staged.text, /\+staged version/);
+    assert.doesNotMatch(staged.text, /\+working version/);
+    assert.match(staged.text, /deleted file mode 100644 "delete-me\.txt"/);
+    await assertNoHelper();
+    const status = await selectGitInput(
+      workspace,
+      "git:status",
+      100_000,
+      AbortSignal.timeout(10000),
+    );
+    assert.match(status.text, /M "README\.md"/);
+    assert.match(status.text, /AM "staged\.txt"/);
+    await assertNoHelper();
+    assert.match(
+      await readGitStatus(workspace, AbortSignal.timeout(10000)),
+      /recent commits:/,
+    );
+    await assertNoHelper();
+    const singleCommit = await selectGitInput(
+      workspace,
+      `git:commit:${second}`,
+      100_000,
+      AbortSignal.timeout(10000),
+    );
+    assert.match(singleCommit.locator, /first parent/);
+    assert.match(singleCommit.text, /\+committed/);
+    await assertNoHelper();
+    const range = await selectGitInput(
+      workspace,
+      `git:${first}..${second}`,
+      100_000,
+      AbortSignal.timeout(10000),
+    );
+    assert.match(range.text, /\+committed/);
+    await assertNoHelper();
+
+    const unbornRoot = join(f.root, "unborn");
+    await mkdir(unbornRoot);
+    const init = await runProcess("git", ["init", "-q"], {
+      cwd: unbornRoot,
+      env,
+      timeoutMs: 5000,
+    });
+    assert.equal(init.code, 0, init.stderr);
+    const unborn = await selectGitInput(
+      unbornRoot,
+      "git:working",
+      100_000,
+      AbortSignal.timeout(10000),
+    );
+    assert.match(unborn.locator, /unborn HEAD/);
+    assert.match(unborn.text, /No text changes/);
+
+    const nested = join(workspace, "nested");
+    await mkdir(nested);
+    await assert.rejects(
+      selectGitInput(nested, "git:status", 100_000, AbortSignal.timeout(10000)),
+      { code: "GIT_WORKSPACE" },
+    );
+    const guardedRoot = join(f.root, "guarded-worktree");
+    await mkdir(guardedRoot);
+    const guardedWorkspace = await gitWorkspace(guardedRoot, {
+      "README.md": "guarded\n",
+    });
+    const conflictingWorktree = join(f.root, "conflicting-worktree");
+    await mkdir(conflictingWorktree);
+    await appendFile(
+      join(guardedWorkspace, ".git", "config"),
+      `\n[core]\n\tworktree = ${conflictingWorktree}\n`,
+    );
+    await assert.rejects(
+      selectGitInput(
+        guardedWorkspace,
+        "git:status",
+        100_000,
+        AbortSignal.timeout(10000),
+      ),
+      { code: "GIT_WORKSPACE" },
+    );
+
+    const missingRoot = join(f.root, "missing-object");
+    await mkdir(missingRoot);
+    const missingWorkspace = await gitWorkspace(missingRoot, {
+      "README.md": "present\n",
+    });
+    const missingCommit = await runProcess("git", ["rev-parse", "HEAD"], {
+      cwd: missingWorkspace,
+      env,
+      timeoutMs: 5000,
+    });
+    const missingBlob = await runProcess(
+      "git",
+      ["rev-parse", "HEAD:README.md"],
+      { cwd: missingWorkspace, env, timeoutMs: 5000 },
+    );
+    assert.equal(missingCommit.code, 0);
+    assert.equal(missingBlob.code, 0);
+    const objectId = missingBlob.stdout.trim();
+    await rm(
+      join(
+        missingWorkspace,
+        ".git",
+        "objects",
+        objectId.slice(0, 2),
+        objectId.slice(2),
+      ),
+    );
+    await assert.rejects(
+      selectGitInput(
+        missingWorkspace,
+        `git:commit:${missingCommit.stdout.trim()}`,
+        100_000,
+        AbortSignal.timeout(10000),
+      ),
+      { code: "GIT_INPUT" },
     );
   } finally {
     await f.cleanup();

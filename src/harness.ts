@@ -28,6 +28,7 @@ import {
   loadStoredImage,
   maxConversationImageBytes,
   maxConversationImages,
+  mergeImageReferences,
 } from "./images.js";
 import {
   atomicWrite,
@@ -240,11 +241,10 @@ export class Harness {
         size: info.size,
       });
     }
-    const images = [
-      ...new Map(
-        (options.images ?? []).map((reference) => [reference.id, reference]),
-      ).values(),
-    ];
+    const images = mergeImageReferences(
+      options.images ?? [],
+      prepared.flatMap((input) => input.images ?? []),
+    );
     if (
       images.some((image) =>
         options.contextState?.redactedImageIds?.includes(image.id),
@@ -429,12 +429,6 @@ export class Harness {
       ])) {
         this.store.assertIdle(linkedRunId);
         const linkedRun = this.store.get(linkedRunId);
-        if (
-          ["public", "private", "restricted"].indexOf(run.dataClass) <
-            ["public", "private", "restricted"].indexOf(linkedRun.dataClass) ||
-          (linkedRun.localOnly && !run.localOnly)
-        )
-          continue;
         for (const artifact of this.store
           .artifacts(linkedRun.id)
           .filter(
@@ -584,14 +578,10 @@ export class Harness {
             "IMAGE_REDACTED",
             "A redacted image cannot be introduced by a prepared attachment",
           );
-        owned.images = [
-          ...new Map(
-            [...(owned.images ?? []), ...(input.images ?? [])].map((image) => [
-              image.id,
-              image,
-            ]),
-          ).values(),
-        ];
+        owned.images = mergeImageReferences(
+          owned.images ?? [],
+          input.images ?? [],
+        );
         if (
           owned.images.length > maxConversationImages ||
           owned.images.reduce((sum, image) => sum + image.bytes, 0) >

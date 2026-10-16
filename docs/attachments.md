@@ -15,6 +15,8 @@ PDF conversion requires Poppler inside the configured Bubblewrap or rootless Pod
 
 `@git:status`, `@git:working`, `@git:staged`, `@git:commit:<full-hash>`, and `@git:<full-hash>..<full-hash>` attach bounded read-only repository context. `/git` displays branch, status, and recent commits. Git input never applies, commits, or resets changes; paths identified as secret or protected are rejected.
 
+Git comparisons use raw blob and guarded worktree bytes. They do not apply Git attributes, clean filters, text conversion, working-tree encoding, or line-ending normalization. Untracked file names may appear in status, but their contents are not attached.
+
 `/images crop <id> <x> <y> <width> <height>` and `/images mask ...` create new immutable derivatives and remove the source from active model context. `/images remove <id>` excludes a retained image; `/images compare <before-id> <after-id>` records order without claiming semantic or quantitative comparison accuracy.
 
 `/clipboard` stages a bounded PNG from `wl-paste` or `xclip` on Linux, or `pngpaste` on macOS, in private local storage. It does not send the image: the next ordinary request still requires preview approval. If no adapter is available, save the PNG and attach it with `@path`; over SSH, use `scp` or `sftp` to place it in the workspace first.

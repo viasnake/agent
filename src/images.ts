@@ -12,6 +12,34 @@ export const maxImagePixels = 4_194_304;
 export const maxConversationImages = 8;
 export const maxConversationImageBytes = 20_000_000;
 
+export function mergeImageReferences(
+  ...groups: readonly ImageReference[][]
+): ImageReference[] {
+  const levels: DataClass[] = ["public", "private", "restricted"];
+  const merged = new Map<string, ImageReference>();
+  for (const reference of groups.flat()) {
+    const existing = merged.get(reference.id);
+    if (!existing) {
+      merged.set(reference.id, { ...reference });
+      continue;
+    }
+    merged.set(reference.id, {
+      ...existing,
+      ...reference,
+      dataClass:
+        levels.indexOf(existing.dataClass) > levels.indexOf(reference.dataClass)
+          ? existing.dataClass
+          : reference.dataClass,
+      localOnly: existing.localOnly || reference.localOnly,
+      sourceId: reference.sourceId ?? existing.sourceId,
+      documentId: reference.documentId ?? existing.documentId,
+      transformation: reference.transformation ?? existing.transformation,
+      comparisonOrder: reference.comparisonOrder ?? existing.comparisonOrder,
+    });
+  }
+  return [...merged.values()];
+}
+
 const formats = {
   ".png": { format: "png", mimeType: "image/png" },
   ".jpg": { format: "jpeg", mimeType: "image/jpeg" },
@@ -198,7 +226,9 @@ export async function isImageFileSignature(path: string): Promise<boolean> {
 export async function readBoundedImage(path: string): Promise<Buffer> {
   const file = await open(
     path,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
   );
   try {
     const initial = await file.stat();

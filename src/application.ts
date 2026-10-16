@@ -57,6 +57,7 @@ import {
   validateImage,
   validateImageReference,
   transformImage,
+  mergeImageReferences,
 } from "./images.js";
 import { modelCandidates } from "./policy.js";
 import { endpoint } from "./runtime/providers.js";
@@ -427,7 +428,7 @@ export class Application extends EventEmitter {
             "This image was redacted in the conversation; stage it in a new conversation instead",
           );
         const known = new Map(
-          [...(this.session.images ?? []), ...fresh].map((ref) => [
+          mergeImageReferences(this.session.images ?? [], fresh).map((ref) => [
             ref.id,
             ref,
           ]),
@@ -514,11 +515,7 @@ export class Application extends EventEmitter {
         "INPUT_SIZE",
         "依頼と添付ファイルが入力上限を超えています。",
       );
-    const allImages = [...(this.session.images ?? [])];
-    for (const ref of fresh)
-      if (!allImages.some((image) => image.id === ref.id)) allImages.push(ref);
-    const unique = new Map(allImages.map((ref) => [ref.id, ref]));
-    const images = [...unique.values()];
+    const images = mergeImageReferences(this.session.images ?? [], fresh);
     if (
       images.length > maxConversationImages ||
       images.reduce((sum, ref) => sum + ref.bytes, 0) >
@@ -1013,24 +1010,9 @@ export class Application extends EventEmitter {
         "INPUT_PREVIEW_STALE",
         "Queued attachment has no immutable selection; review it again",
       );
-    const retained = new Map(
-      (this.session.images ?? []).map((reference) => [reference.id, reference]),
-    );
-    const images = (input.images ?? this.session.images ?? []).map(
-      (reference) => {
-        const prior = retained.get(reference.id);
-        if (!prior) return reference;
-        const levels: DataClass[] = ["public", "private", "restricted"];
-        return {
-          ...reference,
-          dataClass:
-            levels.indexOf(prior.dataClass) >
-            levels.indexOf(reference.dataClass)
-              ? prior.dataClass
-              : reference.dataClass,
-          localOnly: prior.localOnly || reference.localOnly,
-        };
-      },
+    const images = mergeImageReferences(
+      this.session.images ?? [],
+      input.images ?? this.session.images ?? [],
     );
     const preparedForRun = preparedInputs.map((prepared) => {
       const imageIds = prepared.reference.imageIds ?? [],
@@ -1157,20 +1139,43 @@ export class Application extends EventEmitter {
         : undefined;
     const contextState = normalizeConversationContext(this.session.context);
     if (contextState.redactedImageIds?.length) {
+      const unavailableGitArtifacts = this.conversations
+        .runs(this.session.id)
+        .flatMap((runId) => this.store.artifacts(runId))
+        .filter(
+          (artifact) =>
+            artifact.kind === "source" && artifact.metadata.format === "git",
+        );
       const unavailableGitSources = new Set(
-        this.conversations.runs(this.session.id).flatMap((runId) =>
-          this.store
-            .artifacts(runId)
-            .filter(
-              (artifact) =>
-                artifact.kind === "source" &&
-                artifact.metadata.format === "git",
-            )
-            .map((artifact) => artifact.id),
+          unavailableGitArtifacts.map((artifact) => artifact.id),
         ),
-      );
+        unavailableGitNames = new Set(
+          unavailableGitArtifacts.map((artifact) => artifact.name),
+        );
       contextState.sourceIds = contextState.sourceIds.filter(
         (sourceId) => !unavailableGitSources.has(sourceId),
+      );
+      contextState.workingState.artifacts =
+        contextState.workingState.artifacts.filter(
+          (artifactId) => !unavailableGitSources.has(artifactId),
+        );
+      contextState.workingState.hashes = Object.fromEntries(
+        Object.entries(contextState.workingState.hashes).filter(
+          ([name]) => !unavailableGitNames.has(name),
+        ),
+      );
+      contextState.workingState.history = contextState.workingState.history.map(
+        (entry) => ({
+          ...entry,
+          artifacts: entry.artifacts.filter(
+            (artifactId) => !unavailableGitSources.has(artifactId),
+          ),
+          hashes: Object.fromEntries(
+            Object.entries(entry.hashes).filter(
+              ([name]) => !unavailableGitNames.has(name),
+            ),
+          ),
+        }),
       );
     }
     const instructions = this.conversations
@@ -1347,19 +1352,18 @@ export class Application extends EventEmitter {
         "IMAGE_LIMIT",
         "Conversation image capacity is exhausted",
       );
-    const ref =
-      (this.session.images ?? []).find((image) => image.id === imageId) ??
-      (await saveImage(
+    const ref = mergeImageReferences(this.session.images ?? [], [
+      await saveImage(
         this.paths,
         "clipboard.png",
         bytes,
         this.session.dataClass,
         this.session.localOnly,
-      ));
-    this.session.images = [
-      ...(this.session.images ?? []).filter((image) => image.id !== ref.id),
+      ),
+    ]).find((image) => image.id === imageId)!;
+    this.session.images = mergeImageReferences(this.session.images ?? [], [
       ref,
-    ];
+    ]);
     this.save();
     return ref;
   }
@@ -1413,19 +1417,18 @@ export class Application extends EventEmitter {
         "IMAGE_LIMIT",
         "Conversation image capacity is exhausted",
       );
-    const ref =
-      (this.session.images ?? []).find((image) => image.id === imageId) ??
-      (await saveImage(
+    const ref = mergeImageReferences(this.session.images ?? [], [
+      await saveImage(
         this.paths,
         basename(safe),
         bytes,
         this.session.dataClass,
         this.session.localOnly,
-      ));
-    this.session.images = [
-      ...(this.session.images ?? []).filter((image) => image.id !== ref.id),
+      ),
+    ]).find((image) => image.id === imageId)!;
+    this.session.images = mergeImageReferences(this.session.images ?? [], [
       ref,
-    ];
+    ]);
     this.save();
     return ref;
   }

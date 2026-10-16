@@ -1074,12 +1074,37 @@ test("redacted conversations do not inherit prior Git sources", async () => {
     });
     context.sourceIds = [source.id, allowedSource.id];
     context.redactedImageIds = [`img-${"a".repeat(64)}`];
+    context.workingState.artifacts = [source.id, allowedSource.id];
+    context.workingState.hashes = {
+      "git.patch": source.sha256,
+      "note.txt": allowedSource.sha256,
+    };
+    context.workingState.history = [
+      {
+        runId: sourceRun.id,
+        status: "succeeded",
+        checks: [],
+        hashes: {
+          "git.patch": source.sha256,
+          "note.txt": allowedSource.sha256,
+        },
+        artifacts: [source.id, allowedSource.id],
+        operations: [],
+        results: [],
+      },
+    ];
     app.save();
 
     await app.submit("Explain the earlier evidence");
     await app.waitForIdle();
     const run = app.currentRun()!;
     assert.equal(run.state, "succeeded", run.reason);
+    assert.ok(!run.contextState?.sourceIds.includes(source.id));
+    assert.ok(!run.contextState?.workingState.artifacts.includes(source.id));
+    assert.ok(
+      !run.contextState?.workingState.history[0]?.artifacts.includes(source.id),
+    );
+    assert.equal(run.contextState?.workingState.hashes["git.patch"], undefined);
     assert.ok(
       !f.store
         .artifacts(run.id)
@@ -1107,6 +1132,106 @@ test("redacted conversations do not inherit prior Git sources", async () => {
       ),
       gitBytes.toString(),
     );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("restricted historical Git bytes are projected from work without granting source access", async () => {
+  let gitSourceId: string | undefined;
+  const runtime = new ScriptedRuntime(async (request) => {
+    const readSource = request.tools.find(
+      (tool) => tool.name === "read_source",
+    );
+    assert.ok(readSource);
+    await assert.rejects(
+      readSource.execute(
+        { id: gitSourceId!, startLine: 1, lines: 10 },
+        request.signal,
+      ),
+      { code: "SOURCE" },
+    );
+    return "The redacted working copy is safe to inspect.";
+  });
+  const f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  try {
+    const gitBytes = Buffer.from("restricted Git source bytes\n"),
+      origin = await gitWorkspace(f.root, {
+        "inputs/git.patch": gitBytes.toString(),
+        "aliases/git-copy.patch": gitBytes.toString(),
+        "README.md": "safe source\n",
+      }),
+      sourceRun = await f.harness.create({
+        kind: "chat",
+        objective: "restricted historical Git source",
+        dataClass: "restricted",
+      });
+    const owned = f.store.claim(sourceRun.id, true, true);
+    const source = await f.store.artifact(
+      owned,
+      "git.patch",
+      "source",
+      gitBytes,
+      {
+        format: "git",
+        locator: "working diff",
+      },
+    );
+    gitSourceId = source.id;
+    f.store.release(owned);
+    await app.initialize();
+    app.session.workspace = origin;
+    app.conversations.link(app.session, sourceRun);
+    app.session.context = {
+      pins: [],
+      decisions: [],
+      openQuestions: [],
+      constraints: [],
+      instructions: [],
+      sourceIds: [],
+      imageIds: [],
+      redactedImageIds: [`img-${"a".repeat(64)}`],
+      originalRunIds: [],
+      compactions: [],
+      workingState: {
+        checks: [],
+        hashes: {},
+        artifacts: [],
+        operations: [],
+        history: [],
+      },
+    };
+    app.save();
+    await app.submit("Explain this repository");
+    await app.waitForIdle();
+    const run = app.currentRun()!;
+    assert.equal(run.state, "succeeded", run.reason);
+    assert.ok(
+      !f.store
+        .artifacts(run.id)
+        .some((artifact) => artifact.metadata.format === "git"),
+    );
+    const snapshot = await readSnapshot(f.store.runDir(run.id));
+    assert.ok(snapshot.redactedPaths?.includes("inputs/git.patch"));
+    assert.ok(snapshot.redactedPaths?.includes("aliases/git-copy.patch"));
+    await assert.rejects(
+      readFile(join(f.store.runDir(run.id), "work", "inputs", "git.patch")),
+      { code: "ENOENT" },
+    );
+    assert.equal(
+      await readFile(
+        join(f.store.runDir(run.id), "baseline", "inputs", "git.patch"),
+        "utf8",
+      ),
+      gitBytes.toString(),
+    );
+    assert.equal(
+      await readFile(join(origin, "inputs", "git.patch"), "utf8"),
+      gitBytes.toString(),
+    );
+    assert.equal(runtime.requests.length, 1);
   } finally {
     await app.close();
     await f.cleanup();
