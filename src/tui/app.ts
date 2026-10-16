@@ -561,6 +561,7 @@ export class TerminalApp {
     }
     if (text.startsWith("/")) {
       this.input.setText("");
+      if (this.draftTimer) clearTimeout(this.draftTimer);
       await this.command(text.slice(1));
       return;
     }
@@ -772,6 +773,8 @@ export class TerminalApp {
     if (!app) return;
     if (this.busyDialog)
       throw new AgentError("BUSY", "認証・診断の終了を待ってください。");
+    const draft = this.input.getExpandedText();
+    if (draft && !draft.startsWith("/")) app.setDraft(draft);
     const [command, ...args] = line.trim().split(/\s+/);
     const argument = line.trim().slice(command!.length).trim();
     if (command !== "status") this.notice = "";
