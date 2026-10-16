@@ -7,6 +7,7 @@ import {
   type Run,
   type RequestAccess,
   type WorkKind,
+  type DocumentReference,
 } from "./types.js";
 import {
   emptyConversationContext,
@@ -20,6 +21,7 @@ export interface PendingInput {
   mode: "instruction" | "next";
   runId?: string;
   images?: ImageReference[];
+  documents?: DocumentReference[];
   previewBinding?: string;
   previewConfigHash?: string;
   previewDataClass?: DataClass;

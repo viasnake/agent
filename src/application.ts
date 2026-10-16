@@ -29,6 +29,7 @@ import {
   type RequestAccess,
   type ContextNote,
   type WorkKind,
+  type DocumentReference,
 } from "./types.js";
 import {
   compactContext,
@@ -40,7 +41,6 @@ import {
   canonical,
   errorMessage,
   id,
-  readText,
   safePath,
   sha256,
 } from "./util.js";
@@ -55,10 +55,18 @@ import {
   saveImage,
   validateImage,
   validateImageReference,
+  transformImage,
 } from "./images.js";
 import { modelCandidates } from "./policy.js";
 import { endpoint } from "./runtime/providers.js";
 import { secretPath, workspaceDiff } from "./workspace.js";
+import {
+  loadPreparedInput,
+  parseDocumentToken,
+  prepareDocument,
+} from "./documents.js";
+import { readClipboardPng } from "./clipboard.js";
+import { prepareGitInput, readGitStatus } from "./git-input.js";
 
 export interface AppEvent {
   type: string;
@@ -72,7 +80,11 @@ export interface InputPreview {
     path: string;
     bytes: number;
     mimeType?: string;
+    id?: string;
+    locator?: string;
+    partial?: boolean;
   }[];
+  documents: DocumentReference[];
   images: ImageReference[];
   destinations: string[];
   dataClass: DataClass;
@@ -83,6 +95,7 @@ export interface InputPreview {
 interface InputSnapshot {
   text: string;
   attachments: InputPreview["attachments"];
+  documents: DocumentReference[];
   images: ImageReference[];
   destinationBinding: string;
   configHash: string;
@@ -286,17 +299,50 @@ export class Application extends EventEmitter {
   private async snapshotInput(text: string): Promise<InputSnapshot> {
     let total = Buffer.byteLength(text);
     const attachments: InputPreview["attachments"] = [];
+    const documents: DocumentReference[] = [];
     const fresh: ImageReference[] = [];
-    for (const path of fileReferences(text)) {
-      if (secretPath(path))
+    for (const token of fileReferences(text)) {
+      if (token.startsWith("git:")) {
+        if (!this.session.workspace)
+          throw new AgentError(
+            "WORKSPACE",
+            "Git inputs require a configured workspace",
+          );
+        const prepared = await prepareGitInput(
+          this.paths,
+          this.session.workspace,
+          token,
+          Math.min(
+            this.config.limits.maxInputBytes - total,
+            this.config.limits.maxFileBytes,
+          ),
+          AbortSignal.timeout(30000),
+        );
+        documents.push(prepared.reference);
+        total += prepared.reference.selectedBytes;
+        attachments.push({
+          path: `@${token}`,
+          bytes: prepared.reference.selectedBytes,
+          id: prepared.reference.id,
+          locator: prepared.reference.locator,
+        });
+        continue;
+      }
+      const actualPath = token.split("::", 1)[0]!;
+      if (secretPath(actualPath))
         throw new AgentError(
           "PATH_DENIED",
           "認証・制御ファイルは添付できません。",
         );
-      const safe = await safePath(this.session.workspace, path);
-      if (isImagePath(path)) {
+      const safe = await safePath(this.session.workspace, actualPath);
+      if (isImagePath(actualPath)) {
+        if (token !== actualPath)
+          throw new AgentError(
+            "INPUT_SELECTOR",
+            "Image attachments do not accept document selectors",
+          );
         const bytes = await readBoundedImage(safe);
-        const mimeType = imageMimeForPath(path)!;
+        const mimeType = imageMimeForPath(actualPath)!;
         const metadata = await validateImage(bytes, mimeType);
         const imageId = `img-${sha256(bytes)}`;
         const known = new Map(
@@ -327,7 +373,7 @@ export class Application extends EventEmitter {
         ]);
         const reference = await saveImage(
           this.paths,
-          basename(path),
+          basename(actualPath),
           bytes,
           disclosure.dataClass,
           disclosure.localOnly,
@@ -338,17 +384,52 @@ export class Application extends EventEmitter {
         )
           throw new AgentError("IMAGE_INVALID", "Image metadata changed");
         fresh.push(reference);
-        attachments.push({ path, bytes: bytes.length, mimeType });
+        attachments.push({ path: token, bytes: bytes.length, mimeType });
       } else {
         if (await isImageFileSignature(safe))
           throw new AgentError(
             "IMAGE_FORMAT",
             "Image file extension does not match PNG, JPEG, or WebP content",
           );
-        const content = await readText(safe, this.config.limits.maxFileBytes);
-        const bytes = Buffer.byteLength(content);
-        total += bytes;
-        attachments.push({ path, bytes });
+        const parsed = parseDocumentToken(token);
+        if (parsed.path !== actualPath)
+          throw new AgentError(
+            "PATH_DENIED",
+            "Attachment selectors cannot alter the checked path",
+          );
+        const remaining = Math.max(
+          0,
+          maxConversationImages -
+            new Set(
+              [...(this.session.images ?? []), ...fresh].map((ref) => ref.id),
+            ).size,
+        );
+        const prepared = await prepareDocument(
+          this.paths,
+          safe,
+          token,
+          Math.min(
+            this.config.limits.maxInputBytes - total,
+            this.config.limits.maxFileBytes,
+          ),
+          {
+            sandbox: new Sandbox(this.config.execution),
+            dataClass: this.session.dataClass,
+            localOnly: this.session.localOnly,
+            remainingImages: remaining,
+            signal: AbortSignal.timeout(30000),
+          },
+        );
+        documents.push(prepared.reference);
+        fresh.push(...(prepared.images ?? []));
+        total += prepared.reference.selectedBytes;
+        attachments.push({
+          path: token,
+          bytes: prepared.reference.selectedBytes,
+          id: prepared.reference.id,
+          locator: prepared.reference.locator,
+          partial: prepared.reference.partial,
+        });
       }
     }
     if (total > this.config.limits.maxInputBytes)
@@ -398,6 +479,7 @@ export class Application extends EventEmitter {
         reviewer: this.session.reviewer,
         access,
         accessOverride,
+        documents,
         imageIds: images.map((ref) => ref.id),
       }),
     );
@@ -405,6 +487,7 @@ export class Application extends EventEmitter {
       text,
       attachments,
       images,
+      documents,
       destinationBinding: binding,
       configHash: configHash(this.config),
       dataClass: disclosure.dataClass,
@@ -419,11 +502,12 @@ export class Application extends EventEmitter {
   }
   async previewInput(text: string): Promise<InputPreview> {
     const snapshot = await this.snapshotInput(text);
-    const destinations = this.imageDestinations(snapshot.images, snapshot);
+    const destinations = this.inputDestinations(snapshot.images, snapshot);
     const preview: InputPreview = {
       text,
       attachments: structuredClone(snapshot.attachments),
       images: structuredClone(snapshot.images),
+      documents: structuredClone(snapshot.documents),
       destinations,
       dataClass: snapshot.dataClass,
       localOnly: snapshot.localOnly,
@@ -439,7 +523,7 @@ export class Application extends EventEmitter {
       text: `次の送信1回のみ access を ${access} に上書きします。現在の依頼に明示的な禁止表現があれば read-only が優先されます。`,
     });
   }
-  private imageDestinations(
+  private inputDestinations(
     images: ImageReference[],
     snapshot: Pick<
       InputSnapshot,
@@ -453,7 +537,7 @@ export class Application extends EventEmitter {
       | "access"
     >,
   ): string[] {
-    if (!images.length) return [];
+    if (!images.length && !snapshot.attachments.length) return [];
     const kind = snapshot.kind;
     const run = {
       kind,
@@ -525,8 +609,8 @@ export class Application extends EventEmitter {
       })
       .sort();
     const alternatives = destinations.length
-      ? ` Authorized image-capable alternatives: ${destinations.join("; ")}.`
-      : " No authorized image-capable alternatives are available.";
+      ? ` Authorized ${images.length ? "image-capable" : "attachment-capable"} alternatives: ${destinations.join("; ")}.`
+      : ` No authorized ${images.length ? "image-capable" : "attachment-capable"} alternatives are available.`;
     const missingRole = requiredRoles.find(
       (role) =>
         !(role === "reviewer" ? reviewerCandidates : candidates[role]).length,
@@ -534,7 +618,7 @@ export class Application extends EventEmitter {
     if (missingRole)
       throw new AgentError(
         "NO_IMAGE_MODEL",
-        `No authorized image-capable ${missingRole} model is available for ${kind}/${snapshot.dataClass}${snapshot.localOnly ? "/local-only" : ""}.${alternatives}`,
+        `No authorized ${images.length ? "image-capable" : "attachment-capable"} ${missingRole} model is available for ${kind}/${snapshot.dataClass}${snapshot.localOnly ? "/local-only" : ""}.${alternatives}`,
       );
     if (
       kind !== "chat" &&
@@ -544,12 +628,12 @@ export class Application extends EventEmitter {
     )
       throw new AgentError(
         "NO_IMAGE_MODEL",
-        `Selected reviewer ${snapshot.reviewer} is not an authorized image-capable reviewer model.${alternatives}`,
+        `Selected reviewer ${snapshot.reviewer} is not an authorized ${images.length ? "image-capable" : "attachment-capable"} reviewer model.${alternatives}`,
       );
     if (snapshot.model && !candidates[requestedRole].includes(snapshot.model))
       throw new AgentError(
         "NO_IMAGE_MODEL",
-        `Selected model ${snapshot.model} is not an authorized image-capable ${requestedRole} model.${alternatives}`,
+        `Selected model ${snapshot.model} is not an authorized ${images.length ? "image-capable" : "attachment-capable"} ${requestedRole} model.${alternatives}`,
       );
     return destinations;
   }
@@ -565,6 +649,7 @@ export class Application extends EventEmitter {
       preview.text !== text ||
       canonical(preview.attachments) !== canonical(snapshot.attachments) ||
       canonical(preview.images) !== canonical(snapshot.images) ||
+      canonical(preview.documents) !== canonical(snapshot.documents) ||
       preview.dataClass !== snapshot.dataClass ||
       preview.localOnly !== snapshot.localOnly ||
       preview.access !== snapshot.access ||
@@ -575,7 +660,7 @@ export class Application extends EventEmitter {
         "Input preview is invalid; review the input again",
       );
     if (
-      snapshot.images.length &&
+      (snapshot.images.length || snapshot.documents.length) &&
       snapshot.configHash !== configHash(this.config)
     )
       throw new AgentError(
@@ -584,7 +669,7 @@ export class Application extends EventEmitter {
       );
     if (
       canonical(preview.destinations) !==
-      canonical(this.imageDestinations(snapshot.images, snapshot))
+      canonical(this.inputDestinations(snapshot.images, snapshot))
     )
       throw new AgentError(
         "IMAGE_PREVIEW",
@@ -611,6 +696,7 @@ export class Application extends EventEmitter {
         reviewer: this.session.reviewer,
         access: snapshot.access,
         accessOverride: snapshot.accessOverride,
+        documents: snapshot.documents,
         imageIds: snapshot.images.map((ref) => ref.id),
       }),
     );
@@ -622,7 +708,7 @@ export class Application extends EventEmitter {
     if (
       this.accessOverride !== snapshot.accessOverride ||
       effective !== snapshot.access ||
-      (snapshot.images.length &&
+      ((snapshot.images.length || snapshot.documents.length) &&
         (currentBinding !== snapshot.destinationBinding ||
           kind !== snapshot.kind ||
           this.session.strategy !== snapshot.strategy ||
@@ -638,31 +724,6 @@ export class Application extends EventEmitter {
   async attachments(text: string): Promise<{ path: string; bytes: number }[]> {
     const snapshot = await this.snapshotInput(text);
     return snapshot.attachments.map(({ path, bytes }) => ({ path, bytes }));
-  }
-  private async textAttachments(
-    text: string,
-  ): Promise<{ path: string; bytes: number }[]> {
-    let total = Buffer.byteLength(text);
-    const attachments: { path: string; bytes: number }[] = [];
-    for (const path of fileReferences(text)) {
-      if (secretPath(path))
-        throw new AgentError(
-          "PATH_DENIED",
-          "認証・制御ファイルは添付できません。",
-        );
-      if (isImagePath(path)) continue;
-      const safe = await safePath(this.session.workspace, path);
-      const content = await readText(safe, this.config.limits.maxFileBytes);
-      const bytes = Buffer.byteLength(content);
-      total += bytes;
-      attachments.push({ path, bytes });
-    }
-    if (total > this.config.limits.maxInputBytes)
-      throw new AgentError(
-        "INPUT_SIZE",
-        "依頼と添付ファイルが入力上限を超えています。",
-      );
-    return attachments;
   }
   async submit(
     text: string,
@@ -686,6 +747,7 @@ export class Application extends EventEmitter {
       mode: this.busy ? mode : "next",
       runId: this.busy && mode === "instruction" ? this.activeRunId : undefined,
       images: structuredClone(snapshot.images),
+      documents: structuredClone(snapshot.documents),
       previewBinding: snapshot.destinationBinding,
       previewConfigHash: snapshot.configHash,
       previewDataClass: snapshot.dataClass,
@@ -734,6 +796,7 @@ export class Application extends EventEmitter {
     const snapshot = preview ? this.approvedSnapshot(text, preview) : undefined;
     item.text = text;
     item.images = snapshot?.images;
+    item.documents = snapshot?.documents;
     item.previewBinding = snapshot?.destinationBinding;
     item.previewConfigHash = snapshot?.configHash;
     item.previewDataClass = snapshot?.dataClass;
@@ -815,7 +878,22 @@ export class Application extends EventEmitter {
         "ACCESS_PREVIEW_STALE",
         "Queued access changed after confirmation; review the request again",
       );
-    const refs = await this.textAttachments(input.text);
+    const preparedInputs = await Promise.all(
+      (input.documents ?? []).map((reference) =>
+        loadPreparedInput(this.paths, reference),
+      ),
+    );
+    if (
+      fileReferences(input.text).some((token) => {
+        const path = token.split("::", 1)[0]!;
+        return !isImagePath(path) && !token.startsWith("@git:");
+      }) &&
+      !input.documents?.length
+    )
+      throw new AgentError(
+        "INPUT_PREVIEW_STALE",
+        "Queued attachment has no immutable selection; review it again",
+      );
     const retained = new Map(
       (this.session.images ?? []).map((reference) => [reference.id, reference]),
     );
@@ -835,7 +913,19 @@ export class Application extends EventEmitter {
         };
       },
     );
-    if (images.length) {
+    const preparedForRun = preparedInputs.map((prepared) => {
+      const imageIds = prepared.reference.imageIds ?? [],
+        attachedImages = imageIds.map((imageId) =>
+          images.find((image) => image.id === imageId),
+        );
+      if (attachedImages.some((image) => !image))
+        throw new AgentError(
+          "INPUT_PREVIEW_STALE",
+          "A queued PDF page image was removed; review the attachment again",
+        );
+      return { ...prepared, images: attachedImages as ImageReference[] };
+    });
+    if (images.length || preparedInputs.length) {
       const disclosure = this.effectiveDisclosure(images);
       const binding = sha256(
         canonical({
@@ -850,6 +940,7 @@ export class Application extends EventEmitter {
           reviewer: input.previewReviewer,
           access,
           accessOverride: input.previewAccessOverride,
+          documents: input.documents ?? [],
           imageIds: images.map((ref) => ref.id),
         }),
       );
@@ -869,7 +960,7 @@ export class Application extends EventEmitter {
           "IMAGE_PREVIEW_STALE",
           "Queued image input needs a new preview and confirmation after configuration or privacy changes",
         );
-      this.imageDestinations(images, {
+      this.inputDestinations(images, {
         dataClass: disclosure.dataClass,
         localOnly: disclosure.localOnly,
         kind,
@@ -1062,7 +1153,7 @@ export class Application extends EventEmitter {
       includeUntracked: this.session.includeUntracked,
       model: this.session.model,
       reviewer: this.session.reviewer,
-      inputs: refs.map((r) => join(this.session.workspace, r.path)),
+      preparedInputs: preparedForRun,
       checks: kind === "coding" ? this.session.checks : [],
     });
     this.activeRunId = run.id;
@@ -1089,6 +1180,108 @@ export class Application extends EventEmitter {
         "Image is not retained by this conversation",
       );
     return join(this.paths.home, "images", `${ref.sha256}.img`);
+  }
+  async stageClipboardImage(): Promise<ImageReference> {
+    if (this.busy)
+      throw new AgentError(
+        "IMAGE_BUSY",
+        "Wait for the current request before staging an image",
+      );
+    const bytes = await readClipboardPng();
+    const ref = await saveImage(
+      this.paths,
+      "clipboard.png",
+      bytes,
+      this.session.dataClass,
+      this.session.localOnly,
+    );
+    this.session.images = [
+      ...(this.session.images ?? []).filter((image) => image.id !== ref.id),
+      ref,
+    ];
+    this.save();
+    return ref;
+  }
+  async editImage(
+    imageId: string,
+    operation: "crop" | "mask",
+    bounds: { x: number; y: number; width: number; height: number },
+  ): Promise<ImageReference> {
+    if (this.busy)
+      throw new AgentError("IMAGE_BUSY", "Image edits are idle-only");
+    const source = this.session.images?.find((image) => image.id === imageId);
+    if (!source)
+      throw new AgentError(
+        "IMAGE_REFERENCE",
+        "Image is not retained by this conversation",
+      );
+    const derived = await transformImage(this.paths, source, operation, bounds);
+    this.removeQueuedImage(source.id);
+    this.session.images = [
+      ...(this.session.images ?? []).filter((image) => image.id !== source.id),
+      derived,
+    ];
+    const context = normalizeConversationContext(this.session.context);
+    context.redactedImageIds = [
+      ...new Set([...(context.redactedImageIds ?? []), source.id]),
+    ];
+    context.imageIds = context.imageIds.filter((id) => id !== source.id);
+    context.imageIds.push(derived.id);
+    this.session.context = context;
+    this.session.compacted = true;
+    this.save();
+    return derived;
+  }
+  removeImage(imageId: string): void {
+    if (this.busy)
+      throw new AgentError("IMAGE_BUSY", "Image removal is idle-only");
+    const before = this.session.images ?? [];
+    if (!before.some((image) => image.id === imageId))
+      throw new AgentError(
+        "IMAGE_REFERENCE",
+        "Image is not retained by this conversation",
+      );
+    this.removeQueuedImage(imageId);
+    this.session.images = before.filter((image) => image.id !== imageId);
+    const context = normalizeConversationContext(this.session.context);
+    context.redactedImageIds = [
+      ...new Set([...(context.redactedImageIds ?? []), imageId]),
+    ];
+    context.imageIds = context.imageIds.filter((id) => id !== imageId);
+    this.session.context = context;
+    this.session.compacted = true;
+    this.save();
+  }
+  setImageComparison(firstId: string, secondId: string): void {
+    if (this.busy)
+      throw new AgentError("IMAGE_BUSY", "Image comparison order is idle-only");
+    if (firstId === secondId)
+      throw new AgentError("IMAGE_REFERENCE", "Select two different images");
+    const images = this.session.images ?? [];
+    const first = images.find((image) => image.id === firstId),
+      second = images.find((image) => image.id === secondId);
+    if (!first || !second)
+      throw new AgentError(
+        "IMAGE_REFERENCE",
+        "Both comparison images must belong to this conversation",
+      );
+    this.session.images = [
+      { ...first, comparisonOrder: 1 },
+      { ...second, comparisonOrder: 2 },
+      ...images
+        .filter((image) => image.id !== firstId && image.id !== secondId)
+        .map(({ comparisonOrder: _order, ...image }) => image),
+    ];
+    this.save();
+  }
+  private removeQueuedImage(imageId: string): void {
+    this.session.queue = this.session.queue.map((item) => ({
+      ...item,
+      images: item.images?.filter((image) => image.id !== imageId),
+    }));
+  }
+  gitStatus(): Promise<string> {
+    return readGitStatus(this.session.workspace);
   }
   private async executePrepared(
     harness: Harness,

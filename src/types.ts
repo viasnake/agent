@@ -43,6 +43,27 @@ export interface ImageReference {
   sha256: string;
   dataClass: DataClass;
   localOnly: boolean;
+  sourceId?: string;
+  transformation?: string;
+  comparisonOrder?: number;
+}
+export interface DocumentReference {
+  id: string;
+  originalName: string;
+  format: string;
+  selector: string;
+  rawSha256: string;
+  selectedSha256: string;
+  rawBytes: number;
+  selectedBytes: number;
+  locator: string;
+  partial: boolean;
+  imageIds?: string[];
+}
+export interface PreparedInput {
+  reference: DocumentReference;
+  text: string;
+  images?: ImageReference[];
 }
 export interface RuntimeImage {
   reference: ImageReference;
@@ -78,6 +99,7 @@ export interface ConversationContext {
   }>;
   sourceIds: string[];
   imageIds: string[];
+  redactedImageIds?: string[];
   originalRunIds: string[];
   workingState: {
     runId?: string;
@@ -146,6 +168,7 @@ export interface Run {
   tasks: Task[];
   inputs: string[];
   images?: ImageReference[];
+  preparedInputs?: DocumentReference[];
   checks: string[];
   mustKeep: string[];
   planAttempts: number;

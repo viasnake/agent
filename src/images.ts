@@ -264,6 +264,81 @@ export async function saveImage(
   return reference;
 }
 
+export async function transformImage(
+  paths: Paths,
+  source: ImageReference,
+  operation: "crop" | "mask",
+  bounds: { x: number; y: number; width: number; height: number },
+): Promise<ImageReference> {
+  for (const value of Object.values(bounds))
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new AgentError(
+        "IMAGE_BOUNDS",
+        "Image bounds must be non-negative integers",
+      );
+  if (!bounds.width || !bounds.height)
+    throw new AgentError(
+      "IMAGE_BOUNDS",
+      "Image crop or mask must have positive dimensions",
+    );
+  const bytes = await loadStoredImage(paths, source);
+  try {
+    const rotated = sharp(bytes, {
+      failOn: "warning",
+      limitInputPixels: maxImagePixels,
+    }).rotate();
+    const { data, info } = await rotated
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (
+      bounds.x + bounds.width > info.width ||
+      bounds.y + bounds.height > info.height
+    )
+      throw new AgentError(
+        "IMAGE_BOUNDS",
+        `Image bounds exceed the orientation-corrected ${info.width}×${info.height} image`,
+      );
+    let output: Buffer;
+    if (operation === "crop") {
+      output = await sharp(data, { raw: info })
+        .extract({
+          left: bounds.x,
+          top: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+        })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+    } else {
+      const masked = Buffer.from(data);
+      for (let y = bounds.y; y < bounds.y + bounds.height; y++)
+        for (let x = bounds.x; x < bounds.x + bounds.width; x++) {
+          const offset = (y * info.width + x) * info.channels;
+          masked.fill(0, offset, offset + Math.min(3, info.channels));
+          if (info.channels === 4) masked[offset + 3] = 255;
+        }
+      output = await sharp(masked, { raw: info })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+    }
+    const result = await saveImage(
+      paths,
+      `${source.name}-${operation}.png`,
+      output,
+      source.dataClass,
+      source.localOnly,
+    );
+    return {
+      ...result,
+      sourceId: source.id,
+      transformation: JSON.stringify({ type: operation, bounds }),
+    };
+  } catch (error) {
+    if (error instanceof AgentError) throw error;
+    throw new AgentError("IMAGE_EDIT", "Image could not be transformed safely");
+  }
+}
+
 export function validateImageReference(ref: ImageReference): void {
   if (
     !/^img-[a-f0-9]{64}$/.test(ref.id) ||

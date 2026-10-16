@@ -22,6 +22,7 @@ import {
   type Run,
   type Runtime,
   type WorkKind,
+  type PreparedInput,
 } from "./types.js";
 import {
   loadStoredImage,
@@ -34,7 +35,6 @@ import {
   errorMessage,
   id,
   privateDirectory,
-  readText,
   sha256,
 } from "./util.js";
 import { Evaluator } from "./validation.js";
@@ -46,6 +46,12 @@ import {
   snapshotWorkspace,
   verifyOriginal,
 } from "./workspace.js";
+import {
+  loadPreparedInput,
+  parseDocumentToken,
+  prepareDocument,
+} from "./documents.js";
+import { prepareGitInput } from "./git-input.js";
 export interface NewRun {
   extraPaths?: string[];
   parentRunId?: string;
@@ -66,6 +72,7 @@ export interface NewRun {
   workspace?: string;
   includeUntracked?: boolean;
   inputs?: string[];
+  preparedInputs?: PreparedInput[];
   images?: ImageReference[];
   checks?: string[];
   mustKeep?: string[];
@@ -178,6 +185,9 @@ export class Harness {
       images: images.length ? structuredClone(images) : undefined,
       checks: options.checks ?? [],
       mustKeep: options.mustKeep ?? [],
+      preparedInputs: options.preparedInputs?.map(({ reference }) =>
+        structuredClone(reference),
+      ),
       planAttempts: 0,
       repairAttempts: 0,
     };
@@ -310,25 +320,110 @@ export class Harness {
           options.extraPaths,
         );
       if (workspace) await verifyOriginal(await readSnapshot(directory));
-      for (const [index, path] of (options.inputs ?? []).entries()) {
-        if (secretPath(basename(path)))
+      const prepared = [...(options.preparedInputs ?? [])];
+      for (const token of options.inputs ?? []) {
+        if (token.startsWith("git:")) {
+          if (!workspace)
+            throw new AgentError("WORKSPACE", "Git inputs require --workspace");
+          prepared.push(
+            await prepareGitInput(
+              this.paths,
+              workspace,
+              token,
+              this.config.limits.maxInputBytes,
+              AbortSignal.timeout(30000),
+            ),
+          );
+          continue;
+        }
+        const parsed = parseDocumentToken(token),
+          path = resolve(parsed.path);
+        if (secretPath(basename(parsed.path)))
           throw new AgentError(
             "INPUT",
             "Credential-like input filenames are excluded",
           );
-        const text = await readText(
-          resolve(path),
-          this.config.limits.maxFileBytes,
+        prepared.push(
+          await prepareDocument(
+            this.paths,
+            path,
+            token,
+            this.config.limits.maxInputBytes,
+            {
+              sandbox: this.sandbox,
+              dataClass: owned.dataClass,
+              localOnly: owned.localOnly,
+              remainingImages: Math.max(
+                0,
+                maxConversationImages - (owned.images?.length ?? 0),
+              ),
+              signal: AbortSignal.timeout(30000),
+            },
+          ),
         );
-        const name = `inputs/${index + 1}-${basename(path)}`;
+      }
+      owned.preparedInputs = prepared.map(({ reference }) =>
+        structuredClone(reference),
+      );
+      let inputBytes = Buffer.byteLength(owned.objective);
+      for (const [index, input] of prepared.entries()) {
+        const loaded = await loadPreparedInput(this.paths, input.reference);
+        inputBytes += Buffer.byteLength(loaded.text);
+        if (inputBytes > this.config.limits.maxInputBytes)
+          throw new AgentError(
+            "INPUT_SIZE",
+            "Request and attachments exceed the input limit",
+          );
+        if (
+          input.reference.imageIds?.some(
+            (id) => !(input.images ?? []).some((image) => image.id === id),
+          )
+        )
+          throw new AgentError(
+            "INPUT_INTEGRITY",
+            "Prepared PDF images are missing",
+          );
+        owned.images = [
+          ...new Map(
+            [...(owned.images ?? []), ...(input.images ?? [])].map((image) => [
+              image.id,
+              image,
+            ]),
+          ).values(),
+        ];
+        if (
+          owned.images.length > maxConversationImages ||
+          owned.images.reduce((sum, image) => sum + image.bytes, 0) >
+            maxConversationImageBytes
+        )
+          throw new AgentError(
+            "IMAGE_LIMIT",
+            "Prepared document images exceed the conversation image limit",
+          );
+        const name = `inputs/${index + 1}-${input.reference.originalName}`;
         // A coding reference must not introduce an inputs/ file into the applied patch.
         if (run.kind !== "coding")
-          await atomicWrite(join(directory, "work", name), text);
-        const source = await this.store.artifact(owned, name, "source", text, {
-          input: true,
-          sourcePath: resolve(path),
-          retrievedAt: new Date().toISOString(),
-        });
+          await atomicWrite(join(directory, "work", name), loaded.text);
+        const source = await this.store.artifact(
+          owned,
+          name,
+          "source",
+          loaded.text,
+          {
+            input: true,
+            sourceId: input.reference.id,
+            sourcePath: input.reference.originalName,
+            rawSha256: input.reference.rawSha256,
+            selectedSha256: input.reference.selectedSha256,
+            format: input.reference.format,
+            selector: input.reference.selector,
+            locator: input.reference.locator,
+            rawBytes: input.reference.rawBytes,
+            selectedBytes: input.reference.selectedBytes,
+            partial: input.reference.partial,
+            retrievedAt: new Date().toISOString(),
+          },
+        );
         owned.inputs.push(source.id);
       }
       await atomicWrite(

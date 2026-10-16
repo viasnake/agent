@@ -218,6 +218,33 @@ test("context archive reads verify the digest without returning unbounded data",
   }
 });
 
+test("redacted images make archived provider payload unavailable to model tools", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  try {
+    const run = await f.harness.create({
+      kind: "chat",
+      objective: "describe image",
+    });
+    run.contextState = {
+      ...normalizeConversationContext(run.contextState),
+      redactedImageIds: ["image-original"],
+    };
+    const { archiveId } = await archiveContext(f.p, run, {
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image", data: "unmasked-payload" }],
+        },
+      ],
+    });
+    await assert.rejects(readContextArchive(f.p, run, archiveId), {
+      code: "CONTEXT_ARCHIVE_REDACTED",
+    });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("automatic request transform sends a smaller context and retains the original archive", async () => {
   const config = configSchema.parse(testConfig());
   config.models.worker!.contextWindow = 2048;

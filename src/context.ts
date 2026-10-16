@@ -23,6 +23,7 @@ export function emptyConversationContext(): ConversationContext {
     instructions: [],
     sourceIds: [],
     imageIds: [],
+    redactedImageIds: [],
     originalRunIds: [],
     workingState: {
       checks: [],
@@ -50,6 +51,7 @@ export function normalizeConversationContext(
     instructions: value.instructions ?? [],
     sourceIds: value.sourceIds ?? [],
     imageIds: value.imageIds ?? [],
+    redactedImageIds: value.redactedImageIds ?? [],
     originalRunIds: value.originalRunIds ?? [],
     workingState: {
       ...fallback.workingState,
@@ -446,6 +448,11 @@ export async function readContextArchive(
   maxBytes = 32_000,
   start = 0,
 ): Promise<string> {
+  if (run.contextState?.redactedImageIds?.length)
+    throw new AgentError(
+      "CONTEXT_ARCHIVE_REDACTED",
+      "Archived provider context is unavailable after an image was removed or masked",
+    );
   if (
     !Number.isSafeInteger(start) ||
     start < 0 ||

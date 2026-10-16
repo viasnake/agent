@@ -548,6 +548,7 @@ export class TerminalApp {
     if (
       !preview.attachments.length &&
       !preview.images.length &&
+      !preview.documents.length &&
       !preview.accessOverride
     )
       return true;
@@ -566,14 +567,20 @@ export class TerminalApp {
         ...preview.attachments
           .filter((ref) => !ref.mimeType)
           .map((ref) => `資料: ${ref.path} (${ref.bytes} bytes)`),
+        ...preview.documents.map(
+          (ref) =>
+            `選択: ${ref.format} · ${ref.locator}${ref.partial ? " · partial" : ""}\nSHA-256: ${ref.selectedSha256}`,
+        ),
         ...preview.images.map(
           (ref, index) =>
             `画像 ${index + 1}: ${ref.name} · ${ref.mimeType} · ${ref.width}×${ref.height} · ${ref.bytes} bytes\n参照ID: ${ref.id}`,
         ),
         `送信区分: ${preview.dataClass}${preview.localOnly ? " / local-only" : ""}`,
-        ...(preview.images.length
+        ...(preview.images.length || preview.documents.length
           ? [
-              "保存済み画像も含めて送信します。",
+              ...(preview.images.length
+                ? ["保存済み画像も含めて送信します。"]
+                : []),
               "送信先（自動振り分けを含む候補）:",
               ...preview.destinations,
             ]
@@ -788,7 +795,7 @@ export class TerminalApp {
             Object.values(actions)
               .map((a) => `${a.keys.join(" / ")} — ${a.description}`)
               .join("\n") +
-            "\nShift+Enter — 改行\nEnter — 送信／実行中は追加指示\nTab — コマンド・パス・@ファイル補完\n↑/↓ — 入力履歴\nCtrl+C の空入力、Ctrl+D の空入力、/quit は保存して終了。作業中のみ確認します。\n/tools list — 保存済みツール結果を選ぶ\n/expand [番号] — 長文の続きを同じ場所に表示",
+            "\nShift+Enter — 改行\nEnter — 送信／実行中は追加指示\nTab — コマンド・パス・@ファイル補完\n↑/↓ — 入力履歴\nCtrl+C の空入力、Ctrl+D の空入力、/quit は保存して終了。作業中のみ確認します。\n/tools list — 保存済みツール結果を選ぶ\n/expand [番号] — 長文の続きを同じ場所に表示\n/clipboard — 画像を非公開領域にステージ\n/git — 読み取り専用の状態を参照\n/images crop|mask|remove|compare — 画像を編集・除外",
         );
         break;
       case "new":
@@ -978,17 +985,53 @@ export class TerminalApp {
         break;
       }
       case "images":
-        this.showDetails(
-          "保存済み画像",
-          app.session.images?.length
-            ? app.session.images
-                .map(
-                  (ref, index) =>
-                    `${index + 1}. ${ref.name}\n${ref.id}\n${ref.mimeType} · ${ref.width}×${ref.height} · ${ref.bytes} bytes\n元画像: ${app.imagePath(ref)}`,
-                )
-                .join("\n\n")
-            : '画像はありません。@画像.png または @"空白を含む画像.jpg" で添付できます。SSH では接続先の作業ディレクトリからの相対パスを指定してください。',
-        );
+        if (args[0] === "remove" && args[1]) app.removeImage(args[1]);
+        else if (
+          (args[0] === "crop" || args[0] === "mask") &&
+          args[1] &&
+          args.length === 6
+        ) {
+          const [x, y, width, height] = args.slice(2).map(Number);
+          if (![x, y, width, height].every(Number.isSafeInteger))
+            throw new AgentError(
+              "IMAGE_BOUNDS",
+              "Use integer x y width height bounds",
+            );
+          const image = await app.editImage(args[1], args[0], {
+            x: x!,
+            y: y!,
+            width: width!,
+            height: height!,
+          });
+          this.notice = `${args[0]} image saved as ${image.id}; the source was removed from active context.`;
+        } else if (args[0] === "compare" && args[1] && args[2])
+          app.setImageComparison(args[1], args[2]);
+        else if (argument)
+          this.notice =
+            "/images remove <id> | crop|mask <id> <x> <y> <width> <height> | compare <before-id> <after-id>";
+        else
+          this.showDetails(
+            "保存済み画像",
+            app.session.images?.length
+              ? app.session.images
+                  .map(
+                    (ref, index) =>
+                      `${index + 1}. ${ref.name}\n${ref.id}\n${ref.mimeType} · ${ref.width}×${ref.height} · ${ref.bytes} bytes${ref.comparisonOrder ? ` · comparison ${ref.comparisonOrder}` : ""}${ref.transformation ? `\n変換: ${ref.transformation}` : ""}\n元画像: ${app.imagePath(ref)}`,
+                  )
+                  .join("\n\n")
+              : '画像はありません。@画像.png または @"空白を含む画像.jpg" で添付できます。SSH では scp/sftp で workspace に転送してください。',
+          );
+        break;
+      case "clipboard":
+        try {
+          const image = await app.stageClipboardImage();
+          this.notice = `画像を非公開領域に保存しました (${image.id})。通常の依頼を入力すると、送信前にプレビュー確認します。`;
+        } catch (error) {
+          this.notice = errorMessage(error);
+        }
+        break;
+      case "git":
+        this.showDetails("読み取り専用 Git 状態", await app.gitStatus());
         break;
       case "artifacts":
       case "tools":

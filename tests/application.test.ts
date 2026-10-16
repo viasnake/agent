@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   Application,
@@ -148,6 +148,11 @@ test("repository exploration stays read-only across planning and coding-copy tra
     assert.equal(explanationRun.kind, "coding");
     assert.equal(explanationRun.access, "read-only");
     assert.equal(explanationRun.state, "succeeded", explanationRun.reason);
+    assert.match(
+      runtime.requests[3]!.system,
+      /Answer the user in their language/,
+    );
+    assert.doesNotMatch(runtime.requests[3]!.system, /result JSON/i);
     assert.equal(app.session.workRunId, codingRun.id);
     assert.equal(probes, probesBeforeReview);
     assert.equal(checks, checksBeforeReview);
@@ -933,7 +938,10 @@ test("research sources and documents survive a writing follow-up with stable cit
   try {
     await writeFile(join(f.root, "note.md"), "原文");
     await app.initialize();
-    await app.submit("調査してください @note.md");
+    const input = "調査してください @note.md",
+      preview = await app.previewInput(input);
+    await unlink(join(f.root, "note.md"));
+    await app.submit(input, "next", preview);
     await app.waitForIdle();
     assert.equal(
       app.currentRun()?.state,

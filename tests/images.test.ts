@@ -138,6 +138,50 @@ test("validates static PNG, JPEG and WebP and rejects malformed, mismatched, ani
   await assert.rejects(validateImage(animated));
 });
 
+test("masked image derivatives replace originals in the next provider context", async () => {
+  let derivativeId = "";
+  const runtime = new ScriptedRuntime(async (request) => {
+    assert.deepEqual(
+      request.images?.map((image) => image.reference.id),
+      [derivativeId],
+    );
+    return "Done";
+  });
+  const f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  f.config.models.worker!.images = true;
+  try {
+    await app.initialize();
+    const source = await saveImage(
+      f.p,
+      "source.png",
+      (await fixtures())[0],
+      "private",
+      false,
+    );
+    app.session.images = [source];
+    const derivative = await app.editImage(source.id, "mask", {
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    });
+    derivativeId = derivative.id;
+    assert.ok(!app.session.images?.some((image) => image.id === source.id));
+    await app.submit("Describe this image");
+    await app.waitForIdle();
+    assert.equal(
+      app.currentRun()?.state,
+      "succeeded",
+      app.currentRun()?.reason,
+    );
+    assert.ok(runtime.requests.length > 0);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
 test("rejects APNG animation control chunks", async () => {
   const apng = await apngFixture();
   const metadata = await sharp(apng).metadata();

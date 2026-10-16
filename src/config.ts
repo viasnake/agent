@@ -149,6 +149,7 @@ export interface Paths {
   database: string;
   runs: string;
   auth: string;
+  attachments: string;
 }
 export function paths(home?: string): Paths {
   const root = resolve(home ?? process.env.AGENT_HOME ?? defaultHome());
@@ -158,6 +159,7 @@ export function paths(home?: string): Paths {
     database: join(root, "state.sqlite"),
     runs: join(root, "runs"),
     auth: join(root, "auth"),
+    attachments: join(root, "attachments"),
   };
 }
 export function validateConfig(input: unknown): Config {
@@ -323,7 +325,8 @@ export async function loadConfig(p: Paths): Promise<Config> {
 export const configHash = (config: Config) => sha256(canonical(config));
 export async function initialize(p: Paths, template?: unknown): Promise<void> {
   await privateDirectory(p.home);
-  for (const path of [p.runs, p.auth]) await privateDirectory(path);
+  for (const path of [p.runs, p.auth, p.attachments])
+    await privateDirectory(path);
   if (
     await lstat(p.config).then(
       () => true,

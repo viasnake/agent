@@ -58,6 +58,7 @@ export class Sandbox {
     command: string[],
     signal: AbortSignal,
     readOnly: boolean,
+    limits?: { timeoutMs: number; maxBytes: number },
   ): Promise<ProcessResult> {
     signal.throwIfAborted();
     const invocation = await this.invocation(workspace, command, readOnly);
@@ -65,8 +66,9 @@ export class Sandbox {
       return await this.processRunner(invocation.command, invocation.args, {
         signal,
         env: invocation.env,
-        timeoutMs: this.config.commandTimeoutSeconds * 1000,
-        maxBytes: this.config.maxOutputBytes,
+        timeoutMs:
+          limits?.timeoutMs ?? this.config.commandTimeoutSeconds * 1000,
+        maxBytes: limits?.maxBytes ?? this.config.maxOutputBytes,
       });
     } finally {
       await invocation.cleanup?.();
@@ -80,6 +82,20 @@ export class Sandbox {
     readOnly = false,
   ): Promise<ProcessResult> {
     return this.run(workspace, ["/bin/sh", "-c", command], signal, readOnly);
+  }
+
+  async executeArgs(
+    workspace: string,
+    command: string[],
+    signal: AbortSignal,
+    readOnly = true,
+    maxBytes = this.config.maxOutputBytes,
+    timeoutMs = 30000,
+  ): Promise<ProcessResult> {
+    return this.run(workspace, command, signal, readOnly, {
+      timeoutMs,
+      maxBytes,
+    });
   }
 
   async verifyExecutable(
