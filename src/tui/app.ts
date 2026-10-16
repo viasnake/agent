@@ -545,9 +545,24 @@ export class TerminalApp {
   private async confirmInput(
     preview: Awaited<ReturnType<Application["previewInput"]>>,
   ): Promise<boolean> {
-    if (!preview.attachments.length && !preview.images.length) return true;
+    if (
+      !preview.attachments.length &&
+      !preview.images.length &&
+      !preview.accessOverride
+    )
+      return true;
     return this.confirm(
       [
+        ...(preview.accessOverride
+          ? [
+              `一回限りの access override: ${preview.accessOverride}（確認後、この送信で消費）`,
+              ...(preview.accessOverride !== preview.access
+                ? [
+                    "現在の依頼に明示的な禁止があるため、有効 access は read-only です。",
+                  ]
+                : []),
+            ]
+          : []),
         ...preview.attachments
           .filter((ref) => !ref.mimeType)
           .map((ref) => `資料: ${ref.path} (${ref.bytes} bytes)`),
@@ -871,6 +886,13 @@ export class TerminalApp {
         }
         break;
       }
+      case "access": {
+        if (argument === "read-only" || argument === "change") {
+          app.setAccessOverride(argument);
+          this.notice = `次の送信1回のみ ${argument} を使用します。確認後に消費されます。`;
+        } else this.notice = "/access read-only|change";
+        break;
+      }
       case "history":
         await this.history();
         break;
@@ -1012,11 +1034,22 @@ export class TerminalApp {
       case "context": {
         if (args[0] === "read" && args[1])
           await this.show(
-            await app.readContext(args[1]),
+            await app.readContext(
+              args[1],
+              args[2] === undefined ? 0 : Number(args[2]),
+              args[3] === undefined ? 32_000 : Number(args[3]),
+            ),
             "保存済みコンテキスト",
           );
         else if (args[0] === "original" && args[1])
-          await this.show(app.contextOriginal(Number(args[1])), "会話原文");
+          await this.show(
+            app.contextOriginal(
+              Number(args[1]),
+              args[2] === undefined ? 0 : Number(args[2]),
+              args[3] === undefined ? 32_000 : Number(args[3]),
+            ),
+            "会話原文",
+          );
         else if (args[0] === "edit" && args[1]) {
           const text =
             args.slice(2).join(" ") || (await this.prompt("メモ", ""));

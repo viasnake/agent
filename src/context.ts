@@ -152,8 +152,12 @@ function isErrorResult(message: Record<string, unknown>): boolean {
   return message.isError === true || message.error === true;
 }
 
+function archiveMarker(archiveId: string): string {
+  return `[Older tool result archived as ${archiveId}; use read_context to retrieve it.]`;
+}
+
 function shorten(text: string, archiveId: string): string {
-  const marker = `[Older tool result archived as ${archiveId}; use read_context to retrieve it.]`;
+  const marker = archiveMarker(archiveId);
   const room = Math.max(0, excerptBytes - Buffer.byteLength(marker));
   if (Buffer.byteLength(text) <= room) return text;
   const first = Math.floor(room / 2);
@@ -164,10 +168,22 @@ function shorten(text: string, archiveId: string): string {
   return `${head}\n…\n${tail}\n${marker}`;
 }
 
-function compactMessage(message: Record<string, unknown>, archiveId: string) {
+function compactMessage(
+  message: Record<string, unknown>,
+  archiveId: string,
+  level: "excerpt" | "marker",
+) {
+  const compactText = (text: string) => {
+    const marker = archiveMarker(archiveId);
+    if (level === "marker")
+      return Buffer.byteLength(text) <= Buffer.byteLength(marker)
+        ? text
+        : marker;
+    return shorten(text, archiveId);
+  };
   const content = message.content;
   if (typeof content === "string")
-    return { ...message, content: shorten(content, archiveId) };
+    return { ...message, content: compactText(content) };
   if (!Array.isArray(content)) return message;
   return {
     ...message,
@@ -180,10 +196,7 @@ function compactMessage(message: Record<string, unknown>, archiveId: string) {
       )
         return {
           ...(part as Record<string, unknown>),
-          text: shorten(
-            (part as Record<string, unknown>).text as string,
-            archiveId,
-          ),
+          text: compactText((part as Record<string, unknown>).text as string),
         };
       return part;
     }),
@@ -193,6 +206,7 @@ function compactMessage(message: Record<string, unknown>, archiveId: string) {
 function compactCandidate(
   context: unknown,
   archiveId: string,
+  targetBytes: number,
 ): { value: unknown; compacted: boolean; protectedValue: unknown } {
   if (!context || typeof context !== "object")
     return { value: context, compacted: false, protectedValue: context };
@@ -213,25 +227,33 @@ function compactCandidate(
         : last,
     -1,
   );
+  const eligible = messages.map(
+    (item, index) =>
+      !!item &&
+      typeof item === "object" &&
+      isToolResult(item as Record<string, unknown>) &&
+      index !== lastTool &&
+      !isErrorResult(item as Record<string, unknown>),
+  );
   let compacted = false;
-  const protectedMessages = messages.map((item, index) => {
-    if (
-      !item ||
-      typeof item !== "object" ||
-      !isToolResult(item as Record<string, unknown>) ||
-      index === lastTool ||
-      isErrorResult(item as Record<string, unknown>)
-    )
-      return item;
-    const replacement = compactMessage(
-      item as Record<string, unknown>,
-      archiveId,
-    );
-    if (canonical(replacement) === canonical(item)) return item;
-    compacted = true;
-    return replacement;
-  });
-  (value as Record<string, unknown>).messages = protectedMessages;
+  for (const level of ["excerpt", "marker"] as const) {
+    for (let index = 0; index < messages.length; index++) {
+      if (!eligible[index]) continue;
+      const current = (value as Record<string, unknown>).messages as unknown[];
+      const item = current[index];
+      if (!item || typeof item !== "object") continue;
+      const replacement = compactMessage(
+        item as Record<string, unknown>,
+        archiveId,
+        level,
+      );
+      if (canonical(replacement) === canonical(item)) continue;
+      current[index] = replacement;
+      compacted = true;
+      if (estimateContextBytes(value) <= targetBytes) break;
+    }
+    if (estimateContextBytes(value) <= targetBytes) break;
+  }
   const protectedValue = structuredClone(context);
   if (Array.isArray((protectedValue as Record<string, unknown>).messages))
     (protectedValue as Record<string, unknown>).messages = messages.filter(
@@ -350,7 +372,11 @@ export async function compactContext(
       "CONTEXT_ARCHIVE",
       "Provider context is not serializable",
     );
-  const candidate = compactCandidate(context, sha256(serialized));
+  const candidate = compactCandidate(
+    context,
+    sha256(serialized),
+    budget.targetBytes,
+  );
   if (!candidate.compacted && beforeBytes <= budget.usableBytes) {
     if (!options.force) return undefined;
     const archive = await archiveContext(paths, run, context);

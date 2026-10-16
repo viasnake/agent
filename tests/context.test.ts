@@ -113,6 +113,84 @@ test("context archives are private, hash-idempotent, and compact only older tool
   }
 });
 
+test("compaction falls back to bounded archive markers to reach its target", async () => {
+  const config = configSchema.parse(testConfig());
+  config.models.worker!.contextWindow = 14_000;
+  config.models.worker!.maxOutputTokens = 1_000;
+  const f = await fixture(new ScriptedRuntime(async () => "unused"), config);
+  try {
+    const run = await f.harness.create({
+      kind: "chat",
+      objective: "inspect tool history",
+    });
+    const messages: Record<string, unknown>[] = [
+      { role: "user", content: "Preserve the original request." },
+    ];
+    for (let index = 0; index < 24; index++) {
+      const callId = `call-${index}`;
+      messages.push({
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: callId, function: { name: "read_file" } }],
+      });
+      messages.push({
+        role: "tool",
+        tool_call_id: callId,
+        content: "verbose result ".repeat(140),
+      });
+    }
+    messages.push(
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "call-latest", function: { name: "read_file" } }],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call-latest",
+        content: "latest result remains verbatim",
+      },
+    );
+    const context = { messages };
+    const budget = contextBudget(
+      f.config,
+      config.models.worker!.contextWindow,
+      config.models.worker!.maxOutputTokens,
+    );
+    const compacted = await compactContext(f.p, run, context, {
+      config: f.config,
+      contextWindow: config.models.worker!.contextWindow,
+      maxOutputTokens: config.models.worker!.maxOutputTokens,
+      trigger: "automatic",
+    });
+    assert.ok(compacted);
+    assert.ok(compacted.record.afterBytes <= budget.targetBytes);
+    const afterMessages = (compacted.context as typeof context).messages;
+    assert.equal(afterMessages[0]!.content, messages[0]!.content);
+    assert.equal(
+      afterMessages.at(-1)!.content,
+      "latest result remains verbatim",
+    );
+    assert.ok(
+      afterMessages.some(
+        (message) =>
+          message.role === "tool" &&
+          String(message.content).includes("Older tool result archived"),
+      ),
+    );
+    assert.deepEqual(
+      afterMessages
+        .filter((message) => message.role === "tool")
+        .map((message) => message.tool_call_id),
+      messages
+        .filter((message) => message.role === "tool")
+        .map((message) => message.tool_call_id),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("context archive reads verify the digest without returning unbounded data", async () => {
   const f = await fixture(new ScriptedRuntime(async () => "unused"));
   try {
@@ -144,7 +222,7 @@ test("automatic request transform sends a smaller context and retains the origin
   const config = configSchema.parse(testConfig());
   config.models.worker!.contextWindow = 2048;
   config.models.worker!.maxOutputTokens = 256;
-  const context = providerContext("verbose log ".repeat(2000));
+  const context = providerContext("verbose log ".repeat(5000));
   const runtime = new ScriptedRuntime(async (request) => {
     const transformed = await request.transformContext!(
       context,
@@ -173,6 +251,72 @@ test("automatic request transform sends a smaller context and retains the origin
       await app.readContext(record.archiveId),
       /verbose log verbose log/,
     );
+    assert.ok((await app.readContext(record.archiveId, 32_000, 12_000)).length);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("tool-free chat exposes read_context only when conversation archives exist", async () => {
+  let archiveId: string | undefined;
+  const runtime = new ScriptedRuntime(async (request, index) => {
+    if (index === 0) {
+      assert.equal(request.tools.length, 0);
+      return "hello";
+    }
+    const readContext = request.tools.find(
+      (tool) => tool.name === "read_context",
+    );
+    assert.ok(readContext);
+    assert.equal(request.tools.length, 1);
+    assert.match(
+      await readContext.execute(
+        {
+          archiveId: archiveId!,
+          start: 0,
+          bytes: 1000,
+        },
+        request.signal,
+      ),
+      /archived greeting history/,
+    );
+    return "history retrieved";
+  });
+  const f = await fixture(runtime);
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  try {
+    await app.initialize();
+    await app.submit("hello");
+    await app.waitForIdle();
+    const run = f.store.get(app.currentRun()!.id);
+    const archive = await archiveContext(f.p, run, {
+      messages: [{ role: "user", content: "archived greeting history" }],
+    });
+    archiveId = archive.archiveId;
+    const state = normalizeConversationContext(app.session.context);
+    state.compactions = [
+      {
+        id: archive.archiveId,
+        archiveId: archive.archiveId,
+        at: Date.now(),
+        beforeBytes: archive.bytes,
+        afterBytes: archive.bytes,
+        trigger: "manual",
+        heuristic: "bytes/3+images*8192",
+      },
+    ];
+    app.session.context = state;
+    app.save();
+    await app.submit("continue");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.state, "succeeded");
   } finally {
     await app.close();
     await f.cleanup();

@@ -50,6 +50,7 @@ export interface NewRun {
   extraPaths?: string[];
   parentRunId?: string;
   snapshotRunId?: string;
+  sourceRunIds?: string[];
   context?: string;
   contextState?: ConversationContext;
   conversationId?: string;
@@ -104,6 +105,11 @@ export class Harness {
       throw new AgentError("INPUT", "An objective is required");
     if (Buffer.byteLength(options.objective) > this.config.limits.maxInputBytes)
       throw new AgentError("INPUT_SIZE", "Objective exceeds the input limit");
+    if (options.parentRunId && options.snapshotRunId)
+      throw new AgentError(
+        "CONTINUATION",
+        "A run cannot continue and snapshot another run at the same time",
+      );
     const workspace = options.workspace
       ? await realpath(resolve(options.workspace))
       : undefined;
@@ -175,6 +181,95 @@ export class Harness {
       planAttempts: 0,
       repairAttempts: 0,
     };
+    if (options.snapshotRunId && run.access !== "read-only")
+      throw new AgentError(
+        "CONTINUATION",
+        "A working-copy snapshot is only available to read-only runs",
+      );
+    const sourceRunId = options.snapshotRunId ?? options.parentRunId;
+    const sourceRun = sourceRunId
+      ? (this.store.assertIdle(sourceRunId), this.store.get(sourceRunId))
+      : undefined;
+    if (sourceRun) {
+      if (
+        ["public", "private", "restricted"].indexOf(run.dataClass) <
+          ["public", "private", "restricted"].indexOf(sourceRun.dataClass) ||
+        (sourceRun.localOnly && !run.localOnly)
+      )
+        throw new AgentError(
+          "DISCLOSURE_DENIED",
+          "A continued working copy cannot widen disclosure permissions",
+        );
+      if (
+        this.store
+          .operations(sourceRun.id)
+          .some(
+            (operation) =>
+              ["prepared", "dispatched", "unknown"].includes(
+                operation.status,
+              ) ||
+              (operation.name === "apply" && operation.status === "completed"),
+          )
+      )
+        throw new AgentError(
+          "UNKNOWN_OPERATION",
+          "Reconcile pending operations or refresh the applied baseline before continuing",
+        );
+      if (options.snapshotRunId) {
+        if (
+          !sourceRun.prepared ||
+          sourceRun.kind !== "coding" ||
+          sourceRun.workspace !== workspace
+        )
+          throw new AgentError(
+            "CONTINUATION",
+            "Latest coding copy cannot be used as a read-only snapshot",
+          );
+      } else if (
+        !sourceRun.prepared ||
+        sourceRun.workspace !== workspace ||
+        (sourceRun.kind !== run.kind &&
+          !(
+            ["writing", "research"].includes(sourceRun.kind) &&
+            ["writing", "research"].includes(run.kind)
+          ))
+      )
+        throw new AgentError(
+          "CONTINUATION",
+          "Previous working copy does not match this request",
+        );
+    }
+    const conversationSourceRuns = [];
+    for (const sourceRunId of new Set(options.sourceRunIds ?? [])) {
+      this.store.assertIdle(sourceRunId);
+      const linkedRun = this.store.get(sourceRunId);
+      const linked =
+        options.conversationId &&
+        this.store.db
+          .prepare(
+            "SELECT 1 FROM conversation_runs WHERE session_id=? AND run_id=?",
+          )
+          .get(options.conversationId, sourceRunId);
+      if (
+        !linked ||
+        (linkedRun.conversationId &&
+          linkedRun.conversationId !== options.conversationId)
+      )
+        throw new AgentError(
+          "SOURCE",
+          "Source references must belong to this conversation",
+        );
+      if (
+        ["public", "private", "restricted"].indexOf(run.dataClass) <
+          ["public", "private", "restricted"].indexOf(linkedRun.dataClass) ||
+        (linkedRun.localOnly && !run.localOnly)
+      )
+        throw new AgentError(
+          "DISCLOSURE_DENIED",
+          "A source reference cannot widen disclosure permissions",
+        );
+      conversationSourceRuns.push(linkedRun);
+    }
     await privateDirectory(this.paths.runs);
     this.store.create(run);
     const owned = this.store.claim(run.id),
@@ -189,70 +284,23 @@ export class Harness {
     heartbeat.unref();
     try {
       await privateDirectory(directory);
+      for (const linkedRun of conversationSourceRuns)
+        this.store.inheritSources(linkedRun.id, owned.id, true);
       if (options.snapshotRunId) {
-        this.store.assertIdle(options.snapshotRunId);
-        const source = this.store.get(options.snapshotRunId);
-        if (
-          !source.prepared ||
-          source.kind !== "coding" ||
-          source.workspace !== workspace
-        )
-          throw new AgentError(
-            "CONTINUATION",
-            "Latest coding copy cannot be used as a read-only snapshot",
-          );
         await continueWorkspace(
-          this.store.runDir(source.id),
+          this.store.runDir(sourceRun!.id),
           directory,
           this.config,
         );
-        this.store.inheritSources(source.id, owned.id);
+        this.store.inheritSources(sourceRun!.id, owned.id);
       } else if (options.parentRunId) {
-        this.store.assertIdle(options.parentRunId);
-        const parent = this.store.get(options.parentRunId);
-        if (
-          ["public", "private", "restricted"].indexOf(run.dataClass) <
-            ["public", "private", "restricted"].indexOf(parent.dataClass) ||
-          (parent.localOnly && !run.localOnly)
-        )
-          throw new AgentError(
-            "DISCLOSURE_DENIED",
-            "A continued working copy cannot widen disclosure permissions",
-          );
-        if (
-          !parent.prepared ||
-          parent.workspace !== workspace ||
-          (parent.kind !== run.kind &&
-            !(
-              ["writing", "research"].includes(parent.kind) &&
-              ["writing", "research"].includes(run.kind)
-            ))
-        )
-          throw new AgentError(
-            "CONTINUATION",
-            "Previous working copy does not match this request",
-          );
-        if (
-          this.store
-            .operations(parent.id)
-            .some(
-              (o) =>
-                o.status === "unknown" ||
-                o.status === "dispatched" ||
-                (o.name === "apply" && o.status === "completed"),
-            )
-        )
-          throw new AgentError(
-            "UNKNOWN_OPERATION",
-            "Reconcile pending operations or refresh the applied baseline before continuing",
-          );
         await continueWorkspace(
-          this.store.runDir(parent.id),
+          this.store.runDir(sourceRun!.id),
           directory,
           this.config,
         );
         // Source IDs remain stable so existing citations continue to resolve.
-        this.store.inheritSources(parent.id, owned.id);
+        this.store.inheritSources(sourceRun!.id, owned.id);
       } else
         await snapshotWorkspace(
           directory,
@@ -424,12 +472,19 @@ export class Harness {
           task.result = undefined;
         }
       }
-      if (run.kind === "coding" && !run.checks.length)
+      if (
+        run.access !== "read-only" &&
+        run.kind === "coding" &&
+        !run.checks.length
+      )
         throw new AgentError(
           "CHECK_CONFIG",
           "Coding requires at least one --check from the trusted configuration",
         );
-      if (run.kind === "coding" || run.checks.length) {
+      if (
+        run.access !== "read-only" &&
+        (run.kind === "coding" || run.checks.length)
+      ) {
         const probe = await this.sandbox.probe(work);
         if (!probe.ok) throw new AgentError("SANDBOX", probe.detail);
       }
@@ -463,6 +518,21 @@ export class Harness {
             "UNKNOWN_OPERATION",
             "An operation needs reconciliation before validation",
           );
+        if (run.access === "read-only") {
+          await closeResources();
+          if (
+            elapsed + Date.now() - started >=
+            this.config.limits.maxSeconds * 1000
+          ) {
+            timedOut = true;
+            controller.abort();
+          }
+          if (this.store.cancelRequested(run.id)) controller.abort();
+          controller.signal.throwIfAborted();
+          this.store.transition(run, "succeeded");
+          this.notify("succeeded", { runId: run.id });
+          return run;
+        }
         this.store.transition(run, "validating");
         this.notify("validation_started", {
           runId: run.id,
@@ -563,6 +633,8 @@ export class Harness {
     feedback: string,
     work: string,
   ): Promise<void> {
+    if (run.access === "read-only")
+      throw new AgentError("TASK_FAILED", feedback);
     const fingerprint = sha256(
       canonical({
         files: await inventory(work, this.config.limits.maxWorkspaceBytes),

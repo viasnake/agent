@@ -28,6 +28,7 @@ export class Evaluator {
     ) => void = () => {},
   ) {}
   async validate(run: Run, signal: AbortSignal): Promise<CheckResult[]> {
+    if (run.access === "read-only") return [];
     const directory = this.store.runDir(run.id),
       work = join(directory, "work");
     const results: CheckResult[] = [];
@@ -227,6 +228,7 @@ export class Evaluator {
     return results;
   }
   async verifyPublished(run: Run): Promise<void> {
+    if (run.access === "read-only") return;
     for (const artifact of this.store.artifacts(run.id))
       await this.store.content(artifact);
     const directory = this.store.runDir(run.id),

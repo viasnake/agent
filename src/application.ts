@@ -78,6 +78,7 @@ export interface InputPreview {
   dataClass: DataClass;
   localOnly: boolean;
   access: RequestAccess;
+  accessOverride?: RequestAccess;
 }
 interface InputSnapshot {
   text: string;
@@ -88,20 +89,21 @@ interface InputSnapshot {
   dataClass: DataClass;
   localOnly: boolean;
   access: RequestAccess;
+  accessOverride?: RequestAccess;
   kind: WorkKind;
   strategy: Run["mode"];
   model?: string;
   reviewer?: string;
 }
+const explicitReadOnly =
+  /まだ(?:は)?変更しない|変更(?:は)?せず|変更(?:は)?しない|コードを変更しないで|修正せず|変更しないで|do not (?:change|modify|edit|write|implement)|don't (?:change|modify|edit|write|implement)|without (?:changing|modifying|editing|writing|implementing)|no (?:changes|edits|modifications)/i;
+const exploratoryRequest =
+  /\b(?:explain|review|plan|outline|describe|analy[sz]e|summari[sz]e|how to|how do i|what is|why does|suggest|recommend)\b|説明して|説明を|修正案|レビューして|レビュー|計画して|計画を|提案して/i;
 export function inferAccess(
   text: string,
   previous: RequestAccess = "read-only",
 ): RequestAccess {
-  if (
-    /まだ(?:は)?変更しない|変更せず|変更はしない|do not change|without changing|no changes/i.test(
-      text,
-    )
-  )
+  if (explicitReadOnly.test(text) || exploratoryRequest.test(text))
     return "read-only";
   if (
     /実装して|修正して|変更して|作って|作成して|調査して|整文して|執筆して|追加して|削除して|直して|\b(?:fix|implement|refactor|add|remove|change|write|draft)\b/i.test(
@@ -113,6 +115,14 @@ export function inferAccess(
     /^(次に|続け|それ|これも|also\b|next\b|continue\b)/i.test(text)
     ? "change"
     : "read-only";
+}
+function effectiveAccess(
+  text: string,
+  previous: RequestAccess,
+  override?: RequestAccess,
+): RequestAccess {
+  if (explicitReadOnly.test(text)) return "read-only";
+  return override ?? inferAccess(text, previous);
 }
 function repositoryIntent(text: string): boolean {
   return /repo|repository|codebase|source|file|review|explain|plan|構成|リポジトリ|コード|ファイル|レビュー|説明|計画|調べ/i.test(
@@ -168,6 +178,7 @@ export class Application extends EventEmitter {
   private heartbeat?: NodeJS.Timeout;
   private closed = false;
   private readonly previews = new WeakMap<InputPreview, InputSnapshot>();
+  private accessOverride?: RequestAccess;
   constructor(
     public config: Config,
     readonly paths: Paths,
@@ -368,10 +379,12 @@ export class Application extends EventEmitter {
       this.session.kind === "auto"
         ? inferKind(text, previous?.kind)
         : this.session.kind;
-    const access = inferAccess(
-      text,
-      previous?.access ?? this.session.access ?? "read-only",
-    );
+    const accessOverride = this.accessOverride,
+      access = effectiveAccess(
+        text,
+        previous?.access ?? this.session.access ?? "read-only",
+        accessOverride,
+      );
     const binding = sha256(
       canonical({
         conversation: this.session.id,
@@ -384,6 +397,7 @@ export class Application extends EventEmitter {
         model: this.session.model,
         reviewer: this.session.reviewer,
         access,
+        accessOverride,
         imageIds: images.map((ref) => ref.id),
       }),
     );
@@ -400,6 +414,7 @@ export class Application extends EventEmitter {
       model: this.session.model,
       reviewer: this.session.reviewer,
       access,
+      accessOverride,
     };
   }
   async previewInput(text: string): Promise<InputPreview> {
@@ -413,9 +428,16 @@ export class Application extends EventEmitter {
       dataClass: snapshot.dataClass,
       localOnly: snapshot.localOnly,
       access: snapshot.access,
+      accessOverride: snapshot.accessOverride,
     };
     this.previews.set(preview, snapshot);
     return preview;
+  }
+  setAccessOverride(access: RequestAccess): void {
+    this.accessOverride = access;
+    this.publish("notice", {
+      text: `次の送信1回のみ access を ${access} に上書きします。現在の依頼に明示的な禁止表現があれば read-only が優先されます。`,
+    });
   }
   private imageDestinations(
     images: ImageReference[],
@@ -545,7 +567,8 @@ export class Application extends EventEmitter {
       canonical(preview.images) !== canonical(snapshot.images) ||
       preview.dataClass !== snapshot.dataClass ||
       preview.localOnly !== snapshot.localOnly ||
-      preview.access !== snapshot.access
+      preview.access !== snapshot.access ||
+      preview.accessOverride !== snapshot.accessOverride
     )
       throw new AgentError(
         "IMAGE_PREVIEW",
@@ -587,20 +610,24 @@ export class Application extends EventEmitter {
         model: this.session.model,
         reviewer: this.session.reviewer,
         access: snapshot.access,
+        accessOverride: snapshot.accessOverride,
         imageIds: snapshot.images.map((ref) => ref.id),
       }),
     );
+    const effective = effectiveAccess(
+      text,
+      previous?.access ?? this.session.access ?? "read-only",
+      this.accessOverride,
+    );
     if (
-      snapshot.images.length &&
-      (currentBinding !== snapshot.destinationBinding ||
-        kind !== snapshot.kind ||
-        this.session.strategy !== snapshot.strategy ||
-        this.session.model !== snapshot.model ||
-        this.session.reviewer !== snapshot.reviewer ||
-        inferAccess(
-          text,
-          previous?.access ?? this.session.access ?? "read-only",
-        ) !== snapshot.access)
+      this.accessOverride !== snapshot.accessOverride ||
+      effective !== snapshot.access ||
+      (snapshot.images.length &&
+        (currentBinding !== snapshot.destinationBinding ||
+          kind !== snapshot.kind ||
+          this.session.strategy !== snapshot.strategy ||
+          this.session.model !== snapshot.model ||
+          this.session.reviewer !== snapshot.reviewer))
     )
       throw new AgentError(
         "IMAGE_PREVIEW_STALE",
@@ -668,13 +695,19 @@ export class Application extends EventEmitter {
       previewStrategy: snapshot.strategy,
       previewReviewer: snapshot.reviewer,
       previewAccess: snapshot.access,
+      previewAccessOverride: snapshot.accessOverride,
     };
     if (!this.session.latestRunId && this.session.name === "新しい会話")
       this.session.name = text.split("\n")[0]!;
     this.session.queue.push(item);
+    if (snapshot.accessOverride !== undefined) this.accessOverride = undefined;
     this.session.images = structuredClone(snapshot.images);
     this.session.draft = "";
     this.save();
+    if (snapshot.accessOverride)
+      this.publish("notice", {
+        text: `access override ${snapshot.accessOverride} を今回の送信に適用し、1回分を消費しました。`,
+      });
     if (this.busy)
       this.publish("notice", {
         text:
@@ -710,6 +743,7 @@ export class Application extends EventEmitter {
     item.previewStrategy = snapshot?.strategy;
     item.previewReviewer = snapshot?.reviewer;
     item.previewAccess = snapshot?.access;
+    item.previewAccessOverride = snapshot?.accessOverride;
     if (snapshot) this.session.images = structuredClone(snapshot.images);
     this.save();
   }
@@ -771,11 +805,15 @@ export class Application extends EventEmitter {
       this.session.kind === "auto"
         ? inferKind(input.text, previous?.kind)
         : this.session.kind;
-    const access =
-      input.previewAccess ??
-      inferAccess(
-        input.text,
-        previous?.access ?? this.session.access ?? "read-only",
+    const access = effectiveAccess(
+      input.text,
+      previous?.access ?? this.session.access ?? "read-only",
+      input.previewAccessOverride,
+    );
+    if (input.previewAccess && input.previewAccess !== access)
+      throw new AgentError(
+        "ACCESS_PREVIEW_STALE",
+        "Queued access changed after confirmation; review the request again",
       );
     const refs = await this.textAttachments(input.text);
     const retained = new Map(
@@ -811,6 +849,7 @@ export class Application extends EventEmitter {
           model: input.previewModel,
           reviewer: input.previewReviewer,
           access,
+          accessOverride: input.previewAccessOverride,
           imageIds: images.map((ref) => ref.id),
         }),
       );
@@ -893,11 +932,13 @@ export class Application extends EventEmitter {
             file: task.sessionFile,
           };
     const parentRunId =
-      kind === "coding"
-        ? this.session.workRunId
-        : kind === "writing" || kind === "research"
-          ? this.session.documentRunId
-          : undefined;
+      access !== "change"
+        ? undefined
+        : kind === "coding"
+          ? this.session.workRunId
+          : kind === "writing" || kind === "research"
+            ? this.session.documentRunId
+            : undefined;
     const usableParent =
       parentRunId &&
       (this.store.get(parentRunId).kind === kind ||
@@ -999,6 +1040,18 @@ export class Application extends EventEmitter {
           : undefined,
       parentRunId: usableParent,
       snapshotRunId: inspectRepository ? this.session.workRunId : undefined,
+      sourceRunIds: this.conversations
+        .runs(this.session.id)
+        .filter((sourceRunId) =>
+          this.store
+            .artifacts(sourceRunId)
+            .some(
+              (artifact) =>
+                artifact.kind === "source" &&
+                artifact.runId === sourceRunId &&
+                contextState.sourceIds.includes(artifact.id),
+            ),
+        ),
       previousSessions,
       context,
       contextState,
@@ -1016,10 +1069,10 @@ export class Application extends EventEmitter {
     this.store.transaction(() => {
       this.conversations.link(this.session, run);
       this.session.latestRunId = run.id;
-      this.session.access = access;
       this.session.context = contextState;
-      if (kind === "coding") this.session.workRunId = run.id;
-      if (kind === "writing" || kind === "research")
+      if (access === "change" && kind === "coding")
+        this.session.workRunId = run.id;
+      if (access === "change" && (kind === "writing" || kind === "research"))
         this.session.documentRunId = run.id;
       this.session.queue = this.session.queue.filter((q) => q.id !== input.id);
       this.conversations.message(this.session, "user", input.text, run.id);
@@ -1139,6 +1192,7 @@ export class Application extends EventEmitter {
     };
     this.session.context = contextState;
     this.session.compacted = false;
+    this.session.handoffDigest = undefined;
     this.session.handoff = undefined;
     const summary =
       result.state === "succeeded"
@@ -1457,12 +1511,22 @@ export class Application extends EventEmitter {
       .subarray(start, start + bytes)
       .toString("utf8");
   }
-  async readContext(archiveId: string, start = 0): Promise<string> {
+  async readContext(
+    archiveId: string,
+    start = 0,
+    bytes = 32_000,
+  ): Promise<string> {
     this.idle();
-    if (!Number.isSafeInteger(start) || start < 0)
+    if (
+      !Number.isSafeInteger(start) ||
+      start < 0 ||
+      !Number.isSafeInteger(bytes) ||
+      bytes < 1 ||
+      bytes > 32_000
+    )
       throw new AgentError(
         "CONTEXT_ARCHIVE",
-        "Context archive offset is invalid",
+        "Context archive range is invalid",
       );
     const runIds = this.conversations.runs(this.session.id);
     for (const runId of runIds) {
@@ -1471,7 +1535,7 @@ export class Application extends EventEmitter {
           this.paths,
           this.store.get(runId),
           archiveId,
-          32_000,
+          bytes,
           start,
         );
         return content;
@@ -1493,9 +1557,27 @@ export class Application extends EventEmitter {
     if (!runId) return;
     this.store.assertIdle(runId);
     const run = this.store.get(runId);
+    const executedWorker = [...run.tasks]
+      .reverse()
+      .find(
+        (task) =>
+          task.role === "worker" && task.state === "succeeded" && task.model,
+      );
+    const selectedAlias = executedWorker?.model;
+    const selected = selectedAlias
+      ? this.config.models[selectedAlias]
+      : undefined;
+    if (!selected)
+      throw new AgentError(
+        "CONTEXT_LIMIT",
+        "No executed worker model is available to establish a context handoff",
+      );
+    const conversationContext = normalizeConversationContext(
+      this.session.context,
+    );
+    conversationContext.compactions = [];
     const context = {
-      messages: this.conversations.messages(this.session.id),
-      conversationContext: normalizeConversationContext(this.session.context),
+      conversationContext,
       run: {
         objective: run.objective,
         state: run.state,
@@ -1526,14 +1608,16 @@ export class Application extends EventEmitter {
         checks: run.checks,
       },
     };
-    const selected = run.model
-      ? this.config.models[run.model]
-      : Object.values(this.config.models)[0];
-    if (!selected)
-      throw new AgentError(
-        "CONTEXT_LIMIT",
-        "No configured model is available to establish a context handoff",
-      );
+    const sourceDigest = sha256(
+      canonical({
+        model: selectedAlias,
+        contextWindow: selected.contextWindow,
+        maxOutputTokens: selected.maxOutputTokens,
+        context,
+      }),
+    );
+    if (this.session.compacted && this.session.handoffDigest === sourceDigest)
+      return;
     const compacted = await compactContext(
       this.paths,
       { ...run, conversationId: this.session.id },
@@ -1550,9 +1634,10 @@ export class Application extends EventEmitter {
     this.store.assertIdle(runId);
     const handoff = canonical({
       version: 2,
+      sourceDigest,
+      runId,
       state: run.state,
       objective: run.objective,
-      context: compacted.context,
       archiveId: compacted.record.archiveId,
       results: context.run.results,
       artifacts: context.run.artifacts,
@@ -1570,6 +1655,7 @@ export class Application extends EventEmitter {
     state.originalRunIds = [...new Set([...state.originalRunIds, runId])];
     this.session.context = state;
     this.session.compacted = true;
+    this.session.handoffDigest = sourceDigest;
     this.session.handoff = handoff;
     this.save();
     this.publish("notice", {

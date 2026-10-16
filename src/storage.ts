@@ -157,7 +157,12 @@ export class Store {
       .prepare("SELECT payload,generation FROM runs WHERE id=?")
       .get(runId) as unknown as RunRow | undefined;
     if (!row) throw new AgentError("NOT_FOUND", `Unknown run: ${runId}`);
-    return { ...JSON.parse(row.payload), generation: row.generation } as Run;
+    const run = JSON.parse(row.payload) as Run;
+    return {
+      ...run,
+      access: run.access ?? (run.kind === "chat" ? "read-only" : "change"),
+      generation: row.generation,
+    };
   }
   list(limit: number | null = 100): Run[] {
     return (
@@ -271,9 +276,18 @@ export class Store {
     if (row.heartbeat !== null && Date.now() - row.heartbeat < 15000)
       throw new AgentError("RUN_BUSY", "Run is still owned by a live process");
   }
-  inheritSources(parentId: string, runId: string): void {
-    for (const source of this.artifacts(parentId).filter(
-      (a) => a.kind === "source",
+  inheritSources(parentId: string, runId: string, directOnly = false): void {
+    const sources = directOnly
+      ? (
+          this.db
+            .prepare(
+              "SELECT payload FROM artifacts WHERE run_id=? ORDER BY rowid",
+            )
+            .all(parentId) as { payload: string }[]
+        ).map((row) => JSON.parse(row.payload) as Artifact)
+      : this.artifacts(parentId);
+    for (const source of sources.filter(
+      (artifact) => artifact.kind === "source",
     ))
       this.db
         .prepare("INSERT OR IGNORE INTO source_links VALUES (?,?)")

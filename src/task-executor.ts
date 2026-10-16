@@ -85,7 +85,7 @@ export class TaskExecutor {
     try {
       const text = await this.invoke(run, task, signal, mcp);
       const result =
-        run.kind === "chat"
+        run.access === "read-only" || run.kind === "chat"
           ? {
               outcome: "completed" as const,
               summary: text,
@@ -106,7 +106,8 @@ export class TaskExecutor {
         join(this.store.runDir(run.id), "work"),
         this.sandbox,
       );
-      await dispatcher.validateArtifacts(result.artifacts);
+      if (run.access !== "read-only")
+        await dispatcher.validateArtifacts(result.artifacts);
       task.state = "succeeded";
       this.store.save(run, "task_succeeded", {
         taskId: task.id,
@@ -171,21 +172,26 @@ export class TaskExecutor {
       );
     const repositoryReadOnly =
       run.access === "read-only" && !!run.workspace && run.kind === "chat";
+    const hasSources = this.store
+      .artifacts(run.id)
+      .some((artifact) => artifact.kind === "source");
+    const hasArchives = !!(
+      run.compactions?.length || run.contextState?.compactions?.length
+    );
+    const chatTools = new Set<string>();
+    if (run.inputs.length || repositoryReadOnly)
+      for (const name of [
+        "read_file",
+        "list_files",
+        "search_files",
+        "read_source",
+      ])
+        chatTools.add(name);
+    if (hasSources) chatTools.add("read_source");
+    if (hasArchives) chatTools.add("read_context");
     const tools =
       run.kind === "chat"
-        ? run.inputs.length || repositoryReadOnly
-          ? dispatcher
-              .all()
-              .filter((t) =>
-                [
-                  "read_file",
-                  "read_source",
-                  "list_files",
-                  "search_files",
-                  "read_context",
-                ].includes(t.name),
-              )
-          : []
+        ? dispatcher.all().filter((tool) => chatTools.has(tool.name))
         : run.access === "read-only"
           ? dispatcher
               .all()

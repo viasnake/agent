@@ -29,6 +29,7 @@ export interface PendingInput {
   previewStrategy?: Run["mode"];
   previewReviewer?: string;
   previewAccess?: RequestAccess;
+  previewAccessOverride?: RequestAccess;
 }
 export interface Conversation {
   id: string;
@@ -50,6 +51,7 @@ export interface Conversation {
   localOnly: boolean;
   includeUntracked: boolean;
   compacted?: boolean;
+  handoffDigest?: string;
   handoff?: string;
   images?: ImageReference[];
   context?: ConversationContext;

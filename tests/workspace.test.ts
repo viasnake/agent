@@ -52,6 +52,145 @@ test("snapshot keeps dirty tracked files and selected untracked files without to
     await f.cleanup();
   }
 });
+test("read-only snapshots reject widened disclosure and unresolved source operations before copying", async () => {
+  const runtime = new ScriptedRuntime(async () => completed());
+  const f = await fixture(runtime);
+  try {
+    const origin = await gitWorkspace(f.root, { "app.txt": "baseline" });
+    const restricted = await f.harness.create({
+      kind: "coding",
+      objective: "restricted source",
+      workspace: origin,
+      dataClass: "restricted",
+    });
+    const localOnly = await f.harness.create({
+      kind: "coding",
+      objective: "local-only source",
+      workspace: origin,
+      localOnly: true,
+    });
+    const unresolved = await f.harness.create({
+      kind: "coding",
+      objective: "pending operation source",
+      workspace: origin,
+    });
+    const claimed = f.store.claim(unresolved.id);
+    const operation = f.store.prepare(claimed, "work", "write_file", {});
+    f.store.operation(claimed, operation, "dispatched");
+    f.store.release(claimed);
+    const before = f.store.list().length;
+
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "read-only",
+          objective: "inspect restricted source",
+          workspace: origin,
+          snapshotRunId: restricted.id,
+          dataClass: "private",
+        }),
+      { code: "DISCLOSURE_DENIED" },
+    );
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "read-only",
+          objective: "inspect local-only source",
+          workspace: origin,
+          snapshotRunId: localOnly.id,
+        }),
+      { code: "DISCLOSURE_DENIED" },
+    );
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "read-only",
+          objective: "inspect unresolved source",
+          workspace: origin,
+          snapshotRunId: unresolved.id,
+        }),
+      { code: "UNKNOWN_OPERATION" },
+    );
+    assert.equal(f.store.list().length, before);
+    assert.equal(runtime.requests.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+test("snapshot ids require read-only access and cannot accompany a parent", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const origin = await gitWorkspace(f.root, { "app.txt": "baseline" });
+    const source = await f.harness.create({
+      kind: "coding",
+      objective: "source",
+      workspace: origin,
+    });
+    const before = f.store.list().length;
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "change",
+          objective: "write after snapshot",
+          workspace: origin,
+          snapshotRunId: source.id,
+        }),
+      { code: "CONTINUATION" },
+    );
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "read-only",
+          objective: "ambiguous lineage",
+          workspace: origin,
+          parentRunId: source.id,
+          snapshotRunId: source.id,
+        }),
+      { code: "CONTINUATION" },
+    );
+    assert.equal(f.store.list().length, before);
+  } finally {
+    await f.cleanup();
+  }
+});
+test("legacy runs infer persisted access from their original kind on get and claim", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const workspace = await gitWorkspace(f.root, { "app.txt": "baseline" });
+    const chat = await f.harness.create({
+      kind: "chat",
+      objective: "old chat",
+    });
+    const coding = await f.harness.create({
+      kind: "coding",
+      objective: "old coding",
+      workspace,
+    });
+    for (const run of [chat, coding]) {
+      const legacy = { ...run };
+      delete legacy.access;
+      f.store.db
+        .prepare("UPDATE runs SET payload=? WHERE id=?")
+        .run(JSON.stringify(legacy), run.id);
+    }
+
+    assert.equal(f.store.get(chat.id).access, "read-only");
+    assert.equal(f.store.get(coding.id).access, "change");
+    const claimedChat = f.store.claim(chat.id);
+    assert.equal(claimedChat.access, "read-only");
+    f.store.release(claimedChat);
+    const claimedCoding = f.store.claim(coding.id);
+    assert.equal(claimedCoding.access, "change");
+    f.store.release(claimedCoding);
+  } finally {
+    await f.cleanup();
+  }
+});
 test("explicit apply checks source changes and refuses new untracked collisions", async () => {
   const f = await fixture(new ScriptedRuntime(async () => completed()));
   try {

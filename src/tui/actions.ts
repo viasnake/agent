@@ -85,4 +85,5 @@ export const commands = [
   ["tools", "ツール結果"],
   ["reconcile", "未確定操作の照合"],
   ["kind", "自動判定・依頼の種類"],
+  ["access", "次の送信1回のみアクセス権を上書き"],
 ].map(([name, description]) => ({ name: name!, description: description! }));
