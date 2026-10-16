@@ -83,6 +83,13 @@ import {
   storeGitInput,
   type GitInputSelection,
 } from "./git-input.js";
+import {
+  readSearchResultLocal,
+  searchLocal,
+  type SearchHit,
+  type SearchPage,
+  type SearchRequest,
+} from "./search.js";
 
 export interface AppEvent {
   type: string;
@@ -3102,6 +3109,62 @@ export class Application extends EventEmitter {
   }
   history(before?: number) {
     return this.conversations.messages(this.session.id, before);
+  }
+  async search(request: SearchRequest): Promise<SearchPage> {
+    this.idle();
+    const sessionId = this.session.id,
+      generation = this.generation,
+      workspace = this.session.workspace;
+    const page = await searchLocal(
+      {
+        store: this.store,
+        workspace,
+        currentConversationId: sessionId,
+        currentWorkRunId: this.session.workRunId ?? this.session.latestRunId,
+        maxWorkspaceBytes: this.config.limits.maxWorkspaceBytes,
+      },
+      request,
+    );
+    this.idle();
+    if (
+      sessionId !== this.session.id ||
+      generation !== this.generation ||
+      workspace !== this.session.workspace
+    )
+      throw new AgentError(
+        "STALE_VIEW",
+        "会話が切り替わりました。検索し直してください。",
+      );
+    return page;
+  }
+  async readSearchResult(
+    hit: SearchHit,
+  ): Promise<{ title: string; text: string }> {
+    this.idle();
+    const sessionId = this.session.id,
+      generation = this.generation,
+      workspace = this.session.workspace;
+    const result = await readSearchResultLocal(
+      {
+        store: this.store,
+        workspace,
+        currentConversationId: sessionId,
+        currentWorkRunId: this.session.workRunId ?? this.session.latestRunId,
+        maxWorkspaceBytes: this.config.limits.maxWorkspaceBytes,
+      },
+      hit,
+    );
+    this.idle();
+    if (
+      sessionId !== this.session.id ||
+      generation !== this.generation ||
+      workspace !== this.session.workspace
+    )
+      throw new AgentError(
+        "STALE_VIEW",
+        "会話が切り替わりました。検索結果を開き直してください。",
+      );
+    return result;
   }
   sessions(offset = 0) {
     return this.conversations.list(this.session.workspace, offset);
