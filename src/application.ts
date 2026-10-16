@@ -30,6 +30,7 @@ import {
   type ContextNote,
   type WorkKind,
   type DocumentReference,
+  type PreparedInput,
 } from "./types.js";
 import {
   compactContext,
@@ -62,11 +63,19 @@ import { endpoint } from "./runtime/providers.js";
 import { secretPath, workspaceDiff } from "./workspace.js";
 import {
   loadPreparedInput,
+  maxDocumentBytes,
+  maxPreparedDocuments,
+  maxPreparedInputBytes,
   parseDocumentToken,
   prepareDocument,
 } from "./documents.js";
 import { readClipboardPng } from "./clipboard.js";
-import { prepareGitInput, readGitStatus } from "./git-input.js";
+import {
+  readGitStatus,
+  selectGitInput,
+  storeGitInput,
+  type GitInputSelection,
+} from "./git-input.js";
 
 export interface AppEvent {
   type: string;
@@ -300,16 +309,41 @@ export class Application extends EventEmitter {
     let total = Buffer.byteLength(text);
     const attachments: InputPreview["attachments"] = [];
     const documents: DocumentReference[] = [];
+    let rawDocumentBytes = 0;
     const fresh: ImageReference[] = [];
-    for (const token of fileReferences(text)) {
+    const tokens = fileReferences(text),
+      documentTokens = tokens.filter(
+        (token) =>
+          token.startsWith("git:") || !isImagePath(token.split("::", 1)[0]!),
+      );
+    if (total > this.config.limits.maxInputBytes)
+      throw new AgentError(
+        "INPUT_SIZE",
+        "依頼と添付ファイルが入力上限を超えています。",
+      );
+    if (documentTokens.length > maxPreparedDocuments)
+      throw new AgentError(
+        "INPUT_SIZE",
+        `At most ${maxPreparedDocuments} documents may be attached`,
+      );
+    if (
+      this.session.context?.redactedImageIds?.length &&
+      documentTokens.some((token) => token.startsWith("git:"))
+    )
+      throw new AgentError(
+        "GIT_REDACTED",
+        "Git attachments are disabled after image redaction; use a separate sanitized conversation",
+      );
+    const checkedFiles = new Map<number, { path: string; size: number }>(),
+      gitSelections = new Map<number, GitInputSelection>();
+    for (const [index, token] of tokens.entries()) {
       if (token.startsWith("git:")) {
         if (!this.session.workspace)
           throw new AgentError(
             "WORKSPACE",
             "Git inputs require a configured workspace",
           );
-        const prepared = await prepareGitInput(
-          this.paths,
+        const selection = await selectGitInput(
           this.session.workspace,
           token,
           Math.min(
@@ -317,6 +351,43 @@ export class Application extends EventEmitter {
             this.config.limits.maxFileBytes,
           ),
           AbortSignal.timeout(30000),
+        );
+        rawDocumentBytes += selection.raw.length;
+        if (rawDocumentBytes > maxPreparedInputBytes)
+          throw new AgentError(
+            "INPUT_SIZE",
+            "Cumulative document attachments exceed the raw input budget",
+          );
+        gitSelections.set(index, selection);
+      } else {
+        const actualPath = token.split("::", 1)[0]!;
+        if (secretPath(actualPath))
+          throw new AgentError(
+            "PATH_DENIED",
+            "認証・制御ファイルは添付できません。",
+          );
+        if (isImagePath(actualPath)) continue;
+        const safe = await safePath(this.session.workspace, actualPath),
+          info = await lstat(safe);
+        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
+          throw new AgentError(
+            "PATH_DENIED",
+            "Attachment must be a regular non-linked file",
+          );
+        rawDocumentBytes += info.size;
+        if (rawDocumentBytes > maxPreparedInputBytes)
+          throw new AgentError(
+            "INPUT_SIZE",
+            "Cumulative document attachments exceed the raw input budget",
+          );
+        checkedFiles.set(index, { path: safe, size: info.size });
+      }
+    }
+    for (const [index, token] of tokens.entries()) {
+      if (token.startsWith("git:")) {
+        const prepared = await storeGitInput(
+          this.paths,
+          gitSelections.get(index)!,
         );
         documents.push(prepared.reference);
         total += prepared.reference.selectedBytes;
@@ -329,12 +400,17 @@ export class Application extends EventEmitter {
         continue;
       }
       const actualPath = token.split("::", 1)[0]!;
-      if (secretPath(actualPath))
-        throw new AgentError(
-          "PATH_DENIED",
-          "認証・制御ファイルは添付できません。",
-        );
-      const safe = await safePath(this.session.workspace, actualPath);
+      const checkedFile = checkedFiles.get(index),
+        safe =
+          checkedFile?.path ??
+          (await safePath(this.session.workspace, actualPath));
+      if (!isImagePath(actualPath)) {
+        if (await isImageFileSignature(safe))
+          throw new AgentError(
+            "IMAGE_FORMAT",
+            "Image file extension does not match PNG, JPEG, or WebP content",
+          );
+      }
       if (isImagePath(actualPath)) {
         if (token !== actualPath)
           throw new AgentError(
@@ -345,6 +421,11 @@ export class Application extends EventEmitter {
         const mimeType = imageMimeForPath(actualPath)!;
         const metadata = await validateImage(bytes, mimeType);
         const imageId = `img-${sha256(bytes)}`;
+        if (this.session.context?.redactedImageIds?.includes(imageId))
+          throw new AgentError(
+            "IMAGE_REDACTED",
+            "This image was redacted in the conversation; stage it in a new conversation instead",
+          );
         const known = new Map(
           [...(this.session.images ?? []), ...fresh].map((ref) => [
             ref.id,
@@ -386,11 +467,6 @@ export class Application extends EventEmitter {
         fresh.push(reference);
         attachments.push({ path: token, bytes: bytes.length, mimeType });
       } else {
-        if (await isImageFileSignature(safe))
-          throw new AgentError(
-            "IMAGE_FORMAT",
-            "Image file extension does not match PNG, JPEG, or WebP content",
-          );
         const parsed = parseDocumentToken(token);
         if (parsed.path !== actualPath)
           throw new AgentError(
@@ -416,6 +492,7 @@ export class Application extends EventEmitter {
             sandbox: new Sandbox(this.config.execution),
             dataClass: this.session.dataClass,
             localOnly: this.session.localOnly,
+            expectedBytes: checkedFile?.size,
             remainingImages: remaining,
             signal: AbortSignal.timeout(30000),
           },
@@ -878,11 +955,53 @@ export class Application extends EventEmitter {
         "ACCESS_PREVIEW_STALE",
         "Queued access changed after confirmation; review the request again",
       );
-    const preparedInputs = await Promise.all(
-      (input.documents ?? []).map((reference) =>
-        loadPreparedInput(this.paths, reference),
-      ),
-    );
+    if (
+      this.session.context?.redactedImageIds?.length &&
+      input.documents?.some((reference) => reference.format === "git")
+    )
+      throw new AgentError(
+        "GIT_REDACTED",
+        "Git attachments are unavailable after image redaction; use a separate sanitized conversation",
+      );
+    const queuedDocuments = input.documents ?? [];
+    if (queuedDocuments.length > maxPreparedDocuments)
+      throw new AgentError(
+        "INPUT_SIZE",
+        `At most ${maxPreparedDocuments} documents may be attached to one request`,
+      );
+    let rawInputBytes = 0;
+    let selectedInputBytes = Buffer.byteLength(input.text);
+    if (selectedInputBytes > this.config.limits.maxInputBytes)
+      throw new AgentError("INPUT_SIZE", "Request exceeds the input limit");
+    for (const reference of queuedDocuments) {
+      if (
+        !Number.isSafeInteger(reference.rawBytes) ||
+        reference.rawBytes < 0 ||
+        reference.rawBytes > maxDocumentBytes ||
+        !Number.isSafeInteger(reference.selectedBytes) ||
+        reference.selectedBytes < 0 ||
+        reference.selectedBytes > maxDocumentBytes
+      )
+        throw new AgentError(
+          "INPUT_INTEGRITY",
+          "Queued attachment has an invalid raw-byte size",
+        );
+      rawInputBytes += reference.rawBytes;
+      if (rawInputBytes > maxPreparedInputBytes)
+        throw new AgentError(
+          "INPUT_SIZE",
+          "Cumulative document attachments exceed the raw input budget",
+        );
+      selectedInputBytes += reference.selectedBytes;
+      if (selectedInputBytes > this.config.limits.maxInputBytes)
+        throw new AgentError(
+          "INPUT_SIZE",
+          "Cumulative selected attachments exceed the request input budget",
+        );
+    }
+    const preparedInputs: PreparedInput[] = [];
+    for (const reference of queuedDocuments)
+      preparedInputs.push(await loadPreparedInput(this.paths, reference));
     if (
       fileReferences(input.text).some((token) => {
         const path = token.split("::", 1)[0]!;
@@ -1037,6 +1156,23 @@ export class Application extends EventEmitter {
         ? parentRunId
         : undefined;
     const contextState = normalizeConversationContext(this.session.context);
+    if (contextState.redactedImageIds?.length) {
+      const unavailableGitSources = new Set(
+        this.conversations.runs(this.session.id).flatMap((runId) =>
+          this.store
+            .artifacts(runId)
+            .filter(
+              (artifact) =>
+                artifact.kind === "source" &&
+                artifact.metadata.format === "git",
+            )
+            .map((artifact) => artifact.id),
+        ),
+      );
+      contextState.sourceIds = contextState.sourceIds.filter(
+        (sourceId) => !unavailableGitSources.has(sourceId),
+      );
+    }
     const instructions = this.conversations
       .messages(this.session.id)
       .map((message) => ({
@@ -1146,6 +1282,9 @@ export class Application extends EventEmitter {
       previousSessions,
       context,
       contextState,
+      redactedImageHashes: (contextState.redactedImageIds ?? []).map(
+        (imageId) => imageId.replace(/^img-/, ""),
+      ),
       conversationId: this.session.id,
       constraints: contextState.constraints,
       access,
@@ -1188,13 +1327,101 @@ export class Application extends EventEmitter {
         "Wait for the current request before staging an image",
       );
     const bytes = await readClipboardPng();
-    const ref = await saveImage(
-      this.paths,
-      "clipboard.png",
-      bytes,
-      this.session.dataClass,
-      this.session.localOnly,
+    const imageId = `img-${sha256(bytes)}`;
+    if (this.session.context?.redactedImageIds?.includes(imageId))
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        "This image was redacted in the conversation; stage it in a new conversation instead",
+      );
+    if (
+      !(this.session.images ?? []).some((image) => image.id === imageId) &&
+      ((this.session.images?.length ?? 0) >= maxConversationImages ||
+        (this.session.images ?? []).reduce(
+          (sum, image) => sum + image.bytes,
+          0,
+        ) +
+          bytes.length >
+          maxConversationImageBytes)
+    )
+      throw new AgentError(
+        "IMAGE_LIMIT",
+        "Conversation image capacity is exhausted",
+      );
+    const ref =
+      (this.session.images ?? []).find((image) => image.id === imageId) ??
+      (await saveImage(
+        this.paths,
+        "clipboard.png",
+        bytes,
+        this.session.dataClass,
+        this.session.localOnly,
+      ));
+    this.session.images = [
+      ...(this.session.images ?? []).filter((image) => image.id !== ref.id),
+      ref,
+    ];
+    this.save();
+    return ref;
+  }
+  async stageImageFromPath(path: string): Promise<ImageReference> {
+    if (this.busy)
+      throw new AgentError(
+        "IMAGE_BUSY",
+        "Wait for the current request before staging an image",
+      );
+    if (!this.session.workspace)
+      throw new AgentError("WORKSPACE", "Image staging requires a workspace");
+    if (!isImagePath(path) || secretPath(path))
+      throw new AgentError(
+        "PATH_DENIED",
+        "Stage a PNG, JPEG, or WebP inside the workspace",
+      );
+    const safe = await safePath(this.session.workspace, path);
+    const inputStat = await lstat(safe);
+    if (
+      inputStat.isSymbolicLink() ||
+      !inputStat.isFile() ||
+      inputStat.nlink !== 1
+    )
+      throw new AgentError(
+        "PATH_DENIED",
+        "Image path must be a regular non-linked file",
+      );
+    const bytes = await readBoundedImage(safe),
+      mimeType = imageMimeForPath(path)!;
+    await validateImage(bytes, mimeType);
+    const imageId = `img-${sha256(bytes)}`;
+    if (this.session.context?.redactedImageIds?.includes(imageId))
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        "This image was redacted in the conversation; stage it in a new conversation instead",
+      );
+    const alreadyRetained = (this.session.images ?? []).some(
+      (image) => image.id === imageId,
     );
+    if (
+      !alreadyRetained &&
+      ((this.session.images?.length ?? 0) >= maxConversationImages ||
+        (this.session.images ?? []).reduce(
+          (sum, image) => sum + image.bytes,
+          0,
+        ) +
+          bytes.length >
+          maxConversationImageBytes)
+    )
+      throw new AgentError(
+        "IMAGE_LIMIT",
+        "Conversation image capacity is exhausted",
+      );
+    const ref =
+      (this.session.images ?? []).find((image) => image.id === imageId) ??
+      (await saveImage(
+        this.paths,
+        basename(safe),
+        bytes,
+        this.session.dataClass,
+        this.session.localOnly,
+      ));
     this.session.images = [
       ...(this.session.images ?? []).filter((image) => image.id !== ref.id),
       ref,
@@ -1215,12 +1442,37 @@ export class Application extends EventEmitter {
         "IMAGE_REFERENCE",
         "Image is not retained by this conversation",
       );
+    if (source.documentId)
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        "PDF-linked images cannot be masked or cropped because extracted text would remain; use a sanitized PDF or standalone page image",
+      );
     const derived = await transformImage(this.paths, source, operation, bounds);
-    this.removeQueuedImage(source.id);
-    this.session.images = [
+    if (this.session.context?.redactedImageIds?.includes(derived.id))
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        "This derived image was previously redacted in the conversation",
+      );
+    if (derived.id === source.id)
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        "The edit did not change image content; no redaction was recorded",
+      );
+    const retainedImages = [
       ...(this.session.images ?? []).filter((image) => image.id !== source.id),
       derived,
     ];
+    if (
+      retainedImages.length > maxConversationImages ||
+      retainedImages.reduce((sum, image) => sum + image.bytes, 0) >
+        maxConversationImageBytes
+    )
+      throw new AgentError(
+        "IMAGE_LIMIT",
+        "Edited images exceed the conversation capacity",
+      );
+    this.removeQueuedImage(source.id);
+    this.session.images = retainedImages;
     const context = normalizeConversationContext(this.session.context);
     context.redactedImageIds = [
       ...new Set([...(context.redactedImageIds ?? []), source.id]),
@@ -1410,6 +1662,22 @@ export class Application extends EventEmitter {
       throw new AgentError(
         "POLICY_CHANGED",
         "設定が変わっています。新しい依頼として続けてください。",
+      );
+    const activeRedactions = new Set(
+      normalizeConversationContext(this.session.context).redactedImageIds ?? [],
+    );
+    const runRedactions = new Set(
+      normalizeConversationContext(run.contextState).redactedImageIds ?? [],
+    );
+    if (
+      activeRedactions.size !== runRedactions.size ||
+      [...activeRedactions].some((id) => !runRedactions.has(id)) ||
+      [...runRedactions].some((id) => !activeRedactions.has(id)) ||
+      run.images?.some((image) => activeRedactions.has(image.id))
+    )
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        "This run predates an image redaction; continue with a fresh request",
       );
     this.busy = true;
     this.activeRunId = run.id;

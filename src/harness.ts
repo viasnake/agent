@@ -1,5 +1,5 @@
-import { realpath } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { lstat, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import {
   configHash,
   ensureOutsideWorkspace,
@@ -42,16 +42,24 @@ import {
   inventory,
   continueWorkspace,
   readSnapshot,
+  sanitizeWorkCopy,
   secretPath,
   snapshotWorkspace,
   verifyOriginal,
 } from "./workspace.js";
 import {
   loadPreparedInput,
+  maxDocumentBytes,
+  maxPreparedDocuments,
+  maxPreparedInputBytes,
   parseDocumentToken,
   prepareDocument,
 } from "./documents.js";
-import { prepareGitInput } from "./git-input.js";
+import {
+  selectGitInput,
+  storeGitInput,
+  type GitInputSelection,
+} from "./git-input.js";
 export interface NewRun {
   extraPaths?: string[];
   parentRunId?: string;
@@ -78,6 +86,7 @@ export interface NewRun {
   mustKeep?: string[];
   model?: string;
   reviewer?: string;
+  redactedImageHashes?: string[];
 }
 export class Harness {
   readonly sandbox: Sandbox;
@@ -123,11 +132,128 @@ export class Harness {
     if (options.kind === "coding" && !workspace)
       throw new AgentError("WORKSPACE", "Coding requires --workspace");
     if (workspace) await ensureOutsideWorkspace(this.paths, workspace);
+    const prepared = [...(options.preparedInputs ?? [])],
+      inputPlans: Array<
+        | { kind: "git"; selection: GitInputSelection }
+        | { kind: "file"; path: string; token: string; size: number }
+      > = [];
+    const redactedIds = new Set(options.contextState?.redactedImageIds ?? []);
+    if (
+      redactedIds.size &&
+      (prepared.some(({ reference }) => reference.format === "git") ||
+        options.inputs?.some((input) => input.startsWith("git:")))
+    )
+      throw new AgentError(
+        "GIT_REDACTED",
+        "Git inputs are unavailable after image redaction",
+      );
+    if (prepared.length + (options.inputs?.length ?? 0) > maxPreparedDocuments)
+      throw new AgentError(
+        "INPUT_SIZE",
+        `At most ${maxPreparedDocuments} documents may be attached to one request`,
+      );
+    let rawInputBytes = 0,
+      selectedInputBytes = Buffer.byteLength(options.objective);
+    for (const { reference } of prepared) {
+      if (
+        !Number.isSafeInteger(reference.rawBytes) ||
+        reference.rawBytes < 0 ||
+        reference.rawBytes > maxDocumentBytes ||
+        !Number.isSafeInteger(reference.selectedBytes) ||
+        reference.selectedBytes < 0 ||
+        reference.selectedBytes > maxDocumentBytes
+      )
+        throw new AgentError(
+          "INPUT_INTEGRITY",
+          "Prepared attachment has invalid byte counts",
+        );
+      rawInputBytes += reference.rawBytes;
+      selectedInputBytes += reference.selectedBytes;
+    }
+    if (rawInputBytes > maxPreparedInputBytes)
+      throw new AgentError(
+        "INPUT_SIZE",
+        "Cumulative document attachments exceed the raw input budget",
+      );
+    if (selectedInputBytes > this.config.limits.maxInputBytes)
+      throw new AgentError(
+        "INPUT_SIZE",
+        "Request and selected attachments exceed the input limit",
+      );
+    for (const token of options.inputs ?? []) {
+      if (token.startsWith("git:")) {
+        if (!workspace)
+          throw new AgentError("WORKSPACE", "Git inputs require --workspace");
+        const selection = await selectGitInput(
+          workspace,
+          token,
+          Math.min(
+            maxDocumentBytes,
+            this.config.limits.maxFileBytes,
+            this.config.limits.maxInputBytes - selectedInputBytes,
+          ),
+          AbortSignal.timeout(30000),
+        );
+        rawInputBytes += selection.raw.length;
+        selectedInputBytes += Buffer.byteLength(selection.text);
+        if (rawInputBytes > maxPreparedInputBytes)
+          throw new AgentError(
+            "INPUT_SIZE",
+            "Cumulative document attachments exceed the raw input budget",
+          );
+        if (selectedInputBytes > this.config.limits.maxInputBytes)
+          throw new AgentError(
+            "INPUT_SIZE",
+            "Request and selected attachments exceed the input limit",
+          );
+        inputPlans.push({ kind: "git", selection });
+        continue;
+      }
+      const parsed = parseDocumentToken(token),
+        path = resolve(parsed.path);
+      if (secretPath(parsed.path))
+        throw new AgentError(
+          "INPUT",
+          "Credential-like input filenames are excluded",
+        );
+      const info = await lstat(path);
+      if (
+        !info.isFile() ||
+        info.isSymbolicLink() ||
+        info.nlink !== 1 ||
+        info.size > maxDocumentBytes
+      )
+        throw new AgentError(
+          "PATH_DENIED",
+          "Document input must be a bounded regular non-linked file",
+        );
+      rawInputBytes += info.size;
+      if (rawInputBytes > maxPreparedInputBytes)
+        throw new AgentError(
+          "INPUT_SIZE",
+          "Cumulative document attachments exceed the raw input budget",
+        );
+      inputPlans.push({
+        kind: "file",
+        path,
+        token,
+        size: info.size,
+      });
+    }
     const images = [
       ...new Map(
         (options.images ?? []).map((reference) => [reference.id, reference]),
       ).values(),
     ];
+    if (
+      images.some((image) =>
+        options.contextState?.redactedImageIds?.includes(image.id),
+      )
+    )
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        "A redacted image cannot be included in a follow-up request",
+      );
     const dataLevels: DataClass[] = ["public", "private", "restricted"];
     const imageDataClass = images.reduce<DataClass>(
       (current, ref) =>
@@ -280,6 +406,46 @@ export class Harness {
         );
       conversationSourceRuns.push(linkedRun);
     }
+    const redactedHashes = new Set([
+      ...(options.redactedImageHashes ?? []),
+      ...[...redactedIds]
+        .filter((imageId) => /^img-[a-f0-9]{64}$/.test(imageId))
+        .map((imageId) => imageId.slice(4)),
+    ]);
+    if (redactedIds.size) {
+      const linkedRunIds = options.conversationId
+        ? (
+            this.store.db
+              .prepare(
+                "SELECT run_id FROM conversation_runs WHERE session_id=?",
+              )
+              .all(options.conversationId) as { run_id: string }[]
+          ).map(({ run_id }) => run_id)
+        : [];
+      for (const linkedRunId of new Set([
+        ...linkedRunIds,
+        ...conversationSourceRuns.map((item) => item.id),
+        ...(sourceRun ? [sourceRun.id] : []),
+      ])) {
+        this.store.assertIdle(linkedRunId);
+        const linkedRun = this.store.get(linkedRunId);
+        if (
+          ["public", "private", "restricted"].indexOf(run.dataClass) <
+            ["public", "private", "restricted"].indexOf(linkedRun.dataClass) ||
+          (linkedRun.localOnly && !run.localOnly)
+        )
+          continue;
+        for (const artifact of this.store
+          .artifacts(linkedRun.id)
+          .filter(
+            (item) =>
+              item.runId === linkedRun.id &&
+              item.kind === "source" &&
+              item.metadata.format === "git",
+          ))
+          redactedHashes.add(artifact.sha256);
+      }
+    }
     await privateDirectory(this.paths.runs);
     this.store.create(run);
     const owned = this.store.claim(run.id),
@@ -295,22 +461,47 @@ export class Harness {
     try {
       await privateDirectory(directory);
       for (const linkedRun of conversationSourceRuns)
-        this.store.inheritSources(linkedRun.id, owned.id, true);
+        this.store.inheritSources(
+          linkedRun.id,
+          owned.id,
+          true,
+          !!options.contextState?.redactedImageIds?.length,
+        );
       if (options.snapshotRunId) {
         await continueWorkspace(
           this.store.runDir(sourceRun!.id),
           directory,
           this.config,
         );
-        this.store.inheritSources(sourceRun!.id, owned.id);
+        this.store.inheritSources(
+          sourceRun!.id,
+          owned.id,
+          false,
+          !!options.contextState?.redactedImageIds?.length,
+        );
+        await sanitizeWorkCopy(
+          directory,
+          [...redactedHashes],
+          this.config.limits.maxWorkspaceBytes,
+        );
       } else if (options.parentRunId) {
         await continueWorkspace(
           this.store.runDir(sourceRun!.id),
           directory,
           this.config,
         );
+        await sanitizeWorkCopy(
+          directory,
+          [...redactedHashes],
+          this.config.limits.maxWorkspaceBytes,
+        );
         // Source IDs remain stable so existing citations continue to resolve.
-        this.store.inheritSources(sourceRun!.id, owned.id);
+        this.store.inheritSources(
+          sourceRun!.id,
+          owned.id,
+          false,
+          !!options.contextState?.redactedImageIds?.length,
+        );
       } else
         await snapshotWorkspace(
           directory,
@@ -318,58 +509,63 @@ export class Harness {
           options.includeUntracked ?? false,
           this.config,
           options.extraPaths,
+          [...redactedHashes],
         );
       if (workspace) await verifyOriginal(await readSnapshot(directory));
-      const prepared = [...(options.preparedInputs ?? [])];
-      for (const token of options.inputs ?? []) {
-        if (token.startsWith("git:")) {
-          if (!workspace)
-            throw new AgentError("WORKSPACE", "Git inputs require --workspace");
-          prepared.push(
-            await prepareGitInput(
+      let inputBytes =
+        Buffer.byteLength(owned.objective) +
+        prepared.reduce((sum, input) => sum + input.reference.selectedBytes, 0);
+      for (const plan of inputPlans) {
+        if (plan.kind === "git") {
+          if (
+            inputBytes + Buffer.byteLength(plan.selection.text) >
+            this.config.limits.maxInputBytes
+          )
+            throw new AgentError(
+              "INPUT_SIZE",
+              "Request and selected attachments exceed the input limit",
+            );
+          prepared.push(await storeGitInput(this.paths, plan.selection));
+        } else {
+          const remainingImages =
+              maxConversationImages -
+              new Set(
+                [
+                  ...(owned.images ?? []),
+                  ...prepared.flatMap((input) => input.images ?? []),
+                ].map((image) => image.id),
+              ).size,
+            input = await prepareDocument(
               this.paths,
-              workspace,
-              token,
-              this.config.limits.maxInputBytes,
-              AbortSignal.timeout(30000),
-            ),
-          );
-          continue;
+              plan.path,
+              plan.token,
+              this.config.limits.maxInputBytes - inputBytes,
+              {
+                sandbox: this.sandbox,
+                dataClass: owned.dataClass,
+                localOnly: owned.localOnly,
+                expectedBytes: plan.size,
+                remainingImages: Math.max(0, remainingImages),
+                signal: AbortSignal.timeout(30000),
+              },
+            );
+          prepared.push(input);
         }
-        const parsed = parseDocumentToken(token),
-          path = resolve(parsed.path);
-        if (secretPath(basename(parsed.path)))
+        inputBytes += prepared.at(-1)!.reference.selectedBytes;
+        if (inputBytes > this.config.limits.maxInputBytes)
           throw new AgentError(
-            "INPUT",
-            "Credential-like input filenames are excluded",
+            "INPUT_SIZE",
+            "Request and attachments exceed the input limit",
           );
-        prepared.push(
-          await prepareDocument(
-            this.paths,
-            path,
-            token,
-            this.config.limits.maxInputBytes,
-            {
-              sandbox: this.sandbox,
-              dataClass: owned.dataClass,
-              localOnly: owned.localOnly,
-              remainingImages: Math.max(
-                0,
-                maxConversationImages - (owned.images?.length ?? 0),
-              ),
-              signal: AbortSignal.timeout(30000),
-            },
-          ),
-        );
       }
       owned.preparedInputs = prepared.map(({ reference }) =>
         structuredClone(reference),
       );
-      let inputBytes = Buffer.byteLength(owned.objective);
+      let loadedInputBytes = Buffer.byteLength(owned.objective);
       for (const [index, input] of prepared.entries()) {
         const loaded = await loadPreparedInput(this.paths, input.reference);
-        inputBytes += Buffer.byteLength(loaded.text);
-        if (inputBytes > this.config.limits.maxInputBytes)
+        loadedInputBytes += Buffer.byteLength(loaded.text);
+        if (loadedInputBytes > this.config.limits.maxInputBytes)
           throw new AgentError(
             "INPUT_SIZE",
             "Request and attachments exceed the input limit",
@@ -382,6 +578,11 @@ export class Harness {
           throw new AgentError(
             "INPUT_INTEGRITY",
             "Prepared PDF images are missing",
+          );
+        if (input.images?.some((image) => redactedIds.has(image.id)))
+          throw new AgentError(
+            "IMAGE_REDACTED",
+            "A redacted image cannot be introduced by a prepared attachment",
           );
         owned.images = [
           ...new Map(

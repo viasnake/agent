@@ -118,12 +118,41 @@ export async function readText(
   path: string,
   maxBytes = 1_000_000,
 ): Promise<string> {
+  const data = await readBoundedFile(path, maxBytes);
+  if (data.includes(0))
+    throw new AgentError(
+      "BINARY_INPUT",
+      `Binary file is not supported: ${path}`,
+    );
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    throw new AgentError(
+      "BINARY_INPUT",
+      `Binary file is not supported: ${path}`,
+    );
+  }
+}
+export async function readBoundedFile(
+  path: string,
+  maxBytes: number,
+  options: {
+    expectedBytes?: number;
+    expectedSha256?: string;
+    privateStorage?: boolean;
+  } = {},
+): Promise<Buffer> {
   const stat = await lstat(path);
   if (
     !stat.isFile() ||
     stat.isSymbolicLink() ||
     stat.nlink !== 1 ||
-    stat.size > maxBytes
+    (options.privateStorage &&
+      process.getuid &&
+      stat.uid !== process.getuid()) ||
+    (options.privateStorage && (stat.mode & 0o077) !== 0) ||
+    stat.size > maxBytes ||
+    (options.expectedBytes !== undefined && stat.size !== options.expectedBytes)
   )
     throw new AgentError(
       "INPUT_SIZE",
@@ -133,7 +162,6 @@ export async function readText(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
-  let data: Buffer;
   try {
     const opened = await file.stat();
     if (
@@ -142,13 +170,19 @@ export async function readText(
       opened.dev !== stat.dev ||
       opened.ino !== stat.ino ||
       opened.size !== stat.size ||
-      opened.mtimeMs !== stat.mtimeMs
+      opened.mtimeMs !== stat.mtimeMs ||
+      (options.privateStorage &&
+        process.getuid &&
+        opened.uid !== process.getuid()) ||
+      opened.mode !== stat.mode ||
+      opened.uid !== stat.uid ||
+      (options.privateStorage && (opened.mode & 0o077) !== 0)
     )
       throw new AgentError(
         "INPUT_CHANGED",
         `Input changed while opening: ${path}`,
       );
-    const buffer = Buffer.alloc(opened.size + 1);
+    const buffer = Buffer.alloc(opened.size);
     let length = 0;
     while (length < buffer.length) {
       const read = await file.read(
@@ -164,28 +198,23 @@ export async function readText(
     if (
       length !== opened.size ||
       after.size !== opened.size ||
-      after.mtimeMs !== opened.mtimeMs
+      after.mtimeMs !== opened.mtimeMs ||
+      after.ino !== opened.ino ||
+      after.dev !== opened.dev
     )
       throw new AgentError(
         "INPUT_CHANGED",
         `Input changed while reading: ${path}`,
       );
-    data = buffer.subarray(0, length);
+    const data = buffer.subarray(0, length);
+    if (options.expectedSha256 && sha256(data) !== options.expectedSha256)
+      throw new AgentError(
+        "INPUT_INTEGRITY",
+        `Input digest does not match its reference: ${path}`,
+      );
+    return data;
   } finally {
     await file.close();
-  }
-  if (data.includes(0))
-    throw new AgentError(
-      "BINARY_INPUT",
-      `Binary file is not supported: ${path}`,
-    );
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(data);
-  } catch {
-    throw new AgentError(
-      "BINARY_INPUT",
-      `Binary file is not supported: ${path}`,
-    );
   }
 }
 export function errorMessage(error: unknown): string {

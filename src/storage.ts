@@ -276,7 +276,12 @@ export class Store {
     if (row.heartbeat !== null && Date.now() - row.heartbeat < 15000)
       throw new AgentError("RUN_BUSY", "Run is still owned by a live process");
   }
-  inheritSources(parentId: string, runId: string, directOnly = false): void {
+  inheritSources(
+    parentId: string,
+    runId: string,
+    directOnly = false,
+    excludeGit = false,
+  ): void {
     const sources = directOnly
       ? (
           this.db
@@ -287,7 +292,9 @@ export class Store {
         ).map((row) => JSON.parse(row.payload) as Artifact)
       : this.artifacts(parentId);
     for (const source of sources.filter(
-      (artifact) => artifact.kind === "source",
+      (artifact) =>
+        artifact.kind === "source" &&
+        !(excludeGit && artifact.metadata.format === "git"),
     ))
       this.db
         .prepare("INSERT OR IGNORE INTO source_links VALUES (?,?)")

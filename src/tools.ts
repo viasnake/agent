@@ -1,5 +1,5 @@
 import { lstat, readFile, rm, mkdtemp } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { z } from "zod";
 import type { Config } from "./config.js";
 import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
@@ -13,7 +13,12 @@ import {
   safePath,
   sha256,
 } from "./util.js";
-import { copyWorkspace, inventory, secretPath } from "./workspace.js";
+import {
+  copyWorkspace,
+  inventory,
+  readSnapshot,
+  secretPath,
+} from "./workspace.js";
 import { assertDisclosure } from "./policy.js";
 import { fetchPublic } from "./network.js";
 import { readContextArchive } from "./context.js";
@@ -100,11 +105,20 @@ export class TaskTools {
     };
   }
   private async file(path: string, write = false): Promise<string> {
-    if (secretPath(path))
+    const projectedTarget = await safePath(this.root, path, true),
+      normalized = relative(this.root, projectedTarget).split(sep).join("/"),
+      snapshot = await readSnapshot(this.store.runDir(this.run.id));
+    if (snapshot.redactedPaths?.includes(normalized))
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        "This path is excluded from the private working copy after image redaction",
+      );
+    if (secretPath(normalized))
       throw new AgentError(
         "PATH_DENIED",
         "Credential, runtime, and control directories are excluded",
       );
+    const target = await safePath(this.root, path, write);
     if (write) {
       if (
         this.run.access === "read-only" ||
@@ -118,15 +132,15 @@ export class TaskTools {
       for (const checkId of this.run.checks)
         for (const protectedPath of this.config.checks[checkId]!.protectedPaths)
           if (
-            path === protectedPath ||
-            path.startsWith(protectedPath.replace(/\/$/, "") + "/")
+            normalized === protectedPath ||
+            normalized.startsWith(protectedPath.replace(/\/$/, "") + "/")
           )
             throw new AgentError(
               "PROTECTED_CHECK",
               `Cannot modify required check input: ${path}`,
             );
     }
-    return safePath(this.root, path, write);
+    return target;
   }
   all(): ToolSpec[] {
     const tools: ToolSpec[] = [

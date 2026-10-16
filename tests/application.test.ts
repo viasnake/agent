@@ -24,6 +24,7 @@ import { safeText, markdown } from "../src/tui/components.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { PiRuntime } from "../src/runtime/pi.js";
 import type { Runtime } from "../src/types.js";
+import { readSnapshot } from "../src/workspace.js";
 
 const until = async (condition: () => boolean) => {
   const deadline = Date.now() + 5000;
@@ -968,6 +969,150 @@ test("research sources and documents survive a writing follow-up with stable cit
   }
 });
 
+test("attachment count and raw-byte budgets reject before creating prepared blobs", async () => {
+  const runtime = new ScriptedRuntime(async () => "unused"),
+    f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  try {
+    await app.initialize();
+    const names = Array.from({ length: 9 }, (_, index) => `small-${index}.txt`);
+    for (const name of names) await writeFile(join(f.root, name), "text");
+    await assert.rejects(
+      app.previewInput(names.map((name) => `@${name}`).join(" ")),
+      { code: "INPUT_SIZE" },
+    );
+
+    const largeNames = ["large-a.txt", "large-b.txt"];
+    for (const name of largeNames)
+      await writeFile(join(f.root, name), Buffer.alloc(10_000_001, "x"));
+    await assert.rejects(
+      app.previewInput(largeNames.map((name) => `@${name}`).join(" ")),
+      { code: "INPUT_SIZE" },
+    );
+    await assert.rejects(readdir(f.p.attachments), { code: "ENOENT" });
+    assert.equal(runtime.requests.length, 0);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("redacted conversations do not inherit prior Git sources", async () => {
+  const runtime = new ScriptedRuntime(async (request) => {
+    const readSource = request.tools.find(
+      (tool) => tool.name === "read_source",
+    );
+    assert.ok(readSource);
+    await assert.rejects(
+      readSource.execute(
+        { id: gitSourceId!, startLine: 1, lines: 10 },
+        request.signal,
+      ),
+      { code: "SOURCE" },
+    );
+    assert.match(
+      await readSource.execute(
+        { id: allowedSourceId!, startLine: 1, lines: 10 },
+        request.signal,
+      ),
+      /authorized source/,
+    );
+    return "Previous non-Git evidence remains available only when authorized.";
+  });
+  const f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  let gitSourceId: string | undefined, allowedSourceId: string | undefined;
+  try {
+    const gitBytes = Buffer.from("selected Git source\n"),
+      origin = await gitWorkspace(f.root, {
+        "inputs/git.patch": gitBytes.toString(),
+        "aliases/git-copy.patch": gitBytes.toString(),
+        "README.md": "safe source\n",
+      }),
+      sourceRun = await f.harness.create({
+        kind: "chat",
+        objective: "own Git source",
+      });
+    const owned = f.store.claim(sourceRun.id, true, true);
+    const source = await f.store.artifact(
+      owned,
+      "git.patch",
+      "source",
+      gitBytes,
+      { format: "git", locator: "working diff" },
+    );
+    const allowedSource = await f.store.artifact(
+      owned,
+      "note.txt",
+      "source",
+      Buffer.from("authorized source\n"),
+      { format: "text", locator: "line 1" },
+    );
+    f.store.release(owned);
+    gitSourceId = source.id;
+    allowedSourceId = allowedSource.id;
+    await app.initialize();
+    app.session.workspace = origin;
+    app.conversations.link(app.session, sourceRun);
+    const context = (app.session.context ??= {
+      pins: [],
+      decisions: [],
+      openQuestions: [],
+      constraints: [],
+      instructions: [],
+      sourceIds: [],
+      imageIds: [],
+      originalRunIds: [],
+      compactions: [],
+      workingState: {
+        checks: [],
+        hashes: {},
+        artifacts: [],
+        operations: [],
+        history: [],
+      },
+    });
+    context.sourceIds = [source.id, allowedSource.id];
+    context.redactedImageIds = [`img-${"a".repeat(64)}`];
+    app.save();
+
+    await app.submit("Explain the earlier evidence");
+    await app.waitForIdle();
+    const run = app.currentRun()!;
+    assert.equal(run.state, "succeeded", run.reason);
+    assert.ok(
+      !f.store
+        .artifacts(run.id)
+        .some(
+          (artifact) =>
+            artifact.kind === "source" && artifact.metadata.format === "git",
+        ),
+    );
+    assert.ok(
+      f.store
+        .artifacts(run.id)
+        .some((artifact) => artifact.id === allowedSource.id),
+    );
+    const snapshot = await readSnapshot(f.store.runDir(run.id));
+    assert.ok(snapshot.redactedPaths?.includes("inputs/git.patch"));
+    assert.ok(snapshot.redactedPaths?.includes("aliases/git-copy.patch"));
+    await assert.rejects(
+      readFile(join(f.store.runDir(run.id), "work", "inputs", "git.patch")),
+      { code: "ENOENT" },
+    );
+    assert.equal(
+      await readFile(
+        join(f.store.runDir(run.id), "baseline", "inputs", "git.patch"),
+        "utf8",
+      ),
+      gitBytes.toString(),
+    );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
 test("a waiting provider run resumes explicitly with the same request budget", async () => {
   const { AgentError } = await import("../src/types.js");
   const runtime = new ScriptedRuntime(async (_request, index) => {
@@ -987,6 +1132,47 @@ test("a waiting provider run resumes explicitly with the same request budget", a
     assert.equal(app.currentRun()?.id, first.id);
     assert.equal(app.currentRun()?.state, "succeeded");
     assert.equal(f.store.usage(first.id).requests, 2);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("resume rejects a conversation redaction set that differs from the run", async () => {
+  const { AgentError } = await import("../src/types.js");
+  const runtime = new ScriptedRuntime(async () => {
+    throw new AgentError("PROVIDER", "offline");
+  });
+  const f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  try {
+    await app.initialize();
+    await app.submit("質問");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.state, "waiting_input");
+    app.session.context ??= {
+      pins: [],
+      decisions: [],
+      openQuestions: [],
+      constraints: [],
+      instructions: [],
+      sourceIds: [],
+      imageIds: [],
+      redactedImageIds: [],
+      originalRunIds: [],
+      compactions: [],
+      workingState: {
+        checks: [],
+        hashes: {},
+        artifacts: [],
+        operations: [],
+        history: [],
+      },
+    };
+    app.session.context.redactedImageIds = [`img-${"b".repeat(64)}`];
+    app.save();
+    await assert.rejects(app.resume(), { code: "IMAGE_REDACTED" });
+    assert.equal(runtime.requests.length, 1);
   } finally {
     await app.close();
     await f.cleanup();

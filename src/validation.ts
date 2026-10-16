@@ -51,7 +51,12 @@ export class Evaluator {
             "CHECK_CONFIG",
             `No baseline files match protected path ${prefix}`,
           );
-        for (const path of protectedFiles)
+        for (const path of protectedFiles) {
+          if (snapshot.redactedPaths?.includes(path))
+            throw new AgentError(
+              "IMAGE_REDACTED",
+              `Required check input was excluded by image redaction: ${path}`,
+            );
           if (
             canonical(snapshot.files[path]) !== canonical(current[path] ?? null)
           )
@@ -59,6 +64,7 @@ export class Evaluator {
               "PROTECTED_CHECK",
               `Required check input was modified: ${path}`,
             );
+        }
       }
       const checkDir = await mkdtemp(join(directory, "check-"));
       try {

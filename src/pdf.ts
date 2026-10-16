@@ -1,9 +1,9 @@
-import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { Paths } from "./config.js";
 import { AgentError, type DataClass, type ImageReference } from "./types.js";
 import { Sandbox } from "./sandbox.js";
-import { atomicWrite, privateDirectory } from "./util.js";
+import { atomicWrite, privateDirectory, readBoundedFile } from "./util.js";
 import { maxConversationImages, saveImage } from "./images.js";
 
 export interface PdfSelection {
@@ -25,6 +25,7 @@ export async function extractPdf(
   remainingImages: number,
   signal: AbortSignal,
 ): Promise<PdfSelection> {
+  await privateDirectory(paths.attachments);
   const scratch = await mkdtemp(join(paths.attachments, ".pdf-"));
   await privateDirectory(scratch);
   const pdfPath = join(scratch, "source.pdf");
@@ -87,26 +88,22 @@ export async function extractPdf(
         textResult.stderr.trim() ||
           "pdftotext could not extract the selected PDF pages",
       );
-    const marker =
-      "\n[PARTIAL: PDF page selection is incomplete; select narrower page ranges.]";
-    if (maxBytes < Buffer.byteLength(marker))
-      throw new AgentError(
-        "INPUT_SIZE",
-        "Narrow the PDF page selection to fit the remaining input budget",
-      );
     const truncatedPages = !selector.pages && end < count,
-      textTruncated = textResult.truncated || truncatedPages,
-      text =
-        textResult.truncated || truncatedPages
-          ? `${Buffer.from(textResult.stdout)
-              .subarray(0, Math.max(0, maxBytes - Buffer.byteLength(marker)))
-              .toString("utf8")}${marker}`
-          : textResult.stdout;
+      extractedPages = textResult.stdout.split("\f").slice(0, end - start + 1);
+    while (extractedPages.length < end - start + 1) extractedPages.push("");
+    const pageText = extractedPages
+      .map((page, index) => `Page ${start + index}:\n${page.trimEnd()}`)
+      .join("\n\n");
+    let text = pageText;
     const images: ImageReference[] = [];
-    let partial = textTruncated;
+    let partial = textResult.truncated || truncatedPages;
+    const renderedPages: number[] = [];
     if (selector.images) {
-      if (remainingImages <= 0 || remainingImages > maxConversationImages)
-        throw new AgentError("IMAGE_LIMIT", "No PDF image capacity remains");
+      if (remainingImages < 0 || remainingImages > maxConversationImages)
+        throw new AgentError(
+          "IMAGE_LIMIT",
+          "Invalid remaining PDF image capacity",
+        );
       const renderEnd = Math.min(end, start + remainingImages - 1);
       if (renderEnd < start) partial = true;
       for (let page = start; page <= renderEnd; page++) {
@@ -149,7 +146,9 @@ export async function extractPdf(
             "PDF_RENDER",
             `Rendered page ${page} is not a bounded regular image`,
           );
-        const bytes = await readFile(imagePath);
+        const bytes = await readBoundedFile(imagePath, 5_000_000, {
+          expectedBytes: stat.size,
+        });
         images.push(
           await saveImage(
             paths,
@@ -159,12 +158,38 @@ export async function extractPdf(
             localOnly,
           ),
         );
+        renderedPages.push(page);
       }
       if (renderEnd < end) partial = true;
     }
+    const textMarker =
+      partial || Buffer.byteLength(pageText) > maxBytes
+        ? "\n[PARTIAL: PDF text or page-image selection is incomplete; select narrower page ranges.]"
+        : "";
+    const omittedPages =
+      selector.images && renderedPages.length < end - start + 1
+        ? renderedPages.length
+          ? `${renderedPages.at(-1)! + 1}-${end}`
+          : `${start}-${end}`
+        : "";
+    const omittedImages = omittedPages
+      ? `\n[PARTIAL: Images for selected PDF pages ${omittedPages} were omitted because the conversation image capacity was exhausted.]`
+      : "";
+    const markers = `${textMarker}${omittedImages}`;
+    if (Buffer.byteLength(markers) > maxBytes)
+      throw new AgentError(
+        "INPUT_SIZE",
+        "Narrow the PDF page selection to fit the remaining input budget",
+      );
+    const body = safeUtf8Prefix(
+      pageText,
+      Math.max(0, maxBytes - Buffer.byteLength(markers)),
+    );
+    if (Buffer.byteLength(body) < Buffer.byteLength(pageText)) partial = true;
+    text = `${body}${markers}`;
     return {
       text,
-      locator: `pages ${start}-${end}${selector.images ? `; rendered ${images.length} images` : ""}`,
+      locator: `pages ${start}-${end}${selector.images ? `; image pages ${renderedPages.length ? `${renderedPages[0]}-${renderedPages.at(-1)}` : "none"}` : ""}`,
       partial,
       images,
     };
@@ -178,6 +203,14 @@ export async function extractPdf(
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
+}
+
+function safeUtf8Prefix(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString("utf8");
 }
 
 function parsePageRange(value: string, pageCount: number): [number, number] {

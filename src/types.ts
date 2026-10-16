@@ -39,11 +39,14 @@ export interface ImageReference {
   mimeType: string;
   width: number;
   height: number;
+  editWidth?: number;
+  editHeight?: number;
   bytes: number;
   sha256: string;
   dataClass: DataClass;
   localOnly: boolean;
   sourceId?: string;
+  documentId?: string;
   transformation?: string;
   comparisonOrder?: number;
 }

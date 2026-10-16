@@ -92,6 +92,8 @@ export class Sandbox {
     maxBytes = this.config.maxOutputBytes,
     timeoutMs = 30000,
   ): Promise<ProcessResult> {
+    maxBytes = Math.min(maxBytes, this.config.maxOutputBytes);
+    timeoutMs = Math.min(timeoutMs, this.config.commandTimeoutSeconds * 1000);
     return this.run(workspace, command, signal, readOnly, {
       timeoutMs,
       maxBytes,

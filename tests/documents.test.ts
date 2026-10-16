@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { unlink, writeFile } from "node:fs/promises";
+import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import sharp from "sharp";
 import { readClipboardPng } from "../src/clipboard.js";
 import {
   loadPreparedInput,
@@ -10,6 +11,10 @@ import {
   prepareDocument,
 } from "../src/documents.js";
 import { prepareGitInput } from "../src/git-input.js";
+import { extractOffice } from "../src/office.js";
+import { extractPdf } from "../src/pdf.js";
+import { emptyConversationContext } from "../src/context.js";
+import { Sandbox } from "../src/sandbox.js";
 import { AgentError } from "../src/types.js";
 import {
   completed,
@@ -100,6 +105,117 @@ test("document selectors retain source locations and quoted table cells", async 
   }
 });
 
+test("unknown text, exact structured source, and bounded row windows preserve locations", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed())),
+    source = join(f.root, "module.py"),
+    json = join(f.root, "exact.json"),
+    yaml = join(f.root, "exact.yaml"),
+    table = join(f.root, "large.csv"),
+    columns = join(f.root, "columns.tsv");
+  try {
+    await writeFile(source, "first\nsecond\nthird\n");
+    const line = await prepareDocument(
+      f.p,
+      source,
+      "module.py::lines=2-3",
+      1000,
+    );
+    assert.equal(line.text, "2: second\n3: third");
+    assert.equal(line.reference.format, "text");
+    await writeFile(json, '{"large":9007199254740993,"exponent":1e+400}\n');
+    const exactJson = await prepareDocument(f.p, json, "exact.json", 1000);
+    assert.equal(
+      exactJson.text,
+      '{"large":9007199254740993,"exponent":1e+400}\n',
+    );
+    await writeFile(yaml, "large: 9007199254740993\nexponent: 1e+400\n");
+    const exactYaml = await prepareDocument(
+      f.p,
+      yaml,
+      "exact.yaml::lines=1-1",
+      1000,
+    );
+    assert.equal(exactYaml.text, "1: large: 9007199254740993");
+    await assert.rejects(
+      prepareDocument(f.p, source, "module.py::lines=1::heading=Title", 1000),
+      { code: "INPUT_SELECTOR" },
+    );
+
+    await writeFile(
+      table,
+      `id\n${Array.from({ length: 2100 }, (_, index) => index + 1).join("\n")}\n`,
+    );
+    const farWindow = await prepareDocument(
+      f.p,
+      table,
+      "large.csv::rows=2099-2100",
+      1000,
+    );
+    assert.match(farWindow.text, /2099: \["2098"\]/);
+    assert.match(farWindow.text, /2100: \["2099"\]/);
+    assert.equal(farWindow.reference.partial, false);
+    const defaultWindow = await prepareDocument(
+      f.p,
+      table,
+      "large.csv",
+      100_000,
+    );
+    assert.equal(defaultWindow.reference.locator, "rows 1-2000");
+    assert.equal(defaultWindow.reference.partial, true);
+    assert.match(defaultWindow.text, /PARTIAL: table has more rows/);
+    await assert.rejects(
+      prepareDocument(f.p, table, "large.csv::rows=2102", 1000),
+      { code: "INPUT_SELECTOR" },
+    );
+    await writeFile(
+      columns,
+      `${Array.from({ length: 256 }, (_, index) => `v${index}`).join("\t")}\n`,
+    );
+    const columnOutput = await prepareDocument(
+      f.p,
+      columns,
+      "columns.tsv",
+      100_000,
+    );
+    assert.equal(JSON.parse(columnOutput.text.slice(3)).length, 256);
+    await writeFile(
+      columns,
+      `${Array.from({ length: 257 }, (_, index) => `v${index}`).join("\t")}\n`,
+    );
+    await assert.rejects(
+      prepareDocument(f.p, columns, "columns.tsv", 100_000),
+      { code: "DOCUMENT_LIMIT" },
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("CSV preserves explicit empty logical records without adding a trailing phantom row", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed())),
+    path = join(f.root, "records.csv");
+  try {
+    await writeFile(path, 'a\n\n""\n"two\nlines"\n');
+    const records = await prepareDocument(
+      f.p,
+      path,
+      "records.csv::rows=1-4",
+      10_000,
+    );
+    assert.equal(
+      records.text,
+      '1: ["a"]\n2: [""]\n3: [""]\n4: ["two\\nlines"]',
+    );
+    assert.equal(records.reference.locator, "rows 1-4");
+    await writeFile(path, "a\n");
+    const trailing = await prepareDocument(f.p, path, "records.csv", 10_000);
+    assert.equal(trailing.reference.locator, "rows 1-1");
+    assert.equal(trailing.text, '1: ["a"]');
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("document tokens reject unknown, mismatched, duplicate and unsafe ranges", () => {
   for (const token of [
     "report.pdf::rows=2-3",
@@ -151,6 +267,26 @@ test("Office extraction preserves block order and rejects archive and XML hazard
     assert.ok(heading >= 0 && heading < cell && cell < end);
     await writeFile(
       path,
+      zip([
+        [
+          "word/document.xml",
+          Buffer.from(
+            '<w:document xmlns:w="urn:word"><w:body><w:p><w:r><w:t><![CDATA[ leading ]]></w:t><w:tab/><w:br/><w:t> trailing </w:t></w:r></w:p></w:body></w:document>',
+          ),
+        ],
+      ]),
+    );
+    const controls = await prepareDocument(f.p, path, "controls.docx", 10_000);
+    assert.match(controls.text, /paragraph:  leading \t\n trailing /);
+    const secondLine = await prepareDocument(
+      f.p,
+      path,
+      "controls.docx::lines=2-2",
+      10_000,
+    );
+    assert.match(secondLine.text, /^2:  trailing /);
+    await writeFile(
+      path,
       zip([["word/document.xml", Buffer.from("<!DOCTYPE x><x/>")]]),
     );
     await assert.rejects(
@@ -170,11 +306,297 @@ test("Office extraction preserves block order and rejects archive and XML hazard
     );
     await writeFile(
       path,
+      zip([
+        ["word/document.xml", xml],
+        ["../escape.xml", Buffer.from("<x/>")],
+      ]),
+    );
+    await assert.rejects(prepareDocument(f.p, path, "report.docx", 10_000));
+    await writeFile(
+      path,
       zip([["word/document.xml", Buffer.alloc(maxZipEntryBytes + 1)]]),
     );
     await assert.rejects(
       prepareDocument(f.p, path, "report.docx", 10_000),
       /exceeds 8000000 bytes/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("PPTX and XLSX preserve namespaced relationships, formulas, and safe indexes", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed())),
+    presentationPath = join(f.root, "deck.pptx"),
+    workbookPath = join(f.root, "book.xlsx"),
+    presentation = Buffer.from(
+      '<p:presentation xmlns:p="urn:presentation" xmlns:q="http://purl.oclc.org/ooxml/officeDocument/relationships"><p:sldIdLst><p:sldId q:id="s1"/></p:sldIdLst></p:presentation>',
+    ),
+    presentationRels = Buffer.from(
+      '<Relationships><Relationship Id="s1" Target="slides/slide1.xml"/></Relationships>',
+    ),
+    slide = Buffer.from(
+      '<p:sld xmlns:p="urn:presentation" xmlns:a="urn:drawing"><a:p><a:t><![CDATA[Strict title]]></a:t><a:br/><a:t>Second line</a:t></a:p></p:sld>',
+    ),
+    workbook = Buffer.from(
+      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sales" r:id="sheet1"/></sheets></workbook>',
+    ),
+    workbookRels = Buffer.from(
+      '<Relationships><Relationship Id="sheet1" Target="worksheets/sheet1.xml"/></Relationships>',
+    ),
+    sheet = Buffer.from(
+      '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><f t="shared" si="0"></f><v>9007199254740993</v></c></row></sheetData></worksheet>',
+    );
+  try {
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        ["ppt/_rels/presentation.xml.rels", presentationRels],
+        ["ppt/slides/slide1.xml", slide],
+      ]),
+    );
+    const deck = await prepareDocument(
+      f.p,
+      presentationPath,
+      "deck.pptx",
+      10_000,
+    );
+    assert.match(deck.text, /slide 1: paragraph: Strict title/);
+    assert.match(deck.text, /Second line/);
+
+    await writeFile(
+      workbookPath,
+      zip([
+        ["xl/workbook.xml", workbook],
+        ["xl/_rels/workbook.xml.rels", workbookRels],
+        ["xl/worksheets/sheet1.xml", sheet],
+        [
+          "xl/sharedStrings.xml",
+          Buffer.from("<sst><si><t>Sales</t></si></sst>"),
+        ],
+      ]),
+    );
+    const index = await prepareDocument(f.p, workbookPath, "book.xlsx", 50_000);
+    assert.match(index.text, /sheet 1: Sales/);
+    assert.equal(index.reference.partial, true);
+    assert.ok(Buffer.byteLength(index.text) <= 8_000);
+    const sales = await prepareDocument(
+      f.p,
+      workbookPath,
+      "book.xlsx::sheet=Sales::rows=1",
+      50_000,
+    );
+    assert.match(sales.text, /A1: type=s raw="0" value="Sales"/);
+    assert.match(
+      sales.text,
+      /B1: type=n formula\[type=shared, sharedIndex=0\]=""; cachedRaw="9007199254740993"; raw="9007199254740993" value="9007199254740993"/,
+    );
+
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        ["ppt/_rels/presentation.xml.rels", presentationRels],
+        ["ppt/slides/slide1.xml", slide],
+        [
+          "ppt/slides/_rels/slide1.xml.rels",
+          Buffer.from(
+            '<Relationships><Relationship Id="outside" Target="https://example.invalid/x"/></Relationships>',
+          ),
+        ],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      /External Office relationships are not permitted/,
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        [
+          "ppt/_rels/presentation.xml.rels",
+          Buffer.from(
+            '<Relationships><Relationship Id="s1" Target="../../outside.xml"/></Relationships>',
+          ),
+        ],
+        ["ppt/slides/slide1.xml", slide],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      { code: "DOCUMENT_ARCHIVE" },
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        [
+          "ppt/_rels/presentation.xml.rels",
+          Buffer.from(
+            '<Relationships><Relationship Id="s1" Target="slides/slide1.xml" Type="http://example.invalid/vba&#80;roject"/></Relationships>',
+          ),
+        ],
+        ["ppt/slides/slide1.xml", slide],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      { code: "DOCUMENT_ARCHIVE" },
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        [
+          "[Content_Types].xml",
+          Buffer.from(
+            '<Types><Override ContentType="application/vnd.ms-word.document.macro&#69;nabled.main+xml"/></Types>',
+          ),
+        ],
+        ["word/document.xml", Buffer.from("<document/>")],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      { code: "DOCUMENT_ARCHIVE" },
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        [
+          "ppt/presentation.xml",
+          Buffer.from(
+            presentation.toString().replace('q:id="s1"', 'q:id="missing"'),
+          ),
+        ],
+        ["ppt/_rels/presentation.xml.rels", presentationRels],
+        ["ppt/slides/slide1.xml", slide],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      /Missing slide relationship/,
+    );
+    await writeFile(
+      presentationPath,
+      zip([
+        ["ppt/presentation.xml", presentation],
+        [
+          "ppt/_rels/presentation.xml.rels",
+          Buffer.from(
+            '<Relationships><Relationship Id="s1" Target="slides/missing.xml"/></Relationships>',
+          ),
+        ],
+        ["ppt/slides/slide1.xml", slide],
+      ]),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, presentationPath, "deck.pptx", 10_000),
+      /Missing slide part/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("XLSX rejects invalid row coordinates, columns, shared strings and parts", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed())),
+    path = join(f.root, "invalid.xlsx"),
+    workbook = Buffer.from(
+      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" r:id="sheet1"/></sheets></workbook>',
+    ),
+    shared = Buffer.from("<sst><si><t>one</t></si></sst>");
+  const pack = (relationship: string, sheet?: string): Buffer =>
+    zip([
+      ["xl/workbook.xml", workbook],
+      ["xl/_rels/workbook.xml.rels", Buffer.from(relationship)],
+      ...(sheet
+        ? [["xl/worksheets/sheet1.xml", Buffer.from(sheet)] as [string, Buffer]]
+        : []),
+      ["xl/sharedStrings.xml", shared],
+    ] as [string, Buffer][]);
+  try {
+    const invalidSheets = [
+      {
+        xml: '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>1</v></c></row></sheetData></worksheet>',
+        error: "DOCUMENT_PARSE",
+      },
+      {
+        xml: '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v/></c></row></sheetData></worksheet>',
+        error: "DOCUMENT_PARSE",
+      },
+      {
+        xml: '<worksheet><sheetData><row r="1"><c r="IW1"><v>1</v></c></row></sheetData></worksheet>',
+        error: "DOCUMENT_LIMIT",
+      },
+      {
+        xml: '<worksheet><sheetData><row r="2"><c r="A2"><v>2</v></c></row><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>',
+        error: "DOCUMENT_LIMIT",
+      },
+    ];
+    for (const item of invalidSheets) {
+      await writeFile(
+        path,
+        pack(
+          '<Relationships><Relationship Id="sheet1" Target="worksheets/sheet1.xml"/></Relationships>',
+          item.xml,
+        ),
+      );
+      await assert.rejects(prepareDocument(f.p, path, "invalid.xlsx", 10_000), {
+        code: item.error,
+      });
+    }
+    const safeSheet =
+      '<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>';
+    await assert.rejects(
+      extractOffice(
+        pack(
+          '<Relationships><Relationship Id="sheet1" Target="worksheets/sheet1.xml"/></Relationships>',
+          safeSheet,
+        ),
+        "xlsx",
+        { sheet: "S", rows: "9007199254740992" },
+        10_000,
+      ),
+      { code: "DOCUMENT_LIMIT" },
+    );
+    await writeFile(
+      path,
+      pack(
+        '<Relationships><Relationship Id="sheet1" Target="worksheets/sheet1.xml"/></Relationships>',
+        '<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="2101"/></sheetData></worksheet>',
+      ),
+    );
+    const emptyTail = await prepareDocument(
+      f.p,
+      path,
+      "invalid.xlsx::sheet=S",
+      10_000,
+    );
+    assert.equal(emptyTail.reference.partial, true);
+    assert.match(emptyTail.text, /PARTIAL: worksheet continues/);
+    await writeFile(
+      path,
+      pack(
+        "<Relationships/>",
+        '<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>',
+      ),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, path, "invalid.xlsx", 10_000),
+      /Missing worksheet relationship/,
+    );
+    await writeFile(
+      path,
+      pack(
+        '<Relationships><Relationship Id="sheet1" Target="worksheets/missing.xml"/></Relationships>',
+        "<worksheet><sheetData/></worksheet>",
+      ),
+    );
+    await assert.rejects(
+      prepareDocument(f.p, path, "invalid.xlsx", 10_000),
+      /Missing worksheet part/,
     );
   } finally {
     await f.cleanup();
@@ -195,6 +617,13 @@ test("oversized selections are explicit and remain readable after source deletio
       (await loadPreparedInput(f.p, prepared.reference)).text,
       prepared.text,
     );
+    await writeFile(
+      join(f.p.attachments, `${prepared.reference.rawSha256}.raw`),
+      "changed",
+    );
+    await assert.rejects(loadPreparedInput(f.p, prepared.reference), {
+      code: "INPUT_SIZE",
+    });
   } finally {
     await f.cleanup();
   }
@@ -203,8 +632,17 @@ test("oversized selections are explicit and remain readable after source deletio
 test("Git attachments are bounded diffs and clipboard failure gives the file fallback", async () => {
   const f = await fixture(new ScriptedRuntime(async () => completed()));
   try {
-    const workspace = await gitWorkspace(f.root, { "README.md": "before\n" });
+    const workspace = await gitWorkspace(f.root, {
+      "README.md": "before\n",
+      ":(glob)literal.txt": "original\n",
+      "diagram.png": "image baseline\n",
+    });
     await writeFile(join(workspace, "README.md"), "before\nafter\n");
+    await writeFile(join(workspace, ":(glob)literal.txt"), "changed\n");
+    await writeFile(
+      join(workspace, "diagram.png"),
+      Buffer.from([0, 1, 2, 0, 3]),
+    );
     const diff = await prepareGitInput(
       f.p,
       workspace,
@@ -213,7 +651,56 @@ test("Git attachments are bounded diffs and clipboard failure gives the file fal
       AbortSignal.timeout(5000),
     );
     assert.match(diff.text, /\+after/);
+    assert.match(diff.text, /\+changed/);
+    assert.match(diff.text, /-original/);
+    assert.doesNotMatch(diff.text, /image baseline/);
+    assert.doesNotMatch(diff.text, /GIT binary patch/);
+    assert.match(diff.text, /PARTIAL: image paths omitted from Git diff/);
+    assert.match(diff.text, /diagram\.png/);
+    assert.equal(diff.reference.partial, true);
     assert.match(diff.reference.locator, /read-only Git working/);
+    const imageRoot = join(f.root, "image-only-root");
+    await mkdir(imageRoot);
+    const imageOnly = await gitWorkspace(imageRoot, {
+      "only.png": "image baseline\n",
+    });
+    await writeFile(join(imageOnly, "only.png"), "image changed\n");
+    const imageDiff = await prepareGitInput(
+      f.p,
+      imageOnly,
+      "git:working",
+      100_000,
+      AbortSignal.timeout(5000),
+    );
+    assert.match(imageDiff.text, /PARTIAL: image-only changes omitted/);
+    assert.match(imageDiff.reference.locator, /only\.png/);
+    assert.equal(imageDiff.reference.partial, true);
+    const redactedContext = emptyConversationContext();
+    redactedContext.redactedImageIds = [`img-${"c".repeat(64)}`];
+    const beforeRejectedInputs = f.store.list().length;
+    await assert.rejects(
+      f.harness.create({
+        kind: "chat",
+        access: "read-only",
+        objective: "inspect selected Git changes",
+        preparedInputs: [imageDiff],
+        contextState: redactedContext,
+      }),
+      { code: "GIT_REDACTED" },
+    );
+    await assert.rejects(
+      f.harness.create({
+        kind: "chat",
+        access: "read-only",
+        objective: "inspect Git status",
+        workspace: imageOnly,
+        inputs: ["git:status"],
+        contextState: redactedContext,
+      }),
+      { code: "GIT_REDACTED" },
+    );
+    assert.equal(f.store.list().length, beforeRejectedInputs);
+    assert.equal((f.harness.runtime as ScriptedRuntime).requests.length, 0);
     await writeFile(join(workspace, ".env"), "not-a-real-secret");
     await assert.rejects(
       prepareGitInput(
@@ -229,6 +716,117 @@ test("Git attachments are bounded diffs and clipboard failure gives the file fal
       readClipboardPng("freebsd"),
       /Save the image as a PNG/,
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("PDF extraction fixes argv, maps page text, and marks omitted page images", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  const commands: string[][] = [];
+  const png = await sharp({
+    create: {
+      width: 2,
+      height: 1,
+      channels: 3,
+      background: { r: 20, g: 40, b: 60 },
+    },
+  })
+    .png()
+    .toBuffer();
+  const sandbox = {
+    executeArgs: async (
+      workspace: string,
+      args: string[],
+      _signal: AbortSignal,
+      readOnly = true,
+    ) => {
+      commands.push(args);
+      assert.equal(readOnly, args[0] !== "/usr/bin/pdftoppm");
+      if (args[0] === "/usr/bin/pdfinfo")
+        return {
+          code: 0,
+          stdout: "Pages:          3\nEncrypted:      no\n",
+          stderr: "",
+          truncated: false,
+        };
+      if (args[0] === "/usr/bin/pdftotext")
+        return {
+          code: 0,
+          stdout: "page two\fpage three\f",
+          stderr: "",
+          truncated: false,
+        };
+      await writeFile(join(workspace, "page-2.png"), png, { mode: 0o600 });
+      return { code: 0, stdout: "", stderr: "", truncated: false };
+    },
+  } as unknown as Sandbox;
+  try {
+    const selected = await extractPdf(
+      f.p,
+      sandbox,
+      Buffer.from("%PDF-fake"),
+      "sample.pdf",
+      { pages: "2-3", images: true },
+      1200,
+      "private",
+      false,
+      1,
+      AbortSignal.timeout(5000),
+    );
+    assert.match(selected.text, /Page 2:\npage two/);
+    assert.match(selected.text, /Page 3:\npage three/);
+    assert.match(selected.text, /images for selected PDF pages 3-3/i);
+    assert.equal(selected.locator, "pages 2-3; image pages 2-2");
+    assert.equal(selected.images.length, 1);
+    assert.deepEqual(commands[0], [
+      "/usr/bin/pdfinfo",
+      "/workspace/source.pdf",
+    ]);
+    assert.deepEqual(commands[1], [
+      "/usr/bin/pdftotext",
+      "-layout",
+      "-f",
+      "2",
+      "-l",
+      "3",
+      "/workspace/source.pdf",
+      "-",
+    ]);
+    assert.deepEqual(commands[2], [
+      "/usr/bin/pdftoppm",
+      "-f",
+      "2",
+      "-l",
+      "2",
+      "-singlefile",
+      "-png",
+      "-scale-to",
+      "2048",
+      "/workspace/source.pdf",
+      "/workspace/page-2",
+    ]);
+    assert.ok(Buffer.byteLength(selected.text) <= 1200);
+    commands.length = 0;
+    const withoutImageCapacity = await extractPdf(
+      f.p,
+      sandbox,
+      Buffer.from("%PDF-fake"),
+      "sample.pdf",
+      { pages: "2-3", images: true },
+      1200,
+      "private",
+      false,
+      0,
+      AbortSignal.timeout(5000),
+    );
+    assert.equal(withoutImageCapacity.images.length, 0);
+    assert.match(
+      withoutImageCapacity.text,
+      /images for selected PDF pages 2-3/i,
+    );
+    assert.match(withoutImageCapacity.locator, /image pages none/);
+    assert.equal(commands.length, 2);
   } finally {
     await f.cleanup();
   }

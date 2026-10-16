@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { unlink, writeFile } from "node:fs/promises";
+import { symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import sharp from "sharp";
 import test from "node:test";
 import { Harness } from "../src/harness.js";
+import { emptyConversationContext } from "../src/context.js";
+import { storePreparedText } from "../src/documents.js";
 import {
   maxImageBytes,
   maxImagePixels,
   saveImage,
+  transformImage,
   validateImage,
 } from "../src/images.js";
 import { Application } from "../src/application.js";
@@ -136,6 +139,225 @@ test("validates static PNG, JPEG and WebP and rejects malformed, mismatched, ani
     .webp({ loop: 0, delay: [100, 100] })
     .toBuffer();
   await assert.rejects(validateImage(animated));
+});
+
+test("orientation-corrected edit dimensions do not alter the image content identity", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  try {
+    const oriented = await sharp({
+      create: {
+        width: 2,
+        height: 1,
+        channels: 3,
+        background: { r: 100, g: 50, b: 25 },
+      },
+    })
+      .jpeg()
+      .withMetadata({ orientation: 6 })
+      .toBuffer();
+    const metadata = await validateImage(oriented, "image/jpeg");
+    assert.deepEqual(
+      [
+        metadata.width,
+        metadata.height,
+        metadata.editWidth,
+        metadata.editHeight,
+      ],
+      [2, 1, 1, 2],
+    );
+    const reference = await saveImage(
+      f.p,
+      "oriented.jpg",
+      oriented,
+      "private",
+      false,
+    );
+    assert.deepEqual([reference.editWidth, reference.editHeight], [1, 2]);
+    assert.equal(reference.id, `img-${reference.sha256}`);
+    const edited = await transformImage(f.p, reference, "crop", {
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    });
+    assert.deepEqual([edited.editWidth, edited.editHeight], [1, 1]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("staged images stay local, and redacted originals cannot be restaged", async () => {
+  const runtime = new ScriptedRuntime(async () => "unused"),
+    f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime),
+    imagePath = join(f.root, "standalone.png"),
+    image = (await fixtures())[0]!;
+  try {
+    await app.initialize();
+    await writeFile(imagePath, image);
+    await symlink(".", join(f.root, "linked"));
+    await assert.rejects(app.stageImageFromPath("linked/standalone.png"), {
+      code: "PATH_DENIED",
+    });
+    await writeFile(join(f.root, ".env.png"), image);
+    await assert.rejects(app.previewInput("@.env.png"), {
+      code: "PATH_DENIED",
+    });
+    const staged = await app.stageImageFromPath("standalone.png");
+    assert.equal(app.session.images?.[0]?.id, staged.id);
+    assert.equal(runtime.requests.length, 0);
+    app.removeImage(staged.id);
+    await assert.rejects(app.stageImageFromPath("standalone.png"), {
+      code: "IMAGE_REDACTED",
+    });
+    await assert.rejects(app.previewInput("@standalone.png"), {
+      code: "IMAGE_REDACTED",
+    });
+    await assert.rejects(app.previewInput(`@${imagePath}`), {
+      code: "PATH_DENIED",
+    });
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("PDF-linked page images cannot be cropped or masked", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused")),
+    app = new Application(
+      f.config,
+      f.p,
+      f.store,
+      f.root,
+      async () => f.harness.runtime,
+    );
+  try {
+    await app.initialize();
+    const page = await saveImage(
+      f.p,
+      "page.png",
+      (await fixtures())[0]!,
+      "private",
+      false,
+    );
+    const documentPage = {
+      ...page,
+      dataClass: "restricted" as const,
+      documentId: "doc-".padEnd(68, "a"),
+      localOnly: true,
+    };
+    await writeFile(join(f.root, "standalone.png"), (await fixtures())[0]!);
+    app.session.images = [documentPage];
+    const restaged = await app.stageImageFromPath("standalone.png");
+    assert.equal(restaged.documentId, documentPage.documentId);
+    assert.equal(restaged.dataClass, documentPage.dataClass);
+    assert.equal(restaged.localOnly, documentPage.localOnly);
+    await assert.rejects(
+      app.editImage(page.id, "mask", { x: 0, y: 0, width: 1, height: 1 }),
+      /PDF-linked images cannot be masked or cropped/,
+    );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("a redacted image cannot be reintroduced into a new run", async () => {
+  const runtime = new ScriptedRuntime(async () => {
+      throw new Error("redacted image reached provider");
+    }),
+    f = await fixture(runtime);
+  try {
+    const image = await saveImage(
+      f.p,
+      "redacted.png",
+      (await fixtures())[0]!,
+      "private",
+      false,
+    );
+    const contextState = emptyConversationContext();
+    contextState.redactedImageIds = [image.id];
+    await assert.rejects(
+      f.harness.create({
+        kind: "chat",
+        objective: "describe",
+        images: [image],
+        contextState,
+      }),
+      { code: "IMAGE_REDACTED" },
+    );
+    const prepared = await storePreparedText(
+      f.p,
+      "image.pdf",
+      "pdf",
+      "",
+      Buffer.from("selected text"),
+      "selected text",
+      "pages 1-1",
+      false,
+    );
+    prepared.reference.imageIds = [image.id];
+    prepared.images = [image];
+    await assert.rejects(
+      f.harness.create({
+        kind: "chat",
+        objective: "describe",
+        preparedInputs: [prepared],
+        contextState,
+      }),
+      { code: "IMAGE_REDACTED" },
+    );
+    assert.equal(runtime.requests.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a previously redacted derived image is rejected before conversation mutation", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused")),
+    app = new Application(
+      f.config,
+      f.p,
+      f.store,
+      f.root,
+      async () => f.harness.runtime,
+    );
+  try {
+    await app.initialize();
+    const source = await saveImage(
+      f.p,
+      "source.png",
+      (await fixtures())[0]!,
+      "private",
+      false,
+    );
+    const derived = await transformImage(f.p, source, "mask", {
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    });
+    app.session.images = [source];
+    app.session.context = {
+      ...emptyConversationContext(),
+      redactedImageIds: [derived.id],
+    };
+    const before = structuredClone(app.session.context);
+    await assert.rejects(
+      app.editImage(source.id, "mask", {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+      }),
+      { code: "IMAGE_REDACTED" },
+    );
+    assert.deepEqual(app.session.images, [source]);
+    assert.deepEqual(app.session.context, before);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
 });
 
 test("masked image derivatives replace originals in the next provider context", async () => {

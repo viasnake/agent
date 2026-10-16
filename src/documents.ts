@@ -1,5 +1,4 @@
-import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { parseDocument } from "yaml";
 import type { Paths } from "./config.js";
@@ -8,7 +7,12 @@ import {
   type DocumentReference,
   type PreparedInput,
 } from "./types.js";
-import { atomicWrite, privateDirectory, sha256 } from "./util.js";
+import {
+  atomicWrite,
+  privateDirectory,
+  readBoundedFile,
+  sha256,
+} from "./util.js";
 import { extractOffice } from "./office.js";
 import type { Sandbox } from "./sandbox.js";
 import { extractPdf } from "./pdf.js";
@@ -19,6 +23,8 @@ export const maxZipEntries = 2_000;
 export const maxZipEntryBytes = 8_000_000;
 export const maxZipTotalBytes = 50_000_000;
 export const maxDocumentPreviewBytes = 8_000;
+export const maxPreparedDocuments = 8;
+export const maxPreparedInputBytes = maxDocumentBytes;
 
 const formats: Record<string, string> = {
   ".txt": "text",
@@ -54,6 +60,7 @@ export interface DocumentPreparationOptions {
   sandbox?: Sandbox;
   dataClass?: DataClass;
   localOnly?: boolean;
+  expectedBytes?: number;
   remainingImages?: number;
   signal?: AbortSignal;
 }
@@ -93,18 +100,16 @@ export function parseDocumentToken(token: string): DocumentToken {
       selector.images = value === "yes";
     } else Object.assign(selector, { [key]: value });
   }
-  const format = formats[extname(path).toLowerCase()];
-  if (!format)
-    throw new AgentError(
-      "INPUT_FORMAT",
-      `Unsupported attachment format: ${basename(path)}`,
-    );
+  const format = formats[extname(path).toLowerCase()] ?? "text";
   const allowed: Record<string, string[]> = {
     pdf: ["pages", "images"],
     xlsx: ["sheet", "rows"],
     pptx: ["slides"],
     text: ["lines"],
+    json: ["lines"],
+    yaml: ["lines"],
     markdown: ["lines", "heading"],
+    docx: ["lines"],
     csv: ["rows"],
     tsv: ["rows"],
   };
@@ -114,6 +119,11 @@ export function parseDocumentToken(token: string): DocumentToken {
         "INPUT_SELECTOR",
         `Selector ${key} does not apply to ${format}`,
       );
+  if (selector.heading && selector.lines)
+    throw new AgentError(
+      "INPUT_SELECTOR",
+      "heading and lines selectors cannot be combined",
+    );
   if (
     (selector.lines && !validRange(selector.lines)) ||
     (selector.rows && !validRange(selector.rows)) ||
@@ -147,50 +157,11 @@ export async function prepareDocument(
   if (!Number.isSafeInteger(maxExtractBytes) || maxExtractBytes < 0)
     throw new AgentError("INPUT_SIZE", "Document input budget is invalid");
   const parsed = parseDocumentToken(token);
-  const file = await open(
-    sourcePath,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-  );
-  let raw: Buffer;
-  try {
-    const initial = await file.stat();
-    if (
-      !initial.isFile() ||
-      initial.nlink !== 1 ||
-      initial.size > maxDocumentBytes
-    )
-      throw new AgentError(
-        "INPUT_SIZE",
-        `Attachments must be regular files with at most ${maxDocumentBytes} bytes`,
-      );
-    raw = Buffer.alloc(initial.size);
-    let offset = 0;
-    while (offset < raw.length) {
-      const { bytesRead } = await file.read(
-        raw,
-        offset,
-        raw.length - offset,
-        offset,
-      );
-      if (!bytesRead) break;
-      offset += bytesRead;
-    }
-    const final = await file.stat();
-    if (
-      offset !== initial.size ||
-      final.size !== initial.size ||
-      final.ino !== initial.ino ||
-      final.dev !== initial.dev
-    )
-      throw new AgentError(
-        "INPUT_CHANGED",
-        "Attachment changed while being read",
-      );
-  } finally {
-    await file.close();
-  }
+  const raw = await readBoundedFile(sourcePath, maxDocumentBytes, {
+    expectedBytes: options.expectedBytes,
+  });
   const rawSha256 = sha256(raw);
-  const format = formats[extname(parsed.path).toLowerCase()]!;
+  const format = formats[extname(parsed.path).toLowerCase()] ?? "text";
   await privateDirectory(paths.attachments);
   let selected: {
     text: string;
@@ -245,6 +216,11 @@ export async function prepareDocument(
         "UNSAFE_STORAGE",
         "Attachment blob is not a private regular file",
       );
+    await readBoundedFile(blob, maxDocumentBytes, {
+      expectedBytes: raw.length,
+      expectedSha256: rawSha256,
+      privateStorage: true,
+    });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     await atomicWrite(blob, raw);
@@ -262,6 +238,7 @@ export async function prepareDocument(
     partial: selected.partial,
     imageIds: selected.images?.map((image) => image.id),
   };
+  for (const image of selected.images ?? []) image.documentId = reference.id;
   const selectedPath = join(paths.attachments, `${reference.id}.selected`);
   try {
     const existing = await lstat(selectedPath);
@@ -275,19 +252,11 @@ export async function prepareDocument(
         "UNSAFE_STORAGE",
         "Prepared selection is not a private regular file",
       );
-    const selection = await open(
-      selectedPath,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-    );
-    try {
-      if (sha256(await selection.readFile()) !== reference.selectedSha256)
-        throw new AgentError(
-          "INPUT_INTEGRITY",
-          "Conflicting prepared selection digest",
-        );
-    } finally {
-      await selection.close();
-    }
+    await readBoundedFile(selectedPath, maxDocumentBytes, {
+      expectedBytes: reference.selectedBytes,
+      expectedSha256: reference.selectedSha256,
+      privateStorage: true,
+    });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     await atomicWrite(selectedPath, selected.text);
@@ -309,6 +278,11 @@ export async function storePreparedText(
     throw new AgentError(
       "INPUT_SIZE",
       `Generated input exceeds ${maxDocumentBytes} bytes`,
+    );
+  if (Buffer.byteLength(text) > maxDocumentBytes)
+    throw new AgentError(
+      "INPUT_SIZE",
+      `Generated selection exceeds ${maxDocumentBytes} bytes`,
     );
   const rawSha256 = sha256(raw),
     selectedSha256 = sha256(text),
@@ -345,19 +319,11 @@ export async function storePreparedText(
           "UNSAFE_STORAGE",
           "Prepared input storage is unsafe",
         );
-      const handle = await open(
-        path,
-        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-      );
-      try {
-        if (sha256(await handle.readFile()) !== sha256(bytes))
-          throw new AgentError(
-            "INPUT_INTEGRITY",
-            "Prepared input digest conflict",
-          );
-      } finally {
-        await handle.close();
-      }
+      await readBoundedFile(path, maxDocumentBytes, {
+        expectedBytes: bytes.length,
+        expectedSha256: sha256(bytes),
+        privateStorage: true,
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await atomicWrite(path, bytes);
@@ -370,82 +336,65 @@ export async function loadPreparedInput(
   paths: Paths,
   reference: DocumentReference,
 ): Promise<PreparedInput> {
-  const rawPath = join(paths.attachments, `${reference.rawSha256}.raw`);
-  const selectedPath = join(paths.attachments, `${reference.id}.selected`);
-  const [rawInfo, selectedInfo] = await Promise.all([
-    lstat(rawPath),
-    lstat(selectedPath),
-  ]);
-  for (const info of [rawInfo, selectedInfo])
-    if (
-      !info.isFile() ||
-      info.isSymbolicLink() ||
-      info.nlink !== 1 ||
-      (info.mode & 0o077) !== 0 ||
-      (process.getuid && info.uid !== process.getuid())
-    )
-      throw new AgentError(
-        "UNSAFE_STORAGE",
-        "Prepared attachment storage is unsafe",
-      );
   if (
-    rawInfo.size !== reference.rawBytes ||
-    selectedInfo.size !== reference.selectedBytes ||
-    rawInfo.size > maxDocumentBytes ||
-    selectedInfo.size > maxDocumentBytes
+    !/^doc-[a-f0-9]{64}$/.test(reference.id) ||
+    !reference.originalName ||
+    reference.originalName.length > 255 ||
+    /[/\\\0]/.test(reference.originalName) ||
+    ![
+      "text",
+      "markdown",
+      "json",
+      "yaml",
+      "csv",
+      "tsv",
+      "pdf",
+      "docx",
+      "pptx",
+      "xlsx",
+      "git",
+    ].includes(reference.format) ||
+    typeof reference.selector !== "string" ||
+    reference.selector.length > 2048 ||
+    !/^[a-f0-9]{64}$/.test(reference.rawSha256) ||
+    !/^[a-f0-9]{64}$/.test(reference.selectedSha256) ||
+    !Number.isSafeInteger(reference.rawBytes) ||
+    !Number.isSafeInteger(reference.selectedBytes) ||
+    reference.rawBytes < 0 ||
+    reference.rawBytes > maxDocumentBytes ||
+    reference.selectedBytes < 0 ||
+    reference.selectedBytes > maxDocumentBytes
   )
     throw new AgentError(
       "INPUT_INTEGRITY",
-      "Prepared attachment size does not match its reference",
+      "Invalid prepared attachment reference",
     );
-  const [raw, text] = await Promise.all([
-    open(rawPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)),
-    open(selectedPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)),
-  ]);
-  try {
-    const [rawOpened, selectedOpened] = await Promise.all([
-      raw.stat(),
-      text.stat(),
-    ]);
-    if (
-      !rawOpened.isFile() ||
-      !selectedOpened.isFile() ||
-      rawOpened.nlink !== 1 ||
-      selectedOpened.nlink !== 1 ||
-      rawOpened.ino !== rawInfo.ino ||
-      rawOpened.dev !== rawInfo.dev ||
-      selectedOpened.ino !== selectedInfo.ino ||
-      selectedOpened.dev !== selectedInfo.dev
-    )
-      throw new AgentError(
-        "INPUT_INTEGRITY",
-        "Prepared attachment changed while opening",
-      );
-    const [rawBytes, selectedBytes] = await Promise.all([
-      raw.readFile(),
-      text.readFile(),
-    ]);
-    if (
-      rawBytes.length !== reference.rawBytes ||
-      sha256(rawBytes) !== reference.rawSha256 ||
-      selectedBytes.length !== reference.selectedBytes ||
-      sha256(selectedBytes) !== reference.selectedSha256
-    )
-      throw new AgentError(
-        "INPUT_INTEGRITY",
-        "Prepared attachment digest or size does not match",
-      );
-    return {
-      reference: structuredClone(reference),
-      text: new TextDecoder("utf-8", { fatal: true }).decode(selectedBytes),
-    };
-  } finally {
-    await Promise.all([raw.close(), text.close()]);
-  }
+  const rawPath = join(paths.attachments, `${reference.rawSha256}.raw`);
+  const selectedPath = join(paths.attachments, `${reference.id}.selected`);
+  await readBoundedFile(rawPath, maxDocumentBytes, {
+    expectedBytes: reference.rawBytes,
+    expectedSha256: reference.rawSha256,
+    privateStorage: true,
+  });
+  const selectedBytes = await readBoundedFile(selectedPath, maxDocumentBytes, {
+    expectedBytes: reference.selectedBytes,
+    expectedSha256: reference.selectedSha256,
+    privateStorage: true,
+  });
+  return {
+    reference: structuredClone(reference),
+    text: new TextDecoder("utf-8", { fatal: true }).decode(selectedBytes),
+  };
 }
 
 function decodeText(raw: Buffer): string {
-  if (raw.includes(0))
+  if (
+    raw.includes(0) ||
+    raw.some(
+      (byte) =>
+        (byte < 0x20 && ![0x09, 0x0a, 0x0d].includes(byte)) || byte === 0x7f,
+    )
+  )
     throw new AgentError("BINARY_INPUT", "Binary documents are not supported");
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(raw);
@@ -494,15 +443,39 @@ function selectText(
   maxBytes: number,
 ): { text: string; locator: string; partial: boolean } {
   let selected = text,
-    locator = "whole document";
+    locator = "whole document",
+    partial = false;
+  if (format === "json") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new AgentError("DOCUMENT_PARSE", "Malformed JSON document");
+    }
+    validateHierarchy(parsed);
+  } else if (format === "yaml") {
+    const document = parseDocument(text);
+    if (document.errors.length)
+      throw new AgentError("DOCUMENT_PARSE", "Malformed YAML");
+    try {
+      validateHierarchy(document.toJS({ maxAliasCount: 0 }));
+    } catch {
+      throw new AgentError("DOCUMENT_PARSE", "YAML aliases are not permitted");
+    }
+  }
   if (selector.lines) {
     const [start, end = start] = selector.lines.split("-").map(Number),
       lines = text.split("\n");
+    if (end! > lines.length)
+      throw new AgentError(
+        "INPUT_SELECTOR",
+        "Line range is outside the document",
+      );
     selected = lines
       .slice(start! - 1, end)
       .map((line, i) => `${start! + i}: ${line}`)
       .join("\n");
-    locator = `lines ${start}-${Math.min(end!, lines.length)}`;
+    locator = `lines ${start}-${end}`;
     if (start! > lines.length)
       throw new AgentError(
         "INPUT_SELECTOR",
@@ -542,27 +515,12 @@ function selectText(
       .map((line, i) => `${start + i + 1}: ${line}`)
       .join("\n");
     locator = `heading ${selector.heading} (lines ${start + 1}-${end})`;
-  } else if (format === "json") {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      throw new AgentError("DOCUMENT_PARSE", "Malformed JSON document");
-    }
-    validateHierarchy(parsed);
-    selected = JSON.stringify(parsed, null, 2);
-  } else if (format === "yaml") {
-    const document = parseDocument(text);
-    if (document.errors.length)
-      throw new AgentError("DOCUMENT_PARSE", "Malformed YAML");
-    try {
-      validateHierarchy(document.toJS({ maxAliasCount: 0 }));
-    } catch {
-      throw new AgentError("DOCUMENT_PARSE", "YAML aliases are not permitted");
-    }
-    selected = document.toString();
-  } else if (format === "csv" || format === "tsv")
-    selected = tableText(text, format === "tsv" ? "\t" : ",", selector.rows);
+  } else if (format === "csv" || format === "tsv") {
+    const table = tableText(text, format === "tsv" ? "\t" : ",", selector.rows);
+    selected = table.text;
+    locator = table.locator;
+    partial = table.partial;
+  }
   const size = Buffer.byteLength(selected);
   if (size > maxBytes) {
     const marker =
@@ -572,39 +530,94 @@ function selectText(
         "INPUT_SIZE",
         "Narrow the document selection to fit the remaining input budget",
       );
-    const excerpt = Buffer.from(selected)
-      .subarray(
-        0,
-        Math.min(
-          maxDocumentPreviewBytes,
-          Math.max(0, maxBytes - Buffer.byteLength(marker)),
-        ),
-      )
-      .toString("utf8");
+    const excerpt = safeUtf8Prefix(
+      selected,
+      Math.min(
+        maxDocumentPreviewBytes,
+        Math.max(0, maxBytes - Buffer.byteLength(marker)),
+      ),
+    );
     return { text: `${excerpt}${marker}`, locator, partial: true };
   }
-  return { text: selected, locator, partial: false };
+  return { text: selected, locator, partial };
 }
 
-function tableText(text: string, delimiter: string, rowRange?: string): string {
-  const rows = parseTable(text, delimiter);
-  const selected = rowRange
-    ? (() => {
-        const [start, end = start] = rowRange.split("-").map(Number);
-        return rows
-          .slice(start! - 1, end)
-          .map((row, i) => `${start! + i}: ${JSON.stringify(row)}`);
-      })()
-    : rows.map((row, i) => `${i + 1}: ${JSON.stringify(row)}`);
-  return selected.join("\n");
+function safeUtf8Prefix(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text);
+  let end = Math.min(bytes.length, maxBytes);
+  while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString("utf8");
 }
 
-function parseTable(text: string, delimiter: string): string[][] {
-  const rows: string[][] = [],
+function tableText(
+  text: string,
+  delimiter: string,
+  rowRange?: string,
+): { text: string; locator: string; partial: boolean } {
+  const match = rowRange && /^([1-9]\d*)(?:-([1-9]\d*))?$/.exec(rowRange);
+  if (rowRange && !match)
+    throw new AgentError("INPUT_SELECTOR", "Invalid table row range");
+  const start = match ? Number(match[1]) : 1,
+    end = match ? Number(match[2] ?? match[1]) : 2000;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start)
+    throw new AgentError("INPUT_SELECTOR", "Invalid table row range");
+  if (end - start + 1 > 2000)
+    throw new AgentError("DOCUMENT_LIMIT", "Select at most 2000 table rows");
+  const parsed = parseTable(text, delimiter, start, end, !rowRange);
+  if (rowRange && (!parsed.rows.length || end > parsed.rowCount))
+    throw new AgentError(
+      "INPUT_SELECTOR",
+      "Table row range is outside the document",
+    );
+  const selected = parsed.rows.map(
+    ({ number, cells }) => `${number}: ${JSON.stringify(cells)}`,
+  );
+  return {
+    text:
+      selected.join("\n") +
+      (parsed.partial
+        ? "\n[PARTIAL: table has more rows; select a narrower ::rows= range.]"
+        : ""),
+    locator: rowRange
+      ? `rows ${start}-${parsed.rows.at(-1)?.number ?? end}`
+      : `rows 1-${parsed.rows.at(-1)?.number ?? 0}`,
+    partial: parsed.partial,
+  };
+}
+
+function parseTable(
+  text: string,
+  delimiter: string,
+  start: number,
+  end: number,
+  defaultWindow: boolean,
+): {
+  rows: Array<{ number: number; cells: string[] }>;
+  partial: boolean;
+  rowCount: number;
+} {
+  const rows: Array<{ number: number; cells: string[] }> = [],
     row: string[] = [];
   let cell = "",
     quoted = false,
-    closedQuote = false;
+    closedQuote = false,
+    rowNumber = 0,
+    partial = false;
+  let rowCount = 0;
+  let recordTouched = false;
+  const finishRow = () => {
+    rowNumber++;
+    rowCount = rowNumber;
+    if (rowNumber >= start && rowNumber <= end) {
+      if (rows.length >= 2000)
+        throw new AgentError(
+          "DOCUMENT_LIMIT",
+          "Select at most 2000 table rows",
+        );
+      rows.push({ number: rowNumber, cells: row.splice(0) });
+    } else row.length = 0;
+    if (defaultWindow && rowNumber > end) partial = true;
+  };
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
     if (quoted && ch === '"') {
@@ -615,16 +628,24 @@ function parseTable(text: string, delimiter: string): string[][] {
         quoted = false;
         closedQuote = true;
       }
-    } else if (ch === '"' && !cell && !closedQuote) quoted = true;
-    else if (!quoted && ch === delimiter) {
+    } else if (ch === '"' && !cell && !closedQuote) {
+      quoted = true;
+      recordTouched = true;
+    } else if (!quoted && ch === delimiter) {
+      recordTouched = true;
+      if (row.length >= 256)
+        throw new AgentError("DOCUMENT_LIMIT", "Table exceeds 256 columns");
       row.push(cell);
       cell = "";
       closedQuote = false;
     } else if (!quoted && (ch === "\n" || ch === "\r")) {
+      if (row.length >= 256)
+        throw new AgentError("DOCUMENT_LIMIT", "Table exceeds 256 columns");
       row.push(cell);
       cell = "";
-      if (row.length > 1 || row[0] !== "") rows.push(row.splice(0));
+      finishRow();
       closedQuote = false;
+      recordTouched = false;
       if (ch === "\r" && text[i + 1] === "\n") i++;
     } else if (closedQuote) {
       throw new AgentError(
@@ -633,12 +654,11 @@ function parseTable(text: string, delimiter: string): string[][] {
       );
     } else if (ch === '"' && !quoted) {
       throw new AgentError("DOCUMENT_PARSE", "Malformed quoted table cell");
-    } else cell += ch;
-    if (
-      rows.length > 2000 ||
-      row.length > 256 ||
-      cell.length > maxDocumentBytes
-    )
+    } else {
+      recordTouched = true;
+      cell += ch;
+    }
+    if (cell.length > maxDocumentBytes)
       throw new AgentError(
         "DOCUMENT_LIMIT",
         "Table exceeds row, column, or cell limits",
@@ -646,7 +666,11 @@ function parseTable(text: string, delimiter: string): string[][] {
   }
   if (quoted)
     throw new AgentError("DOCUMENT_PARSE", "Malformed quoted table cell");
-  row.push(cell);
-  if (row.length > 1 || row[0] !== "") rows.push(row);
-  return rows;
+  if (recordTouched || row.length || cell.length) {
+    if (row.length >= 256)
+      throw new AgentError("DOCUMENT_LIMIT", "Table exceeds 256 columns");
+    row.push(cell);
+    finishRow();
+  }
+  return { rows, partial, rowCount };
 }

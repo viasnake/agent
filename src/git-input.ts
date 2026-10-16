@@ -2,10 +2,20 @@ import { spawn } from "node:child_process";
 import type { Paths } from "./config.js";
 import { AgentError, type PreparedInput } from "./types.js";
 import { storePreparedText } from "./documents.js";
+import { isImagePath } from "./images.js";
 import { secretPath } from "./workspace.js";
 
 const commitHash = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
 const outputLimit = 5_000_000;
+
+export interface GitInputSelection {
+  name: string;
+  command: string;
+  raw: Buffer;
+  text: string;
+  locator: string;
+  partial: boolean;
+}
 
 export async function prepareGitInput(
   paths: Paths,
@@ -14,10 +24,24 @@ export async function prepareGitInput(
   maxBytes: number,
   signal: AbortSignal,
 ): Promise<PreparedInput> {
+  return storeGitInput(
+    paths,
+    await selectGitInput(workspace, selector, maxBytes, signal),
+  );
+}
+
+export async function selectGitInput(
+  workspace: string,
+  selector: string,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<GitInputSelection> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)
     throw new AgentError("INPUT_SIZE", "Git input budget is exhausted");
   const command = selector.slice("git:".length);
-  let text: string, locator: string;
+  let text: string,
+    locator: string,
+    partial = false;
   if (command === "status") {
     const [branch, summary, recent] = await Promise.all([
       git(workspace, ["branch", "--show-current"], signal, 4096),
@@ -29,9 +53,9 @@ export async function prepareGitInput(
       ),
       git(workspace, ["log", "-5", "--oneline", "--no-color"], signal, 8192),
     ]);
-    const pathsInStatus = porcelainPaths(summary);
-    rejectSecretPaths(pathsInStatus);
-    text = `branch: ${branch.trim() || "(detached)"}\nstatus:\n${pathsInStatus.map((path) => `  ${JSON.stringify(path)}`).join("\n") || "  clean"}\nrecent commits:\n${recent.trim()}`;
+    const entries = porcelainEntries(summary);
+    rejectSecretPaths(entries.map((entry) => entry.path));
+    text = `branch: ${branch.trim() || "(detached)"}\nstatus:\n${entries.map((entry) => `  ${entry.code} ${JSON.stringify(entry.path)}`).join("\n") || "  clean"}\nrecent commits:\n${recent.trim()}`;
     locator = "read-only branch/status/recent-commit summary";
   } else {
     const spec =
@@ -46,10 +70,10 @@ export async function prepareGitInput(
       );
     let args: string[], commits: string;
     if (spec === "working") {
-      commits = (await resolveCommit(workspace, "HEAD", signal)).slice(0, 12);
+      commits = await resolveCommit(workspace, "HEAD", signal);
       args = [
         "diff",
-        "HEAD",
+        commits,
         "--no-renames",
         "--no-ext-diff",
         "--no-textconv",
@@ -57,10 +81,11 @@ export async function prepareGitInput(
         "--binary",
       ];
     } else if (spec === "staged") {
-      commits = (await resolveCommit(workspace, "HEAD", signal)).slice(0, 12);
+      commits = await resolveCommit(workspace, "HEAD", signal);
       args = [
         "diff",
         "--cached",
+        commits,
         "--no-renames",
         "--no-ext-diff",
         "--no-textconv",
@@ -101,28 +126,60 @@ export async function prepareGitInput(
     }
     const changed = await git(
       workspace,
-      [...nameArgs(spec, range), "-z"],
+      [...nameArgs(spec, range, commits), "-z"],
       signal,
       100_000,
     );
     rejectSecretPaths(changed.split("\0").filter(Boolean));
-    text = await git(workspace, args, signal, Math.min(outputLimit, maxBytes));
-    locator = `read-only Git ${command}; commits ${commits}`;
+    const changedPaths = changed.split("\0").filter(Boolean);
+    const pathsInDiff = changedPaths.filter((path) => !isImagePath(path));
+    const omittedImages = changedPaths.filter(isImagePath);
+    partial = omittedImages.length > 0;
+    if (!pathsInDiff.length)
+      text = partial
+        ? `[PARTIAL: image-only changes omitted from Git diff: ${omittedImages.map((path) => JSON.stringify(path)).join(", ")}]`
+        : "";
+    else {
+      rejectSecretPaths(pathsInDiff);
+      text = await git(
+        workspace,
+        ["--literal-pathspecs", ...args, "--", ...pathsInDiff],
+        signal,
+        Math.min(outputLimit, maxBytes),
+      );
+      if (partial)
+        text += `\n[PARTIAL: image paths omitted from Git diff: ${omittedImages.map((path) => JSON.stringify(path)).join(", ")}]`;
+    }
+    locator = `read-only Git ${command}; commits ${commits}${partial ? `; image paths omitted: ${omittedImages.map((path) => JSON.stringify(path)).join(", ")}` : ""}`;
   }
   if (Buffer.byteLength(text) > maxBytes)
     throw new AgentError(
       "INPUT_SIZE",
       "Git input exceeds the configured input limit",
     );
-  return storePreparedText(
-    paths,
-    `git-${command.replace(/[^a-z0-9.-]/gi, "_")}.txt`,
-    "git",
+  return {
+    name: `git-${command.replace(/[^a-z0-9.-]/gi, "_")}.txt`,
     command,
-    Buffer.from(text),
+    raw: Buffer.from(text),
     text,
     locator,
-    false,
+    partial,
+  };
+}
+
+export async function storeGitInput(
+  paths: Paths,
+  selection: GitInputSelection,
+): Promise<PreparedInput> {
+  return storePreparedText(
+    paths,
+    selection.name,
+    "git",
+    selection.command,
+    selection.raw,
+    selection.text,
+    selection.locator,
+    selection.partial,
   );
 }
 
@@ -142,30 +199,43 @@ export async function readGitStatus(
   ]);
   const paths = porcelainPaths(status);
   rejectSecretPaths(paths);
+  const entries = porcelainEntries(status);
   return [
     `branch: ${branch.trim() || "(detached)"}`,
     "status:",
-    ...(paths.length
-      ? paths.map((path) => `  ${JSON.stringify(path)}`)
+    ...(entries.length
+      ? entries.map((entry) => `  ${entry.code} ${JSON.stringify(entry.path)}`)
       : ["  clean"]),
     "recent commits:",
     recent.trim(),
   ].join("\n");
 }
 
-function nameArgs(spec: string, range: RegExpExecArray | null): string[] {
+function nameArgs(
+  spec: string,
+  range: RegExpExecArray | null,
+  commits: string,
+): string[] {
+  const prefix = ["--literal-pathspecs"];
   if (spec === "working")
-    return ["diff", "HEAD", "--no-renames", "--name-only"];
+    return [...prefix, "diff", commits, "--no-renames", "--name-only"];
   if (spec === "staged")
-    return ["diff", "--cached", "--no-renames", "--name-only"];
-  if (range)
-    return ["diff", `${range[1]}..${range[2]}`, "--no-renames", "--name-only"];
+    return [
+      ...prefix,
+      "diff",
+      "--cached",
+      commits,
+      "--no-renames",
+      "--name-only",
+    ];
+  if (range) return [...prefix, "diff", commits, "--no-renames", "--name-only"];
   return [
+    ...prefix,
     "show",
     "--format=",
     "--no-renames",
     "--name-only",
-    spec.replace(/^commit:/, ""),
+    commits,
   ];
 }
 
@@ -179,6 +249,19 @@ function porcelainPaths(status: string): string[] {
       paths.push(records[++index]!);
   }
   return paths;
+}
+function porcelainEntries(
+  status: string,
+): Array<{ code: string; path: string }> {
+  const records = status.split("\0").filter(Boolean);
+  const entries: Array<{ code: string; path: string }> = [];
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    entries.push({ code: record.slice(0, 2), path: record.slice(3) });
+    if (/^[RC].|.[RC]$/.test(record.slice(0, 2)) && records[index + 1])
+      entries.push({ code: record.slice(0, 2), path: records[++index]! });
+  }
+  return entries;
 }
 
 function rejectSecretPaths(paths: string[]): void {
@@ -229,6 +312,10 @@ function git(
         "core.hooksPath=/dev/null",
         "-c",
         "color.ui=false",
+        "-c",
+        "log.showSignature=false",
+        "-c",
+        "protocol.allow=never",
         "--no-pager",
         ...args,
       ],
@@ -242,6 +329,9 @@ function git(
           GIT_CONFIG_NOSYSTEM: "1",
           GIT_CONFIG_GLOBAL: "/dev/null",
           GIT_OPTIONAL_LOCKS: "0",
+          GIT_NO_LAZY_FETCH: "1",
+          GIT_ALLOW_PROTOCOL: "",
+          GIT_PROTOCOL: "version=0",
           GIT_TERMINAL_PROMPT: "0",
         },
       },

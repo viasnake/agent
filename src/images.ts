@@ -24,6 +24,8 @@ export type ValidatedImage = {
   mimeType: string;
   width: number;
   height: number;
+  editWidth: number;
+  editHeight: number;
   sha256: string;
 };
 
@@ -97,6 +99,12 @@ export async function validateImage(
       mimeType: signature,
       width: metadata.width,
       height: metadata.height,
+      editWidth: [5, 6, 7, 8].includes(metadata.orientation ?? 0)
+        ? metadata.height
+        : metadata.width,
+      editHeight: [5, 6, 7, 8].includes(metadata.orientation ?? 0)
+        ? metadata.width
+        : metadata.height,
     };
   } catch (error) {
     if (error instanceof AgentError) throw error;
@@ -119,6 +127,8 @@ export function imageReference(
     mimeType: validated.mimeType,
     width: validated.width,
     height: validated.height,
+    editWidth: validated.editWidth,
+    editHeight: validated.editHeight,
     bytes: validated.bytes.length,
     sha256: validated.sha256,
     dataClass,
@@ -166,7 +176,9 @@ function hasApngAnimationControl(bytes: Buffer): boolean {
 export async function isImageFileSignature(path: string): Promise<boolean> {
   const file = await open(
     path,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
   );
   try {
     const stat = await file.stat();
@@ -218,7 +230,8 @@ export async function readBoundedImage(path: string): Promise<Buffer> {
       final.size !== initial.size ||
       final.ino !== initial.ino ||
       final.dev !== initial.dev ||
-      final.mtimeMs !== initial.mtimeMs
+      final.mtimeMs !== initial.mtimeMs ||
+      (process.getuid && final.uid !== process.getuid())
     )
       throw new AgentError("IMAGE_READ", "Image changed while it was read");
     return buffer.subarray(0, length);
@@ -286,7 +299,9 @@ export async function transformImage(
     const rotated = sharp(bytes, {
       failOn: "warning",
       limitInputPixels: maxImagePixels,
-    }).rotate();
+    })
+      .toColourspace("srgb")
+      .rotate();
     const { data, info } = await rotated
       .raw()
       .toBuffer({ resolveWithObject: true });
@@ -314,8 +329,11 @@ export async function transformImage(
       for (let y = bounds.y; y < bounds.y + bounds.height; y++)
         for (let x = bounds.x; x < bounds.x + bounds.width; x++) {
           const offset = (y * info.width + x) * info.channels;
-          masked.fill(0, offset, offset + Math.min(3, info.channels));
-          if (info.channels === 4) masked[offset + 3] = 255;
+          if (info.channels === 4) {
+            masked.fill(0, offset, offset + 3);
+            masked[offset + 3] = 255;
+          } else if (info.channels === 3) masked.fill(0, offset, offset + 3);
+          else masked[offset] = 0;
         }
       output = await sharp(masked, { raw: info })
         .png({ compressionLevel: 9 })
@@ -331,6 +349,7 @@ export async function transformImage(
     return {
       ...result,
       sourceId: source.id,
+      documentId: source.documentId,
       transformation: JSON.stringify({ type: operation, bounds }),
     };
   } catch (error) {
