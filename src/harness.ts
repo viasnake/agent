@@ -15,6 +15,7 @@ import { Store } from "./storage.js";
 import { lineagePolicy, safetyContext } from "./branching.js";
 import { normalizeConversationContext } from "./context.js";
 import { TaskExecutor } from "./task-executor.js";
+import { isCollaborative } from "./collaboration.js";
 import {
   AgentError,
   type DataClass,
@@ -25,6 +26,7 @@ import {
   type Runtime,
   type WorkKind,
   type PreparedInput,
+  type Task,
 } from "./types.js";
 import {
   loadStoredImage,
@@ -908,6 +910,8 @@ export class Harness {
             controller.signal,
             mcp,
             acceptInstructions,
+            (tasks) =>
+              this.planner.admitDelegations(run, tasks, controller.signal),
           );
         } catch (error) {
           if (
@@ -1043,8 +1047,80 @@ export class Harness {
     feedback: string,
     work: string,
   ): Promise<void> {
-    if (run.access === "read-only")
+    const readOnlyCollaboration =
+      isCollaborative(run) &&
+      run.access === "read-only" &&
+      run.tasks.every((task) => task.resultFormat === "structured");
+    if (run.access === "read-only" && !readOnlyCollaboration)
       throw new AgentError("TASK_FAILED", feedback);
+    if (readOnlyCollaboration) {
+      const failed = run.tasks.find((task) => task.state === "failed");
+      if (!failed) throw new AgentError("TASK_FAILED", feedback);
+      const target =
+        failed.role === "reviewer" || failed.purpose === "synthesis"
+          ? this.nearestProducerAncestor(run, failed)
+          : failed;
+      if (!target) throw new AgentError("VALIDATION_FAILED", feedback);
+      const ancestors = this.taskAncestors(run, target),
+        fingerprint = sha256(
+          canonical({
+            feedback,
+            outcomes: [target, ...ancestors]
+              .map((task) => ({
+                role: task.role,
+                purpose: task.purpose,
+                outcome: task.result?.outcome,
+                summary: task.result?.summary,
+                artifacts: task.result?.artifacts,
+                unresolved: task.result?.unresolved,
+              }))
+              .sort((left, right) =>
+                canonical(left).localeCompare(canonical(right)),
+              ),
+          }),
+        );
+      if (
+        run.repairAttempts >= this.config.limits.maxRepairs ||
+        fingerprint === run.lastFailureFingerprint
+      )
+        throw new AgentError("VALIDATION_FAILED", feedback);
+      run.repairAttempts++;
+      run.lastFailureFingerprint = fingerprint;
+      target.reworkLinks ??= [];
+      target.reworkLinks.push({
+        priorReportIds: [...(target.attemptReportIds ?? [])],
+        reason: feedback.slice(0, 4000),
+        repairAttempt: run.repairAttempts,
+      });
+      const invalidated = new Set([target.id]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const task of run.tasks)
+          if (
+            !invalidated.has(task.id) &&
+            (task.role === "reviewer" || task.purpose === "synthesis") &&
+            task.dependsOn.some((dependency) => invalidated.has(dependency))
+          ) {
+            invalidated.add(task.id);
+            changed = true;
+          }
+      }
+      this.store.transition(run, "repairing");
+      for (const task of run.tasks)
+        if (invalidated.has(task.id)) {
+          task.state = "pending";
+          task.result = undefined;
+        }
+      this.store.save(run, "repair_requested", {
+        taskId: target.id,
+        priorReportIds: target.reworkLinks.at(-1)?.priorReportIds,
+        feedback: feedback.slice(0, 4000),
+        attempt: run.repairAttempts,
+      });
+      this.store.transition(run, "running");
+      return;
+    }
     const fingerprint = sha256(
       canonical({
         files: await inventory(work, this.config.limits.maxWorkspaceBytes),
@@ -1070,6 +1146,12 @@ export class Harness {
     writer.objective +=
       "\nRepair these validation/review failures. Inspect the current copy before editing:\n" +
       feedback;
+    writer.reworkLinks ??= [];
+    writer.reworkLinks.push({
+      priorReportIds: [...(writer.attemptReportIds ?? [])],
+      reason: feedback.slice(0, 4000),
+      repairAttempt: run.repairAttempts + 1,
+    });
     const invalidated = new Set([writer.id]);
     let changed = true;
     while (changed) {
@@ -1095,5 +1177,43 @@ export class Harness {
       attempt: run.repairAttempts,
     });
     this.store.transition(run, "running");
+  }
+
+  private taskAncestors(run: Run, task: Task): Task[] {
+    const found = new Map<string, Task>();
+    const visit = (taskId: string) => {
+      const dependency = run.tasks.find((candidate) => candidate.id === taskId);
+      if (!dependency || found.has(dependency.id)) return;
+      found.set(dependency.id, dependency);
+      for (const parentId of dependency.dependsOn) visit(parentId);
+    };
+    for (const dependencyId of task.dependsOn) visit(dependencyId);
+    return [...found.values()];
+  }
+
+  private nearestProducerAncestor(run: Run, task: Task): Task | undefined {
+    const ancestors = this.taskAncestors(run, task),
+      distances = new Map<string, number>();
+    const visit = (current: Task, distance: number) => {
+      for (const dependencyId of current.dependsOn) {
+        if ((distances.get(dependencyId) ?? Infinity) <= distance) continue;
+        distances.set(dependencyId, distance);
+        const dependency = run.tasks.find(
+          (candidate) => candidate.id === dependencyId,
+        );
+        if (dependency) visit(dependency, distance + 1);
+      }
+    };
+    visit(task, 1);
+    return ancestors
+      .filter(
+        (candidate) =>
+          candidate.role === "worker" && candidate.purpose !== "synthesis",
+      )
+      .sort(
+        (left, right) =>
+          (distances.get(left.id) ?? Infinity) -
+          (distances.get(right.id) ?? Infinity),
+      )[0];
   }
 }

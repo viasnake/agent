@@ -26,6 +26,12 @@ import {
 } from "./network.js";
 import { normalizeConversationContext, readContextArchive } from "./context.js";
 import { decodeResponse } from "./research.js";
+import {
+  authorizedSources,
+  authorizedTaskReportIds,
+  isCollaborative,
+  requireAuthorizedSource,
+} from "./collaboration.js";
 import { reviewWriting, writingOptionsSchema } from "./writing-quality.js";
 import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
 import { id } from "./util.js";
@@ -168,34 +174,12 @@ export class TaskTools {
           lines: z.number().int().min(1).max(500).default(200),
         }),
         async (args) => {
-          const excluded = new Set(
-            this.run.contextState?.excludedSourceIds ?? [],
+          const source = requireAuthorizedSource(
+            this.store,
+            this.run,
+            this.task,
+            args.id,
           );
-          const excludedHashes = new Set(
-            this.run.contextState?.excludedSourceHashes ?? [],
-          );
-          const source = this.store
-            .artifacts(this.run.id)
-            .find(
-              (a) =>
-                a.id === args.id &&
-                a.kind === "source" &&
-                !excluded.has(a.id) &&
-                !this.run.contextState?.excludedSourceUrls?.includes(
-                  String(a.metadata.url ?? ""),
-                ) &&
-                !this.run.contextState?.excludedSourceUrls?.includes(
-                  String(a.metadata.requestedUrl ?? ""),
-                ) &&
-                !excludedHashes.has(a.sha256) &&
-                !excludedHashes.has(String(a.metadata.selectedSha256 ?? "")) &&
-                !excludedHashes.has(String(a.metadata.rawSha256 ?? "")),
-            );
-          if (!source)
-            throw new AgentError(
-              "SOURCE",
-              "Source does not belong to this run",
-            );
           const text = (await this.store.content(source))
             .toString("utf8")
             .split("\n");
@@ -520,6 +504,18 @@ export class TaskTools {
                 extraction: extracted.metadata,
               },
             );
+            if (this.task.delegatedBy && this.task.assignment) {
+              this.task.assignment = {
+                ...this.task.assignment,
+                sourceIds: [
+                  ...new Set([...this.task.assignment.sourceIds, source.id]),
+                ],
+              };
+              this.store.save(this.run, "delegated_source_added", {
+                taskId: this.task.id,
+                sourceId: source.id,
+              });
+            }
             const numbered = extracted.text
               .split("\n")
               .map((line, i) => `${i + 1}: ${line}`)
@@ -615,8 +611,11 @@ export class TaskTools {
         ),
       );
     if (
-      this.run.kind === "research" ||
-      this.run.contextState?.researchCheckpoint
+      (this.run.kind === "research" ||
+        this.run.contextState?.researchCheckpoint) &&
+      (!isCollaborative(this.run) ||
+        (this.task.resultFormat === "structured" &&
+          this.task.purpose === "synthesis"))
     )
       tools.push(
         this.wrap(
@@ -627,7 +626,10 @@ export class TaskTools {
             JSON.stringify(this.run.contextState?.researchCheckpoint ?? null),
         ),
       );
-    if (this.run.kind === "research") {
+    if (
+      this.run.kind === "research" &&
+      !(isCollaborative(this.run) && this.task.resultFormat === "structured")
+    ) {
       tools.push(
         this.wrap(
           "research_checkpoint",
@@ -646,35 +648,10 @@ export class TaskTools {
                 "CHECKPOINT_SIZE",
                 "Research checkpoint exceeds the combined 32000-byte limit",
               );
-            const excludedIds = new Set(
-              this.run.contextState?.excludedSourceIds ?? [],
-            );
-            const excludedHashes = new Set(
-              this.run.contextState?.excludedSourceHashes ?? [],
-            );
-            const excludedUrls = new Set(
-              this.run.contextState?.excludedSourceUrls ?? [],
-            );
             const available = new Set(
-              this.store
-                .artifacts(this.run.id)
-                .filter(
-                  (artifact) =>
-                    artifact.kind === "source" &&
-                    !excludedIds.has(artifact.id) &&
-                    !excludedHashes.has(artifact.sha256) &&
-                    !excludedHashes.has(
-                      String(artifact.metadata.rawSha256 ?? ""),
-                    ) &&
-                    !excludedHashes.has(
-                      String(artifact.metadata.selectedSha256 ?? ""),
-                    ) &&
-                    !excludedUrls.has(String(artifact.metadata.url ?? "")) &&
-                    !excludedUrls.has(
-                      String(artifact.metadata.requestedUrl ?? ""),
-                    ),
-                )
-                .map((artifact) => artifact.id),
+              authorizedSources(this.store, this.run, this.task).map(
+                (artifact) => artifact.id,
+              ),
             );
             for (const sourceId of checkpoint.decisions.flatMap(
               (decision) => decision.sourceIds,
@@ -718,39 +695,12 @@ export class TaskTools {
             sourceId: z.string(),
           }),
           async (args) => {
-            const excludedIds = new Set(
-              this.run.contextState?.excludedSourceIds ?? [],
+            const source = requireAuthorizedSource(
+              this.store,
+              this.run,
+              this.task,
+              args.sourceId,
             );
-            const excludedHashes = new Set(
-              this.run.contextState?.excludedSourceHashes ?? [],
-            );
-            const excludedUrls = new Set(
-              this.run.contextState?.excludedSourceUrls ?? [],
-            );
-            const source = this.store
-              .artifacts(this.run.id)
-              .find(
-                (artifact) =>
-                  artifact.id === args.sourceId &&
-                  artifact.kind === "source" &&
-                  !excludedIds.has(artifact.id) &&
-                  !excludedHashes.has(artifact.sha256) &&
-                  !excludedHashes.has(
-                    String(artifact.metadata.rawSha256 ?? ""),
-                  ) &&
-                  !excludedHashes.has(
-                    String(artifact.metadata.selectedSha256 ?? ""),
-                  ) &&
-                  !excludedUrls.has(String(artifact.metadata.url ?? "")) &&
-                  !excludedUrls.has(
-                    String(artifact.metadata.requestedUrl ?? ""),
-                  ),
-              );
-            if (!source)
-              throw new AgentError(
-                "SOURCE",
-                "Source does not belong to this run or is unavailable",
-              );
             const sourceText = (await this.store.content(source)).toString(
               "utf8",
             );
@@ -815,32 +765,119 @@ export class TaskTools {
           },
         ),
       );
-    tools.push(
-      this.wrap(
-        "read_context",
-        "Retrieve a bounded excerpt from an archived context belonging to this conversation.",
-        z.strictObject({
-          archiveId: z.string().regex(/^[a-f0-9]{64}$/),
-          start: z.number().int().min(0).default(0),
-          bytes: z.number().int().min(1).max(32000).default(12000),
-        }),
-        async (args) => {
-          if (this.run.contextState?.excludedSourceIds?.length)
-            throw new AgentError(
-              "SOURCE_EXCLUDED",
-              "Context archives are unavailable after source exclusion",
+    if (isCollaborative(this.run))
+      tools.push(
+        this.wrap(
+          "read_task_report",
+          "Read a bounded excerpt from an authorized immutable task-attempt report.",
+          z.strictObject({
+            reportId: z.string().uuid(),
+            start: z.number().int().min(0).default(0),
+            bytes: z.number().int().min(1).max(32_000).default(12_000),
+          }),
+          async (args) => {
+            const allowed = authorizedTaskReportIds(this.run, this.task);
+            if (!allowed.has(args.reportId))
+              throw new AgentError("REPORT", "Task report is not authorized");
+            const report = this.store
+              .artifacts(this.run.id)
+              .find(
+                (artifact) =>
+                  artifact.id === args.reportId &&
+                  artifact.kind === "report" &&
+                  artifact.metadata.type === "task-attempt",
+              );
+            const owner = this.run.tasks.find(
+              (candidate) =>
+                candidate.id === report?.metadata.taskId &&
+                candidate.attemptReportIds?.includes(args.reportId),
             );
-          const text = await readContextArchive(
-            this.store.paths,
-            this.run,
-            args.archiveId,
-            args.bytes,
-            args.start,
-          );
-          return text;
-        },
-      ),
-    );
+            if (
+              !report ||
+              !owner ||
+              !Number.isSafeInteger(report.metadata.attempt) ||
+              Number(report.metadata.attempt) < 1 ||
+              Number(report.metadata.attempt) > owner.attempts
+            )
+              throw new AgentError("REPORT", "Task report is unavailable");
+            const content = await this.store.content(report),
+              parsed = JSON.parse(content.toString("utf8")) as {
+                taskId?: unknown;
+                attempt?: unknown;
+              },
+              end = Math.min(content.length, args.start + args.bytes);
+            if (
+              parsed.taskId !== report.metadata.taskId ||
+              parsed.attempt !== report.metadata.attempt ||
+              args.start > content.length
+            )
+              throw new AgentError("REPORT", "Task report range is invalid");
+            return content.subarray(args.start, end).toString("utf8");
+          },
+        ),
+      );
+    if (
+      isCollaborative(this.run) ||
+      !!(
+        this.run.compactions?.length ||
+        this.run.contextState?.compactions?.length
+      )
+    )
+      tools.push(
+        this.wrap(
+          "read_context",
+          "Retrieve a bounded excerpt from an archived context belonging to this conversation.",
+          z.strictObject({
+            archiveId: z.string().regex(/^[a-f0-9]{64}$/),
+            start: z.number().int().min(0).default(0),
+            bytes: z.number().int().min(1).max(32000).default(12000),
+          }),
+          async (args) => {
+            if (
+              isCollaborative(this.run) &&
+              !(this.task.contextArchiveIds ?? []).includes(args.archiveId)
+            )
+              throw new AgentError(
+                "CONTEXT_ARCHIVE",
+                "This task cannot read another task's context archive",
+              );
+            if (this.run.contextState?.excludedSourceIds?.length)
+              throw new AgentError(
+                "SOURCE_EXCLUDED",
+                "Context archives are unavailable after source exclusion",
+              );
+            const text = await readContextArchive(
+              this.store.paths,
+              this.run,
+              args.archiveId,
+              args.bytes,
+              args.start,
+            );
+            return text;
+          },
+        ),
+      );
+    if (this.task.delegatedBy || this.task.purpose === "synthesis")
+      return tools.filter((tool) =>
+        [
+          "read_file",
+          "list_files",
+          "search_files",
+          "read_source",
+          "read_context",
+          "read_task_report",
+          ...(this.task.purpose === "synthesis" &&
+          this.run.contextState?.researchCheckpoint
+            ? ["read_research_checkpoint"]
+            : []),
+          ...(this.run.kind === "research" && this.task.purpose !== "synthesis"
+            ? ["fetch_source", "search_web"]
+            : []),
+          ...(this.run.kind === "writing" || this.run.kind === "research"
+            ? ["check_writing"]
+            : []),
+        ].includes(tool.name),
+      );
     if (this.run.access === "read-only")
       return tools.filter((tool) =>
         [
@@ -850,36 +887,23 @@ export class TaskTools {
           "search_files",
           "read_context",
           ...(this.run.kind === "research"
-            ? ["fetch_source", "search_web", "research_checkpoint"]
+            ? [
+                "fetch_source",
+                "search_web",
+                ...(isCollaborative(this.run) ? [] : ["research_checkpoint"]),
+              ]
             : []),
           "read_research_checkpoint",
           ...(this.run.kind === "writing" || this.run.kind === "research"
             ? ["check_writing"]
             : []),
+          ...(isCollaborative(this.run) ? ["read_task_report"] : []),
         ].includes(tool.name),
       );
     return tools;
   }
   async evidence(): Promise<string> {
-    const excludedIds = new Set(this.run.contextState?.excludedSourceIds ?? []);
-    const excludedHashes = new Set(
-      this.run.contextState?.excludedSourceHashes ?? [],
-    );
-    const excludedUrls = new Set(
-      this.run.contextState?.excludedSourceUrls ?? [],
-    );
-    const artifacts = this.store
-      .artifacts(this.run.id)
-      .filter(
-        (a) =>
-          a.kind === "source" &&
-          !excludedIds.has(a.id) &&
-          !excludedHashes.has(a.sha256) &&
-          !excludedHashes.has(String(a.metadata.rawSha256 ?? "")) &&
-          !excludedHashes.has(String(a.metadata.selectedSha256 ?? "")) &&
-          !excludedUrls.has(String(a.metadata.url ?? "")) &&
-          !excludedUrls.has(String(a.metadata.requestedUrl ?? "")),
-      );
+    const artifacts = authorizedSources(this.store, this.run, this.task);
     return canonical({
       sources: artifacts.map((a) => ({
         id: a.id,

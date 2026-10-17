@@ -15,6 +15,14 @@ export type RunState =
   | "failed"
   | "cancelled";
 export type TaskState = "pending" | "running" | "succeeded" | "failed";
+export interface DelegationRequest {
+  objective: string;
+  constraints: string[];
+  sourceIds: string[];
+  expectedResult: string;
+  acceptance: string[];
+  model?: string;
+}
 export interface Task {
   id: string;
   objective: string;
@@ -26,12 +34,25 @@ export interface Task {
   attempts: number;
   result?: TaskResult;
   sessionFile?: string;
+  resultFormat?: "text" | "structured";
+  purpose?: "synthesis";
+  delegatedBy?: string;
+  assignment?: DelegationRequest;
+  delegationRounds?: number;
+  attemptReportIds?: string[];
+  contextArchiveIds?: string[];
+  reworkLinks?: Array<{
+    priorReportIds: string[];
+    reason: string;
+    repairAttempt: number;
+  }>;
 }
 export interface TaskResult {
   outcome: "completed" | "needs_replan" | "blocked" | "failed";
   summary: string;
   artifacts: string[];
   unresolved: string[];
+  delegations?: DelegationRequest[];
 }
 export interface ImageReference {
   id: string;

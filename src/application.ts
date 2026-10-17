@@ -730,33 +730,27 @@ export class Application extends EventEmitter {
       reviewer: modelCandidates(this.config, run, "reviewer", true),
     };
     const requiredRoles =
-      kind === "chat"
-        ? (["worker"] as const)
-        : snapshot.strategy === "assisted"
-          ? (["lead", "worker"] as const)
-          : snapshot.strategy === "reviewed"
-            ? (["worker", "reviewer"] as const)
-            : (["worker"] as const);
-    const requestedRole =
-      kind !== "chat" && snapshot.strategy === "assisted" ? "lead" : "worker";
+      snapshot.strategy === "assisted"
+        ? (["lead", "worker"] as const)
+        : snapshot.strategy === "reviewed"
+          ? (["worker", "reviewer"] as const)
+          : (["worker"] as const);
+    const requestedRole = snapshot.strategy === "assisted" ? "lead" : "worker";
     const selectedWorker =
       snapshot.model && candidates.worker.includes(snapshot.model)
         ? snapshot.model
         : candidates.worker[0];
     const reviewerCandidates =
-      kind !== "chat" && snapshot.strategy === "reviewed"
+      snapshot.strategy === "reviewed"
         ? modelCandidates(this.config, run, "reviewer", true, selectedWorker)
         : candidates.reviewer;
     const rolesForAlternatives = new Set<string>();
     for (const role of requiredRoles) rolesForAlternatives.add(role);
-    if (kind !== "chat" && snapshot.strategy === "assisted")
-      rolesForAlternatives.add("reviewer");
+    if (snapshot.strategy === "assisted") rolesForAlternatives.add("reviewer");
     const aliases = new Set<string>();
     for (const role of rolesForAlternatives) {
       const eligible =
-        role === "reviewer" &&
-        kind !== "chat" &&
-        snapshot.strategy === "reviewed"
+        role === "reviewer" && snapshot.strategy === "reviewed"
           ? reviewerCandidates
           : candidates[role as keyof typeof candidates];
       for (const alias of eligible) aliases.add(alias);
@@ -792,7 +786,6 @@ export class Application extends EventEmitter {
         `No authorized ${images.length ? "image-capable" : "attachment-capable"} ${missingRole} model is available for ${kind}/${snapshot.dataClass}${snapshot.localOnly ? "/local-only" : ""}.${alternatives}`,
       );
     if (
-      kind !== "chat" &&
       snapshot.strategy === "reviewed" &&
       snapshot.reviewer &&
       !reviewerCandidates.includes(snapshot.reviewer)
@@ -1434,7 +1427,7 @@ export class Application extends EventEmitter {
           : undefined,
       objective: input.text,
       kind,
-      mode: kind === "chat" ? "single" : this.session.strategy,
+      mode: this.session.strategy,
       dataClass: requestDisclosure.dataClass,
       localOnly: requestDisclosure.localOnly,
       images,
@@ -1877,10 +1870,12 @@ export class Application extends EventEmitter {
     this.session.handoff = undefined;
     const summary =
       result.state === "succeeded"
-        ? result.tasks
+        ? (result.tasks.find((task) => task.purpose === "synthesis")?.result
+            ?.summary ??
+          result.tasks
             .map((t) => t.result?.summary)
             .filter(Boolean)
-            .join("\n\n")
+            .join("\n\n"))
         : `${result.state}: ${result.reason ?? "未完了"}`;
     let assistantBoundary;
     try {

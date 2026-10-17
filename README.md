@@ -106,5 +106,21 @@ Git 添付の差分は保存された raw bytes を比較し、Git attributes・
 
 開発・検証方法は [docs/architecture.md](docs/architecture.md)、保守用 CLI は `agent --help` を参照してください。
 
+## Collaboration backend
+
+Assisted and reviewed runs use host-assigned task graphs. New collaborative
+tasks return structured results; a synthesis task is the only integrated
+conversation answer. Delegated children receive only their assignment,
+authorized source IDs, and a read-only workspace view. They cannot write,
+execute shell or MCP tools, mutate research checkpoints, or read another
+task's transcript, context archive, or attempt reports.
+
+Every invocation has a private immutable attempt report. Reviewers and
+synthesis may read only reports on their task or transitive dependencies.
+Source exclusions, model/image disclosure floors, writer exclusivity, request
+budgets, and the task-scoped context archive allow-list are enforced by the
+host rather than by model instructions. Legacy saved tasks without
+`resultFormat` retain their previous text/structured parsing behavior.
+
 独立した Firecracker agent environment の管理者セットアップ、CLI、制約は
 [docs/firecracker.md](docs/firecracker.md) を参照してください。

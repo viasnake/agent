@@ -59,6 +59,35 @@ test("simple conversation uses one model without planning, shell or document req
   }
 });
 
+test("collaborative chat attachment previews expose every required role", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => new ScriptedRuntime(async () => "unused"),
+  );
+  try {
+    await app.initialize();
+    await writeFile(join(f.root, "facts.txt"), "local evidence");
+    for (const strategy of ["assisted", "reviewed"] as const) {
+      app.session.kind = "chat";
+      app.session.strategy = strategy;
+      const preview = await app.previewInput("@facts.txt");
+      assert.ok(
+        preview.destinations.some((value) => value.startsWith("worker —")),
+      );
+      assert.ok(
+        preview.destinations.some((value) => value.startsWith("reviewer —")),
+      );
+    }
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
 test("repository exploration stays read-only across planning and coding-copy transitions", async (t) => {
   const runtime = new ScriptedRuntime(async (request, index) => {
     if (request.tools.some((tool) => tool.name === "write_file")) {
@@ -1470,10 +1499,11 @@ test("real Pi SDK keeps worker and reviewer sessions and events distinct in one 
     await app.waitForIdle();
     const run = app.currentRun()!;
     assert.equal(run.state, "succeeded", run.reason);
-    assert.deepEqual(started, ["worker", "reviewer"]);
-    assert.equal(calls, 3);
+    assert.deepEqual(started, ["worker", "reviewer", "worker"]);
+    assert.equal(calls, 4);
     assert.notEqual(run.tasks[0]!.sessionFile, run.tasks[1]!.sessionFile);
-    assert.equal(f.store.usage(run.id).requests, 3);
+    assert.equal(run.tasks.at(-1)?.purpose, "synthesis");
+    assert.equal(f.store.usage(run.id).requests, 4);
   } finally {
     await app.close();
     await f.cleanup();

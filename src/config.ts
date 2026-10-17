@@ -76,9 +76,9 @@ export const configSchema = z.strictObject({
   defaults: z
     .strictObject({
       dataClass,
-      mode: z.enum(["single", "assisted", "reviewed"]),
+      mode: z.enum(["single", "assisted", "reviewed"]).default("single"),
     })
-    .default({ dataClass: "private", mode: "reviewed" }),
+    .default({ dataClass: "private", mode: "single" }),
   limits: z
     .strictObject({
       maxRequests: z.number().int().min(1).max(1000).default(60),
