@@ -961,6 +961,7 @@ export class TerminalApp {
       }
       case "delete":
       case "prune":
+      case "prune-pins":
       case "cleanup-deletions": {
         const browser = new HistoryBrowser(app, {
           choose: this.choose.bind(this),
@@ -971,6 +972,8 @@ export class TerminalApp {
           },
         });
         if (command === "delete") await browser.remove(argument || undefined);
+        else if (command === "prune-pins")
+          await browser.prunePins(argument || undefined);
         else {
           if (argument)
             throw new AgentError(

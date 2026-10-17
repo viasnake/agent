@@ -31,6 +31,11 @@ import {
   previewCacheCleanup,
   previewCacheCleanupJob,
 } from "../cache-cleanup.js";
+import {
+  previewPinCleanup,
+  confirmPinCleanup,
+  pinCleanupWarning,
+} from "../shared-blobs.js";
 
 const deletionWarning =
   "メタデータを先に削除する限定的な処理です。共有画像・文書・checkpoint は残り、SQLite の残存ページや外部バックアップにも内容が残る場合があります。物理削除は保留になることがあり、自動再試行や暗号学的消去は行いません。";
@@ -167,6 +172,34 @@ export function registerMaintenanceCommands(cli: CliContext): void {
         report: JSON.parse(preview.text),
       });
     });
+  program
+    .command("prune-pins [files...]")
+    .description(
+      "Preview dead-process pin metadata cleanup; never deletes attachment content",
+    )
+    .option("--write", "explicitly remove only the displayed dead pin records")
+    .option(
+      "--offset <number>",
+      "directory-entry offset for bounded discovery",
+      Number,
+      0,
+    )
+    .action((files: string[], options) =>
+      context(async (_config, paths) => {
+        const preview = await previewPinCleanup(paths, files, options.offset);
+        if (!options.write) {
+          print({ ...preview, written: false, warning: pinCleanupWarning });
+          return;
+        }
+        const result = await confirmPinCleanup(paths, preview, signal);
+        print({
+          ...result,
+          written: result.removed.length > 0,
+          cleanupComplete: !result.pending.length && !result.syncFailed,
+          warning: pinCleanupWarning,
+        });
+      }),
+    );
   program
     .command("prune-cache [paths...]")
     .description(

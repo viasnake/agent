@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fsSync, { existsSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs/promises";
@@ -59,6 +61,57 @@ async function historyFixture() {
     },
   };
 }
+
+test("pin cleanup dialogs cancel or reject stale conversation state without deleting content", async () => {
+  const f = await historyFixture();
+  try {
+    const child = spawnSync(process.execPath, ["-e", ""], { stdio: "ignore" });
+    assert.equal(child.status, 0);
+    assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
+    const processUuid = randomUUID();
+    const file = `${child.pid}-${processUuid}.json`;
+    const directory = join(f.p.home, "shared-blob-pins");
+    await fs.mkdir(directory, { mode: 0o700, recursive: true });
+    await fs.writeFile(
+      join(directory, file),
+      JSON.stringify({ version: 1, pid: child.pid, processUuid, paths: [] }),
+      { mode: 0o600 },
+    );
+    assert.ok(commands.some((command) => command.name === "prune-pins"));
+    for (const stage of [
+      "preview",
+      "picker",
+      "confirmation",
+      "stale",
+      "save",
+    ]) {
+      let notice = "";
+      const browser = new HistoryBrowser(f.app, {
+        show: async (text) => {
+          if (stage !== "save")
+            assert.match(text, /画像・資料・履歴は削除しません/);
+          return stage !== "preview";
+        },
+        choose: async () => (stage === "picker" ? undefined : "remove"),
+        confirm: async () => {
+          if (stage === "stale") f.app.session.name += " changed";
+          return stage !== "confirmation";
+        },
+        notice: (text) => {
+          notice = text;
+        },
+      });
+      if (stage === "stale")
+        await assert.rejects(browser.prunePins(file), { code: "STALE_VIEW" });
+      else await browser.prunePins(file);
+      assert.equal(existsSync(join(directory, file)), stage !== "save");
+      assert.equal(!!notice, stage === "save");
+    }
+    assert.equal(f.runtime.requests.length, 0);
+  } finally {
+    await f.close();
+  }
+});
 
 test("history dialog cancellation preserves selected history; explicit selection deletes without inference", async () => {
   const f = await historyFixture();

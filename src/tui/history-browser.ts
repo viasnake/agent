@@ -2,6 +2,7 @@ import type { Application } from "../application.js";
 import type { HistoryDeletionPreview } from "../history-deletion.js";
 import { AgentError } from "../types.js";
 import { safeText } from "./components.js";
+import { pinCleanupWarning } from "../shared-blobs.js";
 
 interface Dialogs {
   choose(
@@ -177,6 +178,86 @@ export class HistoryBrowser {
       cutoff: Date.now() - this.app.config.retentionDays * 86_400_000,
     });
     await this.confirm(preview, sessionId);
+  }
+
+  async prunePins(argument?: string): Promise<void> {
+    const sessionId = this.app.session.id;
+    const files = argument?.trim().split(/\s+/).filter(Boolean) ?? [];
+    let offset = 0;
+    while (true) {
+      this.current(sessionId);
+      const preview = await this.app.previewPinCleanup(files, offset);
+      this.current(sessionId);
+      const canRemove = preview.selected.length > 0 && !preview.blocked;
+      if (
+        !(await this.dialogs.show(
+          [
+            pinCleanupWarning,
+            `今回の列挙: ${preview.scanned} 件（全体件数ではありません）。上限で未確認: ${preview.limited ? "あり" : "なし"}。`,
+            "削除候補と保持理由（本文は表示しません）",
+            literal(
+              JSON.stringify(
+                { selected: preview.selected, retained: preview.retained },
+                null,
+                2,
+              ),
+            ),
+            "特定の記録だけを選ぶには /prune-pins <表示されたファイル名...> を使ってください。選択に保持対象があれば全体を拒否します。",
+            "整理は今回の候補だけです。部分失敗後は未完了の名前を選び直し、再確認してください。",
+          ].join("\n\n"),
+          "添付保護記録 · 候補",
+          "操作を選ぶ",
+        ))
+      )
+        return;
+      this.current(sessionId);
+      const action = await this.dialogs.choose("添付保護記録 · 明示整理", [
+        ...(canRemove
+          ? [
+              {
+                value: "remove",
+                label: `表示された終了済み記録 ${preview.selected.length} 件の最終確認`,
+              },
+            ]
+          : []),
+        ...(preview.nextOffset === undefined
+          ? []
+          : [{ value: "next", label: "次の500件を確認（まだ削除しない）" }]),
+        ...(offset && !files.length
+          ? [{ value: "previous", label: "前の500件へ" }]
+          : []),
+        { value: "cancel", label: "取消" },
+      ]);
+      this.current(sessionId);
+      if (action === "next" && preview.nextOffset !== undefined) {
+        offset = preview.nextOffset;
+        continue;
+      }
+      if (action === "previous" && offset && !files.length) {
+        offset = Math.max(0, offset - 500);
+        continue;
+      }
+      if (action !== "remove" || !canRemove) return;
+      if (
+        !(await this.dialogs.confirm(
+          "表示された終了済みの保護記録だけを削除しますか？ 添付本体は削除しません。",
+        ))
+      )
+        return;
+      this.current(sessionId);
+      const result = await this.app.confirmPinCleanup(preview);
+      await this.dialogs.show(
+        literal(JSON.stringify(result, null, 2)),
+        "添付保護記録 · 整理結果",
+        "閉じる",
+      );
+      this.dialogs.notice(
+        result.pending.length || result.syncFailed
+          ? "保護記録の整理は一部未完了です。結果を確認して選び直してください。"
+          : `${result.removed.length} 件の終了済み保護記録を整理しました。添付本体は変更していません。`,
+      );
+      return;
+    }
   }
 
   private async confirm(

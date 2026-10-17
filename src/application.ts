@@ -34,6 +34,11 @@ import {
   type CacheCleanupPreview,
 } from "./cache-cleanup.js";
 import {
+  previewPinCleanup,
+  confirmPinCleanup,
+  type PinCleanupPreview,
+} from "./shared-blobs.js";
+import {
   configHash,
   loadConfig,
   validateConfig,
@@ -315,6 +320,7 @@ export class Application extends EventEmitter {
     string
   >();
   private readonly cachePreviews = new WeakMap<CacheCleanupPreview, string>();
+  private readonly pinPreviews = new WeakMap<PinCleanupPreview, string>();
   private accessOverride?: RequestAccess;
   toolApproval?: ToolApprovalHandler;
   constructor(
@@ -3499,6 +3505,26 @@ export class Application extends EventEmitter {
       );
     this.cachePreviews.set(preview, binding);
     return preview;
+  }
+  async previewPinCleanup(files: string[] = [], offset = 0) {
+    this.idle();
+    const binding = this.maintenanceBinding();
+    this.assertMaintenanceView(binding);
+    const preview = await previewPinCleanup(this.paths, files, offset);
+    this.assertMaintenanceView(binding);
+    this.pinPreviews.set(preview, binding);
+    return preview;
+  }
+  async confirmPinCleanup(preview: PinCleanupPreview) {
+    this.idle();
+    const binding = this.pinPreviews.get(preview);
+    this.pinPreviews.delete(preview);
+    this.assertMaintenanceView(binding);
+    return this.historyOperation((signal) =>
+      confirmPinCleanup(this.paths, preview, signal, () =>
+        this.assertMaintenanceView(binding),
+      ),
+    );
   }
   async confirmCacheCleanup(preview: CacheCleanupPreview) {
     this.idle();
