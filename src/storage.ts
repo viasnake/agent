@@ -394,6 +394,13 @@ export class Store {
       .run(Date.now(), JSON.stringify(run), run.id, run.generation);
     return this.cancelRequested(run.id);
   }
+  heartbeatLease(runId: string, generation: number): boolean {
+    this.assertLease(runId, generation);
+    this.db
+      .prepare("UPDATE runs SET heartbeat=? WHERE id=? AND generation=?")
+      .run(Date.now(), runId, generation);
+    return this.cancelRequested(runId);
+  }
   save(
     run: Run,
     event = "run_updated",

@@ -950,7 +950,13 @@ export class Harness {
           );
         if (run.access === "read-only") {
           await closeResources();
-          await recordTaskModelChangeResolution(this.store, run, [], true);
+          await recordTaskModelChangeResolution(
+            this.store,
+            run,
+            [],
+            true,
+            this.config.limits.maxFileBytes,
+          );
           if (
             elapsed + Date.now() - started >=
             this.config.limits.maxSeconds * 1000
@@ -995,6 +1001,7 @@ export class Harness {
             run,
             freshCheckIds,
             false,
+            this.config.limits.maxFileBytes,
           );
           await this.store.artifact(
             run,

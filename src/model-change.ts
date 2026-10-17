@@ -90,12 +90,19 @@ function destination(config: Config, alias: string): ModelCandidate {
   const connection = config.connections[model.connection];
   if (!connection)
     throw new AgentError("NO_MODEL", `Unknown connection ${model.connection}`);
+  let endpoint = connection.endpoint;
+  if (endpoint) {
+    const parsed = new URL(endpoint);
+    parsed.username = "";
+    parsed.password = "";
+    endpoint = parsed.toString();
+  }
   return {
     alias,
     modelId: model.id,
     connection: model.connection,
     type: connection.type,
-    ...(connection.endpoint ? { endpoint: connection.endpoint } : {}),
+    ...(endpoint ? { endpoint } : {}),
     billing: connection.billing,
     allowedData: [...connection.allowedData],
     localOnly: connection.type === "local",
@@ -107,6 +114,7 @@ function taskNeedsTools(store: Store, run: Run, task: Task): boolean {
     task.role === "reviewer" ||
     task.write ||
     run.kind !== "chat" ||
+    (!!task.delegatedBy && !!run.workspace) ||
     run.inputs.length > 0 ||
     (run.preparedInputs?.length ?? 0) > 0 ||
     (task.assignment?.sourceIds.length ?? 0) > 0 ||
@@ -159,7 +167,13 @@ function assertTaskGraph(tasks: Task[]): void {
   for (const task of tasks) visit(task.id);
 }
 
-function assertEligible(store: Store, config: Config, run: Run): void {
+function assertEligible(
+  store: Store,
+  config: Config,
+  run: Run,
+  requireIdle = true,
+): void {
+  if (requireIdle) store.assertIdle(run.id);
   if (
     run.state !== "waiting_input" &&
     run.state !== "waiting_quota" &&
@@ -227,10 +241,7 @@ function assertBudget(
 } {
   const usage = store.usage(run.id);
   const required = requiredTaskIds(run, affected);
-  if (
-    usage.requests + required.size + (run.modelChanges?.length ?? 0) >
-    config.limits.maxRequests
-  )
+  if (usage.requests + required.size > config.limits.maxRequests)
     throw new AgentError(
       "BUDGET",
       "The remaining request budget cannot execute every affected task",
@@ -336,14 +347,15 @@ export function taskModelCandidates(
   );
 }
 
-export function previewTaskModelChange(
+function buildTaskModelChangePreview(
   store: Store,
   config: Config,
   run: Run,
   taskId: string,
   model: string,
+  requireIdle = true,
 ): ModelChangePreview {
-  assertEligible(store, config, run);
+  assertEligible(store, config, run, requireIdle);
   const task = run.tasks.find((candidate) => candidate.id === taskId);
   if (!task || !task.model)
     throw new AgentError("TASK", "Task is not selected in this run");
@@ -408,6 +420,16 @@ export function previewTaskModelChange(
   };
 }
 
+export function previewTaskModelChange(
+  store: Store,
+  config: Config,
+  run: Run,
+  taskId: string,
+  model: string,
+): ModelChangePreview {
+  return buildTaskModelChangePreview(store, config, run, taskId, model, true);
+}
+
 export async function confirmTaskModelChange(
   store: Store,
   config: Config,
@@ -415,72 +437,93 @@ export async function confirmTaskModelChange(
   options: ModelChangeOptions = {},
 ): Promise<ModelChange> {
   let run: Run | undefined;
-  const beforeClaim = (candidate: Run) => {
-    const current = previewTaskModelChange(
-      store,
-      config,
-      candidate,
-      preview.taskId,
-      preview.toModel,
-    );
-    if (current.binding !== preview.binding)
-      throw new AgentError(
-        "STALE_MODEL_CHANGE",
-        "Model replacement preview is stale",
-      );
-    options.appGuard?.();
-  };
-  run = store.claim(preview.runId, false, false, beforeClaim);
-  const claimedSnapshot = snapshot(store, run);
-  const oldTask = run.tasks.find((task) => task.id === preview.taskId);
-  if (!oldTask || oldTask.model !== preview.fromModel)
-    throw new AgentError("STALE_MODEL_CHANGE", "The selected task changed");
-  const affected = affectedTasks(run, preview.taskId);
-  const supersededReportIds = (run.modelChanges ?? [])
-    .filter(
-      (change) =>
-        change.taskId === preview.taskId &&
-        !change.supersededByReportId &&
-        !change.resolutionReportId,
-    )
-    .map((change) => change.reportId);
-  const report = {
-    version: 1,
-    type: "task-model-change",
-    runId: run.id,
-    taskId: preview.taskId,
-    fromModel: preview.fromModel,
-    toModel: preview.toModel,
-    affectedTaskIds: affected.map((task) => task.id),
-    at: Date.now(),
-    supersededReportIds,
-    priorTasks: affected.map((task) => structuredClone(task)),
-    preserved: {
-      configHash: run.configHash,
-      constraints: run.constraints ?? [],
-      checks: run.checks,
-      mustKeep: run.mustKeep,
-      usage: claimedSnapshot.usage,
-      requests: claimedSnapshot.requests,
-      operations: claimedSnapshot.operations,
-    },
-    semanticEquivalence: "not-established",
-  };
-  const reportText = JSON.stringify(report, null, 2);
-  if (Buffer.byteLength(reportText) > config.limits.maxFileBytes)
-    throw new AgentError(
-      "REPORT_SIZE",
-      "Model-change evidence cannot retain the previous task results within the file limit",
-    );
-  const heartbeat = setInterval(() => {
-    try {
-      store.heartbeat(run!);
-    } catch {
-      // The commit callback performs the authoritative lease check.
-    }
-  }, 1000);
-  heartbeat.unref();
+  let heartbeat: NodeJS.Timeout | undefined;
+  if (options.signal?.aborted)
+    throw new AgentError("CANCELLED", "Model replacement was cancelled");
+  store.assertIdle(preview.runId);
   try {
+    run = store.claim(preview.runId, false, false, (candidate) => {
+      store.assertIdle(candidate.id);
+      const current = buildTaskModelChangePreview(
+        store,
+        config,
+        candidate,
+        preview.taskId,
+        preview.toModel,
+        false,
+      );
+      if (current.binding !== preview.binding)
+        throw new AgentError(
+          "STALE_MODEL_CHANGE",
+          "Model replacement preview is stale",
+        );
+      options.appGuard?.();
+    });
+    const claimedSnapshot = snapshot(store, run);
+    const oldTask = run.tasks.find((task) => task.id === preview.taskId);
+    if (!oldTask || oldTask.model !== preview.fromModel)
+      throw new AgentError("STALE_MODEL_CHANGE", "The selected task changed");
+    const affected = affectedTasks(run, preview.taskId);
+    const supersededReportIds = (run.modelChanges ?? [])
+      .filter(
+        (change) =>
+          change.taskId === preview.taskId &&
+          !change.supersededByReportId &&
+          !change.resolutionReportId,
+      )
+      .map((change) => change.reportId);
+    const report = {
+      version: 1,
+      type: "task-model-change",
+      runId: run.id,
+      taskId: preview.taskId,
+      fromModel: preview.fromModel,
+      toModel: preview.toModel,
+      fromDestination: destination(config, preview.fromModel),
+      toDestination: destination(config, preview.toModel),
+      affectedTaskIds: affected.map((task) => task.id),
+      at: Date.now(),
+      supersededReportIds,
+      priorTasks: affected.map((task) => structuredClone(task)),
+      preserved: {
+        configHash: run.configHash,
+        policy: {
+          dataClass: run.dataClass,
+          localOnly: run.localOnly,
+          access: run.access,
+          checks: run.checks,
+          constraints: run.constraints ?? [],
+          mustKeep: run.mustKeep,
+          sourceIds: [
+            ...run.inputs,
+            ...(run.preparedInputs ?? []).map((input) => input.id),
+            ...affected.flatMap((task) => task.assignment?.sourceIds ?? []),
+          ],
+          excludedSourceIds: run.contextState?.excludedSourceIds ?? [],
+          excludedSourceHashes: run.contextState?.excludedSourceHashes ?? [],
+          excludedSourceUrls: run.contextState?.excludedSourceUrls ?? [],
+          redactedImageIds: run.contextState?.redactedImageIds ?? [],
+        },
+        usage: claimedSnapshot.usage,
+        requests: claimedSnapshot.requests,
+        operations: claimedSnapshot.operations,
+      },
+      semanticEquivalence: "not-established",
+    };
+    const reportText = JSON.stringify(report, null, 2);
+    if (Buffer.byteLength(reportText) > config.limits.maxFileBytes)
+      throw new AgentError(
+        "REPORT_SIZE",
+        "Model-change evidence cannot retain the previous task results within the file limit",
+      );
+    heartbeat = setInterval(() => {
+      try {
+        store.heartbeatLease(run!.id, run!.generation);
+      } catch {
+        // The commit callback performs the authoritative lease check.
+      }
+    }, 1000);
+    heartbeat.unref();
     await store.artifact(
       run,
       `model-changes/${preview.taskId}-${Date.now()}.json`,
@@ -499,16 +542,29 @@ export async function confirmTaskModelChange(
         if (options.signal?.aborted || store.cancelRequested(run!.id))
           throw new AgentError("CANCELLED", "Model replacement was cancelled");
         options.appGuard?.();
-        assertEligible(store, config, run!);
+        const authoritativeRun = store.get(run!.id);
+        assertEligible(store, config, authoritativeRun, false);
         if (
-          run!.tasks.find((task) => task.id === preview.taskId)?.model !==
-          preview.fromModel
+          authoritativeRun.tasks.find((task) => task.id === preview.taskId)
+            ?.model !== preview.fromModel
         )
           throw new AgentError(
             "STALE_MODEL_CHANGE",
             "The selected task changed",
           );
-        const currentSnapshot = snapshot(store, run!, artifact.id);
+        if (
+          !candidateAliases(
+            store,
+            config,
+            authoritativeRun,
+            authoritativeRun.tasks.find((task) => task.id === preview.taskId)!,
+          ).includes(preview.toModel)
+        )
+          throw new AgentError(
+            "NO_MODEL",
+            "The replacement model is no longer authorized",
+          );
+        const currentSnapshot = snapshot(store, authoritativeRun, artifact.id);
         if (snapshotDigest(currentSnapshot) !== snapshotDigest(claimedSnapshot))
           throw new AgentError(
             "STALE_MODEL_CHANGE",
@@ -517,15 +573,16 @@ export async function confirmTaskModelChange(
         const budget = assertBudget(
           store,
           config,
-          run!,
+          authoritativeRun,
           { taskId: preview.taskId, model: preview.toModel },
           affected,
         );
-        const task = run!.tasks.find(
+        run = authoritativeRun;
+        const task = run.tasks.find(
           (candidate) => candidate.id === preview.taskId,
         )!;
         const affectedIds = new Set(affected.map((candidate) => candidate.id));
-        for (const candidate of run!.tasks)
+        for (const candidate of run.tasks)
           if (affectedIds.has(candidate.id)) {
             if (candidate.attempts > 0)
               candidate.modelChangeCount =
@@ -533,10 +590,9 @@ export async function confirmTaskModelChange(
             candidate.state = "pending";
             candidate.result = undefined;
             candidate.sessionFile = undefined;
-            if (run!.previousSessions)
-              delete run!.previousSessions[candidate.id];
+            if (run.previousSessions) delete run.previousSessions[candidate.id];
           }
-        const changes = [...(run!.modelChanges ?? [])];
+        const changes = [...(run.modelChanges ?? [])];
         for (const change of changes)
           if (supersededReportIds.includes(change.reportId))
             change.supersededByReportId = artifact.id;
@@ -550,11 +606,11 @@ export async function confirmTaskModelChange(
         };
         changes.push(change);
         task.model = preview.toModel;
-        run!.modelChanges = changes;
-        run!.state = "waiting_input";
-        run!.reason = "Task model changed; explicit resume is required";
+        run.modelChanges = changes;
+        run.state = "waiting_input";
+        run.reason = "Task model changed; explicit resume is required";
         void budget;
-        store.saveInTransaction(run!, "task_model_changed", {
+        store.saveInTransaction(run, "task_model_changed", {
           reportId: artifact.id,
           taskId: task.id,
           fromModel: preview.fromModel,
@@ -565,8 +621,8 @@ export async function confirmTaskModelChange(
     );
     return run.modelChanges!.at(-1)!;
   } finally {
-    clearInterval(heartbeat);
-    store.release(run);
+    if (heartbeat) clearInterval(heartbeat);
+    if (run) store.release(run);
   }
 }
 
@@ -575,6 +631,7 @@ export function recordModelChangeResolution(
   run: Run,
   validationArtifactIds: string[],
   checksNotRun: boolean,
+  maxFileBytes: number,
 ): Promise<void> {
   const unresolved = (run.modelChanges ?? []).filter(
     (change) => !change.supersededByReportId && !change.resolutionReportId,
@@ -597,6 +654,8 @@ export function recordModelChangeResolution(
   }
   return (async () => {
     for (const change of unresolved) {
+      const selected = run.tasks.find((task) => task.id === change.taskId);
+      if (!selected || selected.model !== change.toModel) continue;
       if (
         change.affectedTaskIds.some((taskId) => !latestReports.has(taskId)) ||
         change.affectedTaskIds.some(
@@ -624,6 +683,17 @@ export function recordModelChangeResolution(
         null,
         2,
       );
+      if (Buffer.byteLength(reportText) > maxFileBytes)
+        throw new AgentError(
+          "REPORT_SIZE",
+          "Model-change resolution evidence exceeds the file limit",
+        );
+      const expectedReports = new Map(
+        change.affectedTaskIds.map((taskId) => [
+          taskId,
+          latestReports.get(taskId)!,
+        ]),
+      );
       await store.artifact(
         run,
         `model-changes/resolution-${change.reportId}.json`,
@@ -637,19 +707,39 @@ export function recordModelChangeResolution(
           semanticEquivalence: "not-established",
         },
         (artifact) => {
-          const entry = run.modelChanges?.find(
+          const authoritativeRun = store.get(run.id);
+          const entry = authoritativeRun.modelChanges?.find(
             (candidate) => candidate.reportId === change.reportId,
           );
-          if (!entry || entry.supersededByReportId || entry.resolutionReportId)
+          if (
+            !entry ||
+            entry.supersededByReportId ||
+            entry.resolutionReportId ||
+            authoritativeRun.tasks.find((task) => task.id === change.taskId)
+              ?.model !== change.toModel ||
+            change.affectedTaskIds.some((taskId) => {
+              const task = authoritativeRun.tasks.find(
+                (candidate) => candidate.id === taskId,
+              );
+              return (
+                task?.state !== "succeeded" ||
+                task.attemptReportIds?.at(-1) !== expectedReports.get(taskId)
+              );
+            })
+          )
             throw new AgentError(
               "STALE_MODEL_CHANGE",
               "Model-change resolution is stale",
             );
           entry.resolutionReportId = artifact.id;
-          store.saveInTransaction(run, "task_model_change_resolved", {
-            reportId: change.reportId,
-            resolutionReportId: artifact.id,
-          });
+          store.saveInTransaction(
+            authoritativeRun,
+            "task_model_change_resolved",
+            {
+              reportId: change.reportId,
+              resolutionReportId: artifact.id,
+            },
+          );
         },
       );
     }

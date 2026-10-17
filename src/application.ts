@@ -2098,6 +2098,7 @@ export class Application extends EventEmitter {
     })();
     try {
       await this.work;
+      this.publish("changed");
     } finally {
       this.work = undefined;
       this.controller = undefined;
