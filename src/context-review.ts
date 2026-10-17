@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { requireAuthorizedSource } from "./collaboration.js";
+import {
+  isStructuredCollaboration,
+  requireAuthorizedSource,
+} from "./collaboration.js";
 import { Store } from "./storage.js";
 import {
   AgentError,
@@ -20,6 +23,20 @@ const issueSchema = z.object({
   operationIds: z.array(idSchema).max(8).default([]),
 });
 export type ContextIssueInput = z.input<typeof issueSchema>;
+const explorationTools = new Set([
+  "read_file",
+  "read_source",
+  "list_files",
+  "search_files",
+  "code_info",
+  "read_context",
+  "read_task_report",
+  "read_research_checkpoint",
+]);
+
+export function isContextExplorationTool(name: string): boolean {
+  return explorationTools.has(name);
+}
 
 export interface ContextReviewPreview {
   runId: string;
@@ -46,7 +63,7 @@ export function assertContextReady(run: Run): void {
   if (issue)
     throw new AgentError(
       "CONTEXT_REVIEW_REQUIRED",
-      `Context integrity requires human review; use /context-review (${issue.id})`,
+      `Context integrity requires human review; use agent context-review ${run.id} (${issue.id})`,
     );
 }
 
@@ -58,7 +75,7 @@ function bounded(value: string, maxBytes: number, label: string): string {
 
 function authorizedArchiveIds(run: Run, task: Task): Set<string> {
   return new Set(
-    task.delegatedBy
+    isStructuredCollaboration(run, task)
       ? (task.contextArchiveIds ?? [])
       : [
           ...(run.compactions ?? []),
@@ -73,8 +90,21 @@ function validateReferences(
   task: Task,
   input: z.output<typeof issueSchema>,
 ): void {
+  if (!run.tasks.some((candidate) => candidate.id === task.id))
+    throw new AgentError("CONTEXT_REVIEW", "Task is not part of this run");
   for (const sourceId of input.sourceIds)
     requireAuthorizedSource(store, run, task, sourceId);
+  const context = run.contextState;
+  if (
+    input.archiveIds.length &&
+    (context?.excludedSourceIds?.length ||
+      context?.excludedSourceHashes?.length ||
+      context?.excludedSourceUrls?.length)
+  )
+    throw new AgentError(
+      "SOURCE_EXCLUDED",
+      "Excluded source families cannot be used as context-review evidence",
+    );
   const archives = authorizedArchiveIds(run, task);
   if (input.archiveIds.some((archiveId) => !archives.has(archiveId)))
     throw new AgentError(
@@ -99,8 +129,13 @@ export function recordContextIssue(
   origin: "host" | "model",
 ): ContextIssue {
   store.assertLease(run.id, run.generation);
+  if (!run.tasks.some((candidate) => candidate.id === task.id))
+    throw new AgentError("CONTEXT_REVIEW", "Task is not part of this run");
   const existing = pendingIssues(run)[0];
-  if (existing) return structuredClone(existing);
+  if (existing) {
+    if (origin === "model") assertContextReady(run);
+    return structuredClone(existing);
+  }
   if ((run.contextIssues?.length ?? 0) >= 32)
     throw new AgentError(
       "CONTEXT_LIMIT",
@@ -130,11 +165,11 @@ export function recordContextIssue(
   return structuredClone(issue);
 }
 
-async function repeatedReadIssue(
+function repeatedReadIssue(
   store: Store,
   run: Run,
   task: Task,
-): Promise<ContextIssue | undefined> {
+): ContextIssue | undefined {
   const cursor = run.contextReviewCursor;
   const rows = store.db
     .prepare(
@@ -152,19 +187,14 @@ async function repeatedReadIssue(
     args_hash: string;
     payload: string | null;
   }>;
-  const reads = new Set([
-    "read_file",
-    "read_source",
-    "list_files",
-    "search_files",
-    "code_info",
-    "read_context",
-    "read_task_report",
-    "read_research_checkpoint",
-  ]);
   const counts = new Map<string, { ids: string[]; sha256: string }>();
+  const latestDigest = new Map<string, string>();
   for (const row of rows) {
-    if (!reads.has(row.name) || row.status !== "completed" || !row.payload)
+    if (
+      !isContextExplorationTool(row.name) ||
+      row.status !== "completed" ||
+      !row.payload
+    )
       break;
     let artifact: {
       id?: unknown;
@@ -180,26 +210,16 @@ async function repeatedReadIssue(
       artifact.metadata?.taskId !== task.id ||
       artifact.metadata?.operationId !== row.id ||
       artifact.metadata?.tool !== row.name ||
-      typeof artifact.sha256 !== "string"
+      typeof artifact.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
+      !artifact.metadata ||
+      typeof artifact.metadata !== "object"
     )
       break;
-    let content: Buffer;
-    try {
-      content = await store.content({
-        id: String(artifact.id ?? ""),
-        runId: run.id,
-        name: `tool-${row.id}.txt`,
-        kind: "report",
-        sha256: artifact.sha256,
-        bytes: 0,
-        dataClass: run.dataClass,
-        metadata: artifact.metadata ?? {},
-      });
-    } catch {
-      break;
-    }
-    if (sha256(content) !== artifact.sha256) break;
-    const key = `${row.name}:${row.args_hash}:${artifact.sha256}`;
+    const key = `${row.name}:${row.args_hash}`;
+    const priorDigest = latestDigest.get(key);
+    if (priorDigest && priorDigest !== artifact.sha256) break;
+    latestDigest.set(key, artifact.sha256);
     const prior = counts.get(key) ?? { ids: [], sha256: artifact.sha256 };
     prior.ids.push(row.id);
     counts.set(key, prior);
@@ -223,16 +243,38 @@ async function repeatedReadIssue(
   return undefined;
 }
 
-export async function inspectCompletedRead(
+export function inspectCompletedRead(
   store: Store,
   run: Run,
   task: Task,
-): Promise<ContextIssue | undefined> {
+): ContextIssue | undefined {
+  if (pendingIssues(run).length) return undefined;
   return repeatedReadIssue(store, run, task);
 }
 
 function previewBinding(run: Run, usage: ReturnType<Store["usage"]>): string {
   return sha256(canonical({ run, usage }));
+}
+
+function makePreview(
+  run: Run,
+  usage: ReturnType<Store["usage"]>,
+): ContextReviewPreview {
+  return {
+    runId: run.id,
+    generation: run.generation,
+    binding: previewBinding(run, usage),
+    issues: pendingIssues(run),
+    policy: {
+      dataClass: run.dataClass,
+      localOnly: run.localOnly,
+      access: run.access,
+      constraints: run.constraints ?? [],
+      checks: run.checks,
+      mustKeep: run.mustKeep,
+      usage,
+    },
+  };
 }
 
 export function previewContextReview(
@@ -252,21 +294,7 @@ export function previewContextReview(
   )
     throw new AgentError("CONTEXT_REVIEW", "Run is not idle");
   const usage = store.usage(run.id);
-  return structuredClone({
-    runId: run.id,
-    generation: run.generation,
-    binding: previewBinding(run, usage),
-    issues,
-    policy: {
-      dataClass: run.dataClass,
-      localOnly: run.localOnly,
-      access: run.access,
-      constraints: run.constraints ?? [],
-      checks: run.checks,
-      mustKeep: run.mustKeep,
-      usage,
-    },
-  });
+  return structuredClone(makePreview(run, usage));
 }
 
 export function confirmContextReview(
@@ -277,9 +305,22 @@ export function confirmContextReview(
   bounded(note, 2000, "Context review note");
   store.assertIdle(preview.runId);
   let run: Run | undefined;
+  let authoritativeIssues: ContextIssue[] = [];
   try {
     run = store.claim(preview.runId, false, true, (candidate) => {
-      const issues = pendingIssues(candidate);
+      const usage = store.usage(candidate.id);
+      const authoritative = makePreview(candidate, usage);
+      const supplied = {
+        runId: preview.runId,
+        generation: preview.generation,
+        binding: preview.binding,
+        issues: preview.issues,
+        policy: preview.policy,
+      };
+      if (canonical(supplied) !== canonical(authoritative))
+        throw new AgentError("CONTEXT_REVIEW_STALE", "Context review is stale");
+      authoritativeIssues = authoritative.issues;
+      const issues = authoritative.issues;
       if (
         !issues.length ||
         (!["waiting_input", "waiting_quota", "waiting_approval"].includes(
@@ -291,9 +332,6 @@ export function confirmContextReview(
           "CONTEXT_REVIEW",
           "Run is not eligible for review",
         );
-      const usage = store.usage(candidate.id);
-      if (preview.binding !== previewBinding(candidate, usage))
-        throw new AgentError("CONTEXT_REVIEW_STALE", "Context review is stale");
     });
     const latest = store.db
       .prepare(
@@ -301,23 +339,24 @@ export function confirmContextReview(
       )
       .get(run.id) as { id?: string } | undefined;
     const at = Date.now();
+    const acknowledgedIds = new Set(
+      authoritativeIssues.map((issue) => issue.id),
+    );
     run.contextIssues = (run.contextIssues ?? []).map((issue) =>
-      issue.acknowledged ? issue : { ...issue, acknowledged: { at, note } },
+      acknowledgedIds.has(issue.id)
+        ? { ...issue, acknowledged: { at, note } }
+        : issue,
     );
     run.contextReviewCursor = latest?.id;
-    const acknowledgedTaskIds = new Set(
-      preview.issues.map((issue) => issue.taskId),
-    );
     for (const task of run.tasks)
-      if (acknowledgedTaskIds.has(task.id))
-        task.contextReviewCount = (task.contextReviewCount ?? 0) + 1;
+      task.contextReviewCount = (task.contextReviewCount ?? 0) + 1;
     if (!terminalStates.includes(run.state)) {
       run.state = "waiting_input";
       run.reason =
         "Context reviewed; explicit resume or new request is required";
     } else run.reason = "Context reviewed; explicit new request is required";
     store.save(run, "context_review_confirmed", {
-      issueCount: preview.issues.length,
+      issueCount: authoritativeIssues.length,
     });
     return structuredClone(run);
   } finally {

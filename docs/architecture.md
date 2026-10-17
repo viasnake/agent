@@ -20,7 +20,13 @@ External text and repository instructions cannot grant permissions. Pi's automat
 
 Conversation JSON separately stores trusted user notes, verbatim conversation instructions, explicit constraints, host-derived run/check/artifact references, image/source IDs and deterministic compaction records. Model summaries remain marked as untrusted reports. Legacy conversation fields remain optional and normalize on read. Provider session files remain Pi-owned and are not a source of durable user permissions. `/pins` and `/context` edits require an idle conversation lease; they cannot modify connection policy. Context does not cross conversation boundaries.
 
-Protected context integrity failures and bounded model-assisted context issue reports are persisted on the owning run, never promoted to conversation authority. A pending issue blocks later tools, inference, transforms and final success until a human previews the current binding and confirms with an explicit note. Confirmation preserves policy, usage, constraints and pending inputs; it never auto-resumes or resurrects a terminal run.
+Structural protected-context candidates are rejected before adoption. Bounded
+host and model context concerns are persisted separately as issues on the
+owning run, never promoted to conversation authority. A pending issue blocks
+later tools, inference, transforms and final success until a human previews the
+current binding and confirms with an explicit note. Confirmation preserves
+policy, usage, constraints and pending inputs; it never auto-resumes or
+resurrects a terminal run.
 
 The host may compact only older verbose tool results at the guarded request boundary. It first writes the exact pre-transform context to a private, content-addressed conversation archive, then preserves message ordering and tool-call IDs while replacing eligible results with bounded excerpts. `read_context` reads bounded ranges from that conversation's archive lineage. User text, assistant final/decision text, current tool results, errors, images, permissions and constraints remain verbatim. If protected content exceeds the usable budget, the request stops with `CONTEXT_LIMIT`. Manual `/compact` uses the same archive format without a provider request; older per-run `handoff.json` files remain readable. The budget uses bytes/3 plus 8,192 tokens-equivalent per image as a heuristic; provider-reported usage is authoritative and the estimate does not guarantee real-provider fit.
 

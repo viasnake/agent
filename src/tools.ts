@@ -134,9 +134,12 @@ export class TaskTools {
             name,
             data,
           );
-          let dispatched = false;
+          let dispatched = false,
+            completedResult: string | undefined,
+            shouldObserve = false;
           try {
             await beforeDispatch?.(data, signal, operation);
+            assertContextReady(this.run);
             signal.throwIfAborted();
             this.store.assertLease(this.run.id, this.run.generation);
             if (this.store.cancelRequested(this.run.id))
@@ -144,6 +147,7 @@ export class TaskTools {
                 "CANCELLED",
                 "Cancellation requested before dispatch",
               );
+            assertContextReady(this.run);
             this.store.operation(this.run, operation, "dispatched");
             dispatched = true;
             const result = await execute(data, signal, operation);
@@ -157,9 +161,9 @@ export class TaskTools {
             );
             if (!options.keepDispatched)
               this.store.operation(this.run, operation, "completed", log.id);
-            if (!options.keepDispatched)
-              await inspectCompletedRead(this.store, this.run, this.task);
-            return result;
+            if (options.keepDispatched) return result;
+            completedResult = result;
+            shouldObserve = true;
           } catch (error) {
             // A cancelled external call or killed shell may have completed its side effect.
             const rejected =
@@ -202,6 +206,10 @@ export class TaskTools {
             }
             throw error;
           }
+          if (shouldObserve) {
+            inspectCompletedRead(this.store, this.run, this.task);
+          }
+          return completedResult!;
         });
         this.queue = action.catch(() => {});
         return action;
@@ -449,11 +457,7 @@ export class TaskTools {
           ),
       ),
     ];
-    const canExplore =
-      this.run.inputs.length > 0 ||
-      this.run.preparedInputs?.length ||
-      authorizedSources(this.store, this.run, this.task).length > 0;
-    if (canExplore && this.task.role !== "lead")
+    if (this.task.role !== "lead")
       tools.push(
         this.wrap(
           "report_context_issue",

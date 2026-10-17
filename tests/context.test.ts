@@ -352,7 +352,10 @@ test("tool-free chat exposes read_context only when conversation archives exist"
       (tool) => tool.name === "read_context",
     );
     assert.ok(readContext);
-    assert.equal(request.tools.length, 1);
+    assert.equal(request.tools.length, 2);
+    assert.ok(
+      request.tools.some((tool) => tool.name === "report_context_issue"),
+    );
     assert.match(
       await readContext.execute(
         {

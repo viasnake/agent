@@ -386,6 +386,8 @@ export class Application extends EventEmitter {
     } satisfies AppEvent);
   }
   private idle(): void {
+    if (this.closed)
+      throw new AgentError("CLOSED", "The application is closed");
     if (this.busy)
       throw new AgentError(
         "BUSY",
@@ -1075,8 +1077,12 @@ export class Application extends EventEmitter {
         if (
           error instanceof AgentError &&
           error.code === "CONTEXT_REVIEW_REQUIRED"
-        )
+        ) {
+          this.publish("notice", {
+            text: "Context review is required before queued work can start.",
+          });
           return;
+        }
         throw error;
       }
     }
@@ -1123,6 +1129,10 @@ export class Application extends EventEmitter {
     generation: number,
   ): Promise<void> {
     const signal = this.controller!.signal;
+    const previous = this.session.latestRunId
+      ? this.store.get(this.session.latestRunId)
+      : undefined;
+    if (previous) assertContextReady(previous);
     const floor = lineagePolicy(this.store, this.session.id);
     if (floor) {
       const levels: DataClass[] = ["public", "private", "restricted"];
@@ -1161,9 +1171,6 @@ export class Application extends EventEmitter {
         this.session.context = context;
       }
     }
-    const previous = this.session.latestRunId
-      ? this.store.get(this.session.latestRunId)
-      : undefined;
     const kind =
       this.session.kind === "auto"
         ? inferKind(input.text, previous?.kind)
@@ -2099,8 +2106,10 @@ export class Application extends EventEmitter {
     return sha256(
       canonical({
         generation: this.generation,
+        configHash: configHash(this.config),
         sessionId: this.session.id,
         runId: run.id,
+        conversationId: run.conversationId,
         workspace: this.session.workspace,
         kind: this.session.kind,
         model: this.session.model,
@@ -2244,16 +2253,15 @@ export class Application extends EventEmitter {
         "Review must target the current run",
       );
     const preview = previewBackendContextReview(this.store, runId);
+    const run = this.store.get(runId);
+    if (run.conversationId !== this.session.id)
+      throw new AgentError(
+        "CONTEXT_REVIEW",
+        "Review must target the current conversation",
+      );
     return {
       ...preview,
-      appBinding: sha256(
-        canonical({
-          binding: preview.binding,
-          sessionId: this.session.id,
-          generation: this.generation,
-          currentRunId: this.session.latestRunId,
-        }),
-      ),
+      appBinding: this.modelChangeSessionBinding(run),
     };
   }
   confirmContextReview(
@@ -2264,10 +2272,24 @@ export class Application extends EventEmitter {
     const fresh = this.previewContextReview(preview.runId);
     if (
       fresh.binding !== preview.binding ||
-      fresh.appBinding !== preview.appBinding
+      fresh.appBinding !== preview.appBinding ||
+      canonical({
+        runId: fresh.runId,
+        generation: fresh.generation,
+        binding: fresh.binding,
+        issues: fresh.issues,
+        policy: fresh.policy,
+      }) !==
+        canonical({
+          runId: preview.runId,
+          generation: preview.generation,
+          binding: preview.binding,
+          issues: preview.issues,
+          policy: preview.policy,
+        })
     )
       throw new AgentError("CONTEXT_REVIEW_STALE", "Context review is stale");
-    const run = confirmBackendContextReview(this.store, preview, note);
+    const run = confirmBackendContextReview(this.store, fresh, note);
     this.publish("changed");
     return run;
   }
