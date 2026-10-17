@@ -6,6 +6,11 @@ import lockfile from "proper-lockfile";
 import { createTwoFilesPatch } from "diff";
 import { applyRun } from "./artifacts.js";
 import {
+  previewDiagnostics,
+  writeDiagnostics,
+  type DiagnosticPreview,
+} from "./diagnostics.js";
+import {
   createBackup,
   previewBackup,
   type BackupManifest,
@@ -3331,6 +3336,14 @@ export class Application extends EventEmitter {
         config: configHash(this.config),
       }),
     );
+  }
+  async previewDiagnostics(): Promise<DiagnosticPreview> {
+    this.idle();
+    return previewDiagnostics(this.paths, this.config);
+  }
+  saveDiagnostics(preview: DiagnosticPreview, destination: string): void {
+    this.idle();
+    writeDiagnostics(this.paths, preview, destination);
   }
   previewHistoryBackup(destination: string): BackupPreview {
     this.idle();

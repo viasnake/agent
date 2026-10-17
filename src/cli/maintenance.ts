@@ -1,4 +1,10 @@
 import type { CliContext } from "./context.js";
+import { paths as agentPaths } from "../config.js";
+import {
+  diagnosticWarning,
+  previewDiagnostics,
+  writeDiagnostics,
+} from "../diagnostics.js";
 import {
   backupExclusions,
   createBackup,
@@ -22,6 +28,26 @@ const deletionWarning =
   "メタデータを先に削除する限定的な処理です。共有画像・文書・checkpoint は残り、SQLite の残存ページや外部バックアップにも内容が残る場合があります。物理削除は保留になることがあり、自動再試行や暗号学的消去は行いません。";
 export function registerMaintenanceCommands(cli: CliContext): void {
   const { program, print, context, signal } = cli;
+  program
+    .command("diagnostics [file]")
+    .description(
+      "Preview allowlisted diagnostics without credentials, content or probes",
+    )
+    .option("--write", "save the preview to a new private file; never upload")
+    .action(async (file: string | undefined, options) => {
+      const paths = agentPaths(program.opts().home);
+      const preview = await previewDiagnostics(paths);
+      if (options.write) {
+        if (!file)
+          throw new Error("保存先の新しいファイル名を指定してください。");
+        writeDiagnostics(paths, preview, file);
+      }
+      print({
+        written: !!options.write,
+        warning: diagnosticWarning,
+        report: JSON.parse(preview.text),
+      });
+    });
   program
     .command("prune-cache [paths...]")
     .description(
