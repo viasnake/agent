@@ -3,10 +3,10 @@ import { dirname, join, posix } from "node:path";
 import type { Config } from "./config.js";
 import { AgentError } from "./types.js";
 import { runProcess, type ProcessResult } from "./process.js";
-import { sha256 } from "./util.js";
+import { privateDirectory, sha256, within } from "./util.js";
 import { bubblewrapInvocation } from "./sandbox/bubblewrap.js";
 import { podmanInvocation } from "./sandbox/podman.js";
-import type { SandboxInvocation } from "./sandbox/types.js";
+import type { SandboxInvocation, SandboxRuntime } from "./sandbox/types.js";
 
 export class Sandbox {
   constructor(
@@ -20,6 +20,7 @@ export class Sandbox {
     command: string[],
     readOnly = false,
     extraReadOnly: string[] = [],
+    runtime?: SandboxRuntime,
   ): Promise<SandboxInvocation> {
     if (!command.length || !command[0])
       throw new AgentError("SANDBOX", "A sandbox command is required");
@@ -31,6 +32,16 @@ export class Sandbox {
     if (this.config.backend === "disabled")
       throw new AgentError("SANDBOX", "Command execution is disabled");
     const root = await realpath(workspace);
+    if (runtime) {
+      await privateDirectory(runtime.path);
+      const path = await realpath(runtime.path);
+      if (within(root, path) || within(path, root))
+        throw new AgentError(
+          "SANDBOX",
+          "Runtime storage must be separate from the workspace",
+        );
+      runtime = { ...runtime, path };
+    }
     if (this.config.backend === "podman")
       return podmanInvocation(
         this.config,
@@ -38,6 +49,7 @@ export class Sandbox {
         command,
         readOnly,
         this.processRunner,
+        runtime,
       );
     if (this.platform !== "linux")
       throw new AgentError(
@@ -50,6 +62,7 @@ export class Sandbox {
       command,
       readOnly,
       extraReadOnly,
+      runtime,
     );
   }
 
@@ -58,15 +71,24 @@ export class Sandbox {
     command: string[],
     signal: AbortSignal,
     readOnly: boolean,
+    limits?: { timeoutMs: number; maxBytes: number },
+    runtime?: SandboxRuntime,
   ): Promise<ProcessResult> {
     signal.throwIfAborted();
-    const invocation = await this.invocation(workspace, command, readOnly);
+    const invocation = await this.invocation(
+      workspace,
+      command,
+      readOnly,
+      [],
+      runtime,
+    );
     try {
       return await this.processRunner(invocation.command, invocation.args, {
         signal,
         env: invocation.env,
-        timeoutMs: this.config.commandTimeoutSeconds * 1000,
-        maxBytes: this.config.maxOutputBytes,
+        timeoutMs:
+          limits?.timeoutMs ?? this.config.commandTimeoutSeconds * 1000,
+        maxBytes: limits?.maxBytes ?? this.config.maxOutputBytes,
       });
     } finally {
       await invocation.cleanup?.();
@@ -78,8 +100,32 @@ export class Sandbox {
     command: string,
     signal: AbortSignal,
     readOnly = false,
+    runtime?: SandboxRuntime,
   ): Promise<ProcessResult> {
-    return this.run(workspace, ["/bin/sh", "-c", command], signal, readOnly);
+    return this.run(
+      workspace,
+      ["/bin/sh", "-c", command],
+      signal,
+      readOnly,
+      undefined,
+      runtime,
+    );
+  }
+
+  async executeArgs(
+    workspace: string,
+    command: string[],
+    signal: AbortSignal,
+    readOnly = true,
+    maxBytes = this.config.maxOutputBytes,
+    timeoutMs = 30000,
+  ): Promise<ProcessResult> {
+    maxBytes = Math.min(maxBytes, this.config.maxOutputBytes);
+    timeoutMs = Math.min(timeoutMs, this.config.commandTimeoutSeconds * 1000);
+    return this.run(workspace, command, signal, readOnly, {
+      timeoutMs,
+      maxBytes,
+    });
   }
 
   async verifyExecutable(

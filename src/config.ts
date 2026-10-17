@@ -41,6 +41,8 @@ const model = z.strictObject({
   kinds: z.array(z.enum(["coding", "research", "writing", "chat"])).min(1),
   tools: z.boolean().default(false),
   images: z.boolean().optional(),
+  reasoning: z.boolean().optional(),
+  thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high"]).optional(),
   contextWindow: z.number().int().min(2048).max(2_000_000).default(32000),
   maxOutputTokens: z.number().int().min(256).max(128000).default(4096),
   priority: z.number().int().default(0),
@@ -64,7 +66,8 @@ const mcp = z.strictObject({
     z.string().min(1),
     z.strictObject({
       schemaSha256: z.string().regex(/^[a-f0-9]{64}$/),
-      readOnly: z.literal(true),
+      readOnly: z.boolean(),
+      effect: z.enum(["change", "publish", "delete", "dangerous"]).optional(),
     }),
   ),
 });
@@ -76,9 +79,9 @@ export const configSchema = z.strictObject({
   defaults: z
     .strictObject({
       dataClass,
-      mode: z.enum(["single", "assisted", "reviewed"]),
+      mode: z.enum(["single", "assisted", "reviewed"]).default("single"),
     })
-    .default({ dataClass: "private", mode: "reviewed" }),
+    .default({ dataClass: "private", mode: "single" }),
   limits: z
     .strictObject({
       maxRequests: z.number().int().min(1).max(1000).default(60),
@@ -115,6 +118,25 @@ export const configSchema = z.strictObject({
       runtimePaths: z.array(z.string().startsWith("/")).default([]),
       commandTimeoutSeconds: z.number().int().min(1).max(3600).default(120),
       maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(64000),
+      profiles: z
+        .record(
+          name,
+          z.strictObject({
+            description: z.string().min(1).max(500),
+            command: z.string().min(1).max(8000),
+          }),
+        )
+        .optional(),
+      managedProcesses: z
+        .strictObject({
+          engineAnchor: z.strictObject({
+            containerId: z.string().regex(/^[a-f0-9]{64}$/),
+            token: z.uuid(),
+          }),
+          maxSeconds: z.number().int().min(1).max(3600).default(600),
+          maxProcesses: z.number().int().min(1).max(2).default(1),
+        })
+        .optional(),
     })
     .prefault({}),
   checks: z
@@ -136,6 +158,15 @@ export const configSchema = z.strictObject({
     .strictObject({
       allowedHosts: z.array(z.string().regex(/^[a-zA-Z0-9.-]+$/)).default([]),
       allowedData: z.array(dataClass).default(["public"]),
+      search: z
+        .strictObject({
+          endpoint: z.url(),
+          queryParam: z
+            .string()
+            .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
+            .default("q"),
+        })
+        .optional(),
     })
     .prefault({}),
   mcp: z.record(name, mcp).default({}),
@@ -148,7 +179,9 @@ export interface Paths {
   config: string;
   database: string;
   runs: string;
+  checkpoints: string;
   auth: string;
+  attachments: string;
 }
 export function paths(home?: string): Paths {
   const root = resolve(home ?? process.env.AGENT_HOME ?? defaultHome());
@@ -157,7 +190,9 @@ export function paths(home?: string): Paths {
     config: join(root, "config.yaml"),
     database: join(root, "state.sqlite"),
     runs: join(root, "runs"),
+    checkpoints: join(root, "checkpoints"),
     auth: join(root, "auth"),
+    attachments: join(root, "attachments"),
   };
 }
 export function validateConfig(input: unknown): Config {
@@ -250,10 +285,40 @@ export function validateConfig(input: unknown): Config {
         "CONFIG",
         `${key}: classifier cannot be used as an agent`,
       );
+    if (value.thinkingLevel && value.thinkingLevel !== "off") {
+      if (
+        value.reasoning === false ||
+        (!["chatgpt", "gemini"].includes(conn.type) && value.reasoning !== true)
+      )
+        throw new AgentError(
+          "CONFIG",
+          `${key}: reasoning capability must be enabled before selecting a thinking level`,
+        );
+    }
     if (conn.type === "sarashina" && value.maxOutputTokens > 8000)
       throw new AgentError(
         "CONFIG",
         `${key}: Sarashina output limit is 8000 tokens`,
+      );
+  }
+  if (config.web.search) {
+    const endpoint = new URL(config.web.search.endpoint);
+    if (
+      endpoint.protocol !== "https:" ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.hash ||
+      (endpoint.port && endpoint.port !== "443") ||
+      !config.web.allowedHosts.includes(endpoint.hostname)
+    )
+      throw new AgentError(
+        "CONFIG",
+        "web.search.endpoint must be HTTPS on an allowed host without credentials, query or fragment",
+      );
+    if (endpoint.search)
+      throw new AgentError(
+        "CONFIG",
+        "web.search.endpoint must not contain a query; configure queryParam instead",
       );
   }
   if (
@@ -266,6 +331,18 @@ export function validateConfig(input: unknown): Config {
       "Routing classifier must reference a Clef connection",
     );
   for (const [key, server] of Object.entries(config.mcp)) {
+    for (const permission of Object.values(server.tools)) {
+      if (permission.readOnly && permission.effect)
+        throw new AgentError(
+          "CONFIG",
+          `${key}: remove the mutation effect before declaring a tool read-only`,
+        );
+      if (!permission.readOnly && server.url && new URL(server.url).search)
+        throw new AgentError(
+          "CONFIG",
+          `${key}: mutation endpoints must not contain a URL query; use OAuth or bearerEnv for credentials`,
+        );
+    }
     if (
       server.transport === "stdio" &&
       (!server.command?.startsWith("/") || !server.commandSha256)
@@ -323,7 +400,8 @@ export async function loadConfig(p: Paths): Promise<Config> {
 export const configHash = (config: Config) => sha256(canonical(config));
 export async function initialize(p: Paths, template?: unknown): Promise<void> {
   await privateDirectory(p.home);
-  for (const path of [p.runs, p.auth]) await privateDirectory(path);
+  for (const path of [p.runs, p.auth, p.attachments])
+    await privateDirectory(path);
   if (
     await lstat(p.config).then(
       () => true,

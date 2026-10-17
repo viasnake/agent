@@ -3,7 +3,7 @@ import type { Config } from "../config.js";
 import { AgentError } from "../types.js";
 import { podmanEnvironment } from "../platform.js";
 import { runProcess } from "../process.js";
-import type { SandboxInvocation } from "./types.js";
+import type { SandboxInvocation, SandboxRuntime } from "./types.js";
 
 export async function podmanInvocation(
   config: Config["execution"],
@@ -11,6 +11,7 @@ export async function podmanInvocation(
   command: string[],
   readOnly: boolean,
   execute = runProcess,
+  runtime?: SandboxRuntime,
 ): Promise<SandboxInvocation> {
   if (!config.image)
     throw new AgentError(
@@ -22,7 +23,7 @@ export async function podmanInvocation(
       "SANDBOX",
       "Podman runtimes must be installed in the pinned Linux image; runtimePaths is only for Bubblewrap",
     );
-  if (root.includes(":"))
+  if (root.includes(":") || runtime?.path.includes(":"))
     throw new AgentError(
       "SANDBOX",
       "Podman workspace paths must not contain a colon",
@@ -58,6 +59,11 @@ export async function podmanInvocation(
       "--userns=keep-id",
       "--tmpfs=/tmp:rw,nosuid,nodev,size=256m",
       `--volume=${root}:/workspace:${readOnly ? "ro" : "rw"}`,
+      ...(runtime
+        ? [
+            `--volume=${runtime.path}:/runtime:${runtime.readOnly ? "ro" : "rw"}`,
+          ]
+        : []),
       "--workdir=/workspace",
       "--env=HOME=/tmp",
       "--env=TMPDIR=/tmp",

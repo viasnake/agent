@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { writeFile, readFile, lstat, symlink, chmod } from "node:fs/promises";
+import {
+  writeFile,
+  readFile,
+  lstat,
+  mkdir,
+  symlink,
+  chmod,
+  readdir,
+} from "node:fs/promises";
 import {
   fixture,
   ScriptedRuntime,
@@ -19,6 +27,48 @@ import {
 } from "../src/workspace.js";
 import { Sandbox } from "../src/sandbox.js";
 import { TaskTools } from "../src/tools.js";
+import { sha256 } from "../src/util.js";
+import { Evaluator } from "../src/validation.js";
+
+test("Harness attachment count and raw bytes are preflighted before storage", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const paths = Array.from({ length: 9 }, (_, index) =>
+      join(f.root, `small-${index}.txt`),
+    );
+    for (const path of paths) await writeFile(path, "a");
+    await assert.rejects(
+      f.harness.create({
+        kind: "chat",
+        objective: "inspect",
+        inputs: paths,
+      }),
+      { code: "INPUT_SIZE" },
+    );
+    await readdir(f.p.attachments).then(
+      () => assert.fail("over-count input created attachment storage"),
+      (error: NodeJS.ErrnoException) => assert.equal(error.code, "ENOENT"),
+    );
+
+    const large = [join(f.root, "large-a.txt"), join(f.root, "large-b.txt")];
+    for (const path of large)
+      await writeFile(path, Buffer.alloc(10_000_001, 0x61));
+    await assert.rejects(
+      f.harness.create({
+        kind: "chat",
+        objective: "inspect",
+        inputs: large,
+      }),
+      { code: "INPUT_SIZE" },
+    );
+    await readdir(f.p.attachments).then(
+      () => assert.fail("over-budget input created attachment storage"),
+      (error: NodeJS.ErrnoException) => assert.equal(error.code, "ENOENT"),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
 
 test("snapshot keeps dirty tracked files and selected untracked files without touching the source", async () => {
   const f = await fixture(new ScriptedRuntime(async () => completed()));
@@ -48,6 +98,365 @@ test("snapshot keeps dirty tracked files and selected untracked files without to
       "dirty user work",
     );
     await verifyOriginal(snapshot);
+  } finally {
+    await f.cleanup();
+  }
+});
+test("redacted originals stay out of continued tool work and cannot be reapplied", async () => {
+  const runtime = new ScriptedRuntime(async () => "read-only answer"),
+    f = await fixture(runtime);
+  try {
+    const original = "same image bytes\n",
+      origin = await gitWorkspace(f.root, {
+        "assets/original.png": original,
+        "assets/alias.png": original,
+        "README.md": "safe\n",
+      }),
+      run = await f.harness.create({
+        kind: "chat",
+        access: "read-only",
+        objective: "inspect workspace",
+        workspace: origin,
+        redactedImageHashes: [sha256(original)],
+      }),
+      directory = f.store.runDir(run.id),
+      snapshot = await readSnapshot(directory);
+    assert.deepEqual(snapshot.redactedPaths, [
+      "assets/alias.png",
+      "assets/original.png",
+    ]);
+    assert.ok(snapshot.files["assets/original.png"]);
+    assert.ok(snapshot.files["assets/alias.png"]);
+    await assert.rejects(
+      readFile(join(directory, "work", "assets/original.png")),
+      { code: "ENOENT" },
+    );
+    assert.deepEqual(
+      await workspaceDiff(directory, f.config.limits.maxWorkspaceBytes),
+      { changes: [], patch: "" },
+    );
+
+    const owned = f.store.claim(run.id, true, true),
+      task = {
+        id: "inspect",
+        objective: "inspect",
+        role: "worker" as const,
+        dependsOn: [],
+        write: false,
+        state: "pending" as const,
+        attempts: 0,
+      },
+      tools = new TaskTools(
+        f.config,
+        f.store,
+        owned,
+        task,
+        join(directory, "work"),
+        new Sandbox(f.config.execution),
+      ).all();
+    try {
+      for (const path of ["assets/original.png", "assets//original.png"])
+        await assert.rejects(
+          () =>
+            tools
+              .find((tool) => tool.name === "read_file")!
+              .execute(
+                { path, startLine: 1, lines: 10 },
+                new AbortController().signal,
+              ),
+          { code: "IMAGE_REDACTED" },
+        );
+      const aliasedWork = join(directory, "work-alias");
+      await symlink(join(directory, "work"), aliasedWork, "dir");
+      const aliasedTools = new TaskTools(
+        f.config,
+        f.store,
+        owned,
+        task,
+        aliasedWork,
+        new Sandbox(f.config.execution),
+      ).all();
+      await assert.rejects(
+        () =>
+          aliasedTools
+            .find((tool) => tool.name === "read_file")!
+            .execute(
+              { path: "assets/original.png", startLine: 1, lines: 10 },
+              new AbortController().signal,
+            ),
+        { code: "IMAGE_REDACTED" },
+      );
+    } finally {
+      f.store.release(owned);
+    }
+
+    await mkdir(join(directory, "work", "assets"), { recursive: true });
+    await writeFile(join(directory, "work", "assets/original.png"), original);
+    await writeFile(
+      join(directory, "work", "assets/copied-alias.png"),
+      original,
+    );
+    const continued = await f.harness.create({
+        kind: "chat",
+        access: "read-only",
+        objective: "continue inspecting workspace",
+        workspace: origin,
+        parentRunId: run.id,
+        redactedImageHashes: [sha256(original)],
+      }),
+      continuedDirectory = f.store.runDir(continued.id),
+      continuedSnapshot = await readSnapshot(continuedDirectory);
+    assert.ok(
+      continuedSnapshot.redactedPaths?.includes("assets/copied-alias.png"),
+    );
+    await assert.rejects(
+      readFile(join(continuedDirectory, "work", "assets/original.png")),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      readFile(join(continuedDirectory, "work", "assets/copied-alias.png")),
+      { code: "ENOENT" },
+    );
+    assert.deepEqual(
+      await workspaceDiff(
+        continuedDirectory,
+        f.config.limits.maxWorkspaceBytes,
+      ),
+      { changes: [], patch: "" },
+    );
+
+    await writeFile(
+      join(continuedDirectory, "work", "assets/original.png"),
+      original,
+    );
+    await assert.rejects(
+      workspaceDiff(continuedDirectory, f.config.limits.maxWorkspaceBytes),
+      { code: "IMAGE_REDACTED" },
+    );
+    const reintroduced = await inventory(
+      join(continuedDirectory, "work"),
+      f.config.limits.maxWorkspaceBytes,
+    );
+    await assert.rejects(
+      applyFiles(continuedDirectory, reintroduced, f.config),
+      { code: "IMAGE_REDACTED" },
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("applying safe edits preserves projected image aliases and baseline bytes", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "read-only answer"));
+  try {
+    const image = "private image payload\n",
+      origin = await gitWorkspace(f.root, {
+        "assets/original.png": image,
+        "assets/alias.png": image,
+        "README.md": "before\n",
+      }),
+      run = await f.harness.create({
+        kind: "chat",
+        access: "read-only",
+        objective: "inspect",
+        workspace: origin,
+        redactedImageHashes: [sha256(image)],
+      }),
+      directory = f.store.runDir(run.id);
+    await writeFile(join(directory, "work", "README.md"), "after\n");
+    await applyFiles(
+      directory,
+      await inventory(
+        join(directory, "work"),
+        f.config.limits.maxWorkspaceBytes,
+      ),
+      f.config,
+    );
+    for (const path of ["assets/original.png", "assets/alias.png"]) {
+      assert.equal(await readFile(join(origin, path), "utf8"), image);
+      assert.equal(
+        await readFile(join(directory, "baseline", path), "utf8"),
+        image,
+      );
+    }
+    assert.equal(await readFile(join(origin, "README.md"), "utf8"), "after\n");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("required protected inputs excluded by image redaction have an explicit diagnostic", async () => {
+  const config = testConfig(),
+    runtime = new ScriptedRuntime(async () => completed());
+  config.checks.protected = {
+    command: "false",
+    protectedPaths: ["assets"],
+  };
+  const f = await fixture(runtime, config);
+  try {
+    const image = "redacted protected input\n",
+      origin = await gitWorkspace(f.root, {
+        "assets/policy.png": image,
+        "README.md": "safe\n",
+      }),
+      run = await f.harness.create({
+        kind: "coding",
+        workspace: origin,
+        objective: "update the readme",
+        checks: ["protected"],
+        redactedImageHashes: [sha256(image)],
+      });
+    await assert.rejects(
+      new Evaluator(config, f.store, new Sandbox(config.execution)).validate(
+        run,
+        new AbortController().signal,
+      ),
+      {
+        code: "IMAGE_REDACTED",
+        message: /Required check input was excluded by image redaction/,
+      },
+    );
+    assert.equal(runtime.requests.length, 0);
+    assert.equal(f.store.operations(run.id).length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+test("read-only snapshots reject widened disclosure and unresolved source operations before copying", async () => {
+  const runtime = new ScriptedRuntime(async () => completed());
+  const f = await fixture(runtime);
+  try {
+    const origin = await gitWorkspace(f.root, { "app.txt": "baseline" });
+    const restricted = await f.harness.create({
+      kind: "coding",
+      objective: "restricted source",
+      workspace: origin,
+      dataClass: "restricted",
+    });
+    const localOnly = await f.harness.create({
+      kind: "coding",
+      objective: "local-only source",
+      workspace: origin,
+      localOnly: true,
+    });
+    const unresolved = await f.harness.create({
+      kind: "coding",
+      objective: "pending operation source",
+      workspace: origin,
+    });
+    const claimed = f.store.claim(unresolved.id);
+    const operation = f.store.prepare(claimed, "work", "write_file", {});
+    f.store.operation(claimed, operation, "dispatched");
+    f.store.release(claimed);
+    const before = f.store.list().length;
+
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "read-only",
+          objective: "inspect restricted source",
+          workspace: origin,
+          snapshotRunId: restricted.id,
+          dataClass: "private",
+        }),
+      { code: "DISCLOSURE_DENIED" },
+    );
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "read-only",
+          objective: "inspect local-only source",
+          workspace: origin,
+          snapshotRunId: localOnly.id,
+        }),
+      { code: "DISCLOSURE_DENIED" },
+    );
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "read-only",
+          objective: "inspect unresolved source",
+          workspace: origin,
+          snapshotRunId: unresolved.id,
+        }),
+      { code: "UNKNOWN_OPERATION" },
+    );
+    assert.equal(f.store.list().length, before);
+    assert.equal(runtime.requests.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+test("snapshot ids require read-only access and cannot accompany a parent", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const origin = await gitWorkspace(f.root, { "app.txt": "baseline" });
+    const source = await f.harness.create({
+      kind: "coding",
+      objective: "source",
+      workspace: origin,
+    });
+    const before = f.store.list().length;
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "change",
+          objective: "write after snapshot",
+          workspace: origin,
+          snapshotRunId: source.id,
+        }),
+      { code: "CONTINUATION" },
+    );
+    await assert.rejects(
+      () =>
+        f.harness.create({
+          kind: "chat",
+          access: "read-only",
+          objective: "ambiguous lineage",
+          workspace: origin,
+          parentRunId: source.id,
+          snapshotRunId: source.id,
+        }),
+      { code: "CONTINUATION" },
+    );
+    assert.equal(f.store.list().length, before);
+  } finally {
+    await f.cleanup();
+  }
+});
+test("legacy runs infer persisted access from their original kind on get and claim", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => completed()));
+  try {
+    const workspace = await gitWorkspace(f.root, { "app.txt": "baseline" });
+    const chat = await f.harness.create({
+      kind: "chat",
+      objective: "old chat",
+    });
+    const coding = await f.harness.create({
+      kind: "coding",
+      objective: "old coding",
+      workspace,
+    });
+    for (const run of [chat, coding]) {
+      const legacy = { ...run };
+      delete legacy.access;
+      f.store.db
+        .prepare("UPDATE runs SET payload=? WHERE id=?")
+        .run(JSON.stringify(legacy), run.id);
+    }
+
+    assert.equal(f.store.get(chat.id).access, "read-only");
+    assert.equal(f.store.get(coding.id).access, "change");
+    const claimedChat = f.store.claim(chat.id);
+    assert.equal(claimedChat.access, "read-only");
+    f.store.release(claimedChat);
+    const claimedCoding = f.store.claim(coding.id);
+    assert.equal(claimedCoding.access, "change");
+    f.store.release(claimedCoding);
   } finally {
     await f.cleanup();
   }
@@ -190,10 +599,10 @@ test("assisted workflow validates a lead plan and integrates sequential workers 
     });
     const result = await f.harness.execute(run.id);
     assert.equal(result.state, "succeeded", result.reason);
-    assert.equal(result.tasks.length, 3);
+    assert.equal(result.tasks.length, 4);
     assert.deepEqual(
       runtime.requests.map((r) => r.role),
-      ["lead", "worker", "worker", "reviewer"],
+      ["lead", "worker", "worker", "reviewer", "worker"],
     );
   } finally {
     await f.cleanup();
@@ -204,18 +613,23 @@ test("independent review failure triggers a bounded repair and re-review", async
     reviews = 0;
   const runtime = new ScriptedRuntime(async (request) => {
     if (request.role === "worker") {
-      if (drafts++ === 0)
-        await call(request, "write_file", {
-          path: "answer.md",
-          content: "wrong",
-          expectedSha256: null,
-        });
-      else
-        await call(request, "edit_file", {
-          path: "answer.md",
-          oldText: "wrong",
-          newText: "correct",
-        });
+      const invocation = JSON.parse(request.objective) as {
+        dependencies: unknown[];
+      };
+      if (!invocation.dependencies.length) {
+        if (drafts++ === 0)
+          await call(request, "write_file", {
+            path: "answer.md",
+            content: "wrong",
+            expectedSha256: null,
+          });
+        else
+          await call(request, "edit_file", {
+            path: "answer.md",
+            oldText: "wrong",
+            newText: "correct",
+          });
+      }
       return completed(["answer.md"]);
     }
     if (reviews++ === 0)

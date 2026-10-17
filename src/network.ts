@@ -33,12 +33,51 @@ export function publicAddress(address: string): boolean {
     );
   return false;
 }
+export interface PublicFetchResult {
+  url: string;
+  body: Buffer;
+  contentType: string;
+  mediaType: string;
+  charset?: string;
+  lastModified: string | null;
+  retrievedAt: string;
+}
+
+export interface PublicFetchDependencies {
+  excludedUrls?: readonly string[];
+  request?: (
+    url: URL,
+    init: Parameters<typeof undiciFetch>[1],
+  ) => ReturnType<typeof undiciFetch>;
+}
+
+function parseContentType(header: string): {
+  mediaType: string;
+  charset?: string;
+} {
+  const [type = "", ...parameters] = header.split(";");
+  const mediaType = type.trim().toLowerCase();
+  let charset: string | undefined;
+  for (const parameter of parameters) {
+    const match = /^\s*charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\s]+))/i.exec(
+      parameter,
+    );
+    if (match) {
+      charset = (match[1] ?? match[2] ?? match[3])?.trim();
+      break;
+    }
+  }
+  return { mediaType, charset };
+}
+
 export async function fetchPublic(
   url: URL,
   signal: AbortSignal,
   allowedHosts: string[],
   maxBytes = 1_000_000,
-): Promise<{ url: string; text: string; contentType: string }> {
+  dependencies: PublicFetchDependencies = {},
+): Promise<PublicFetchResult> {
+  const request = dependencies.request ?? undiciFetch;
   const dispatcher = new Agent({
     connect: {
       lookup(hostname, options, callback) {
@@ -63,6 +102,11 @@ export async function fetchPublic(
     let current = url;
     for (let redirect = 0; redirect <= 5; redirect++) {
       signal.throwIfAborted();
+      if (dependencies.excludedUrls?.includes(current.href))
+        throw new AgentError(
+          "SOURCE_EXCLUDED",
+          "This URL belongs to an excluded source family",
+        );
       if (
         current.protocol !== "https:" ||
         current.username ||
@@ -80,7 +124,7 @@ export async function fetchPublic(
           "URL_DENIED",
           "Private addresses cannot be fetched",
         );
-      const response = await undiciFetch(current, {
+      const response = await request(current, {
         dispatcher,
         signal,
         redirect: "manual",
@@ -102,7 +146,11 @@ export async function fetchPublic(
         throw new AgentError("FETCH", `HTTP ${response.status}`);
       }
       const type = response.headers.get("content-type") ?? "";
-      if (!/^(text\/|application\/(?:json|xml))/.test(type)) {
+      const parsedType = parseContentType(type);
+      if (!(
+        parsedType.mediaType.startsWith("text/") ||
+        /^application\/(?:json|xml|xhtml\+xml)$/.test(parsedType.mediaType)
+      )) {
         await response.body?.cancel();
         throw new AgentError("FETCH", "Only text documents are supported");
       }
@@ -122,17 +170,15 @@ export async function fetchPublic(
       } finally {
         await reader.cancel();
       }
-      let text = Buffer.concat(chunks).toString("utf8");
-      if (type.startsWith("text/html"))
-        text = text
-          .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/[ \t]+/g, " ")
-          .trim();
-      return { url: current.href, text, contentType: type };
+      return {
+        url: current.href,
+        body: Buffer.concat(chunks, bytes),
+        contentType: type,
+        mediaType: parsedType.mediaType,
+        charset: parsedType.charset,
+        lastModified: response.headers.get("last-modified"),
+        retrievedAt: new Date().toISOString(),
+      };
     }
     throw new AgentError("FETCH", "Too many redirects");
   } finally {

@@ -3,7 +3,7 @@ import type { Config } from "../config.js";
 import { AgentError } from "../types.js";
 import { cleanEnvironment } from "../process.js";
 import { within } from "../util.js";
-import type { SandboxInvocation } from "./types.js";
+import type { SandboxInvocation, SandboxRuntime } from "./types.js";
 
 export async function bubblewrapInvocation(
   config: Config["execution"],
@@ -11,6 +11,7 @@ export async function bubblewrapInvocation(
   command: string[],
   readOnly: boolean,
   extraReadOnly: string[],
+  runtime?: SandboxRuntime,
 ): Promise<SandboxInvocation> {
   const args = [
     "--die-with-parent",
@@ -62,6 +63,12 @@ export async function bubblewrapInvocation(
   const runtimeBin = config.runtimePaths
     .map((p) => (p.endsWith("/bin") ? p : `${p}/bin`))
     .join(":");
+  if (runtime)
+    args.push(
+      runtime.readOnly ? "--ro-bind" : "--bind",
+      runtime.path,
+      "/runtime",
+    );
   args.push(
     "--setenv",
     "PATH",

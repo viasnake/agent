@@ -27,9 +27,15 @@ export async function connectionRuntime(
   config: Config,
   paths: Paths,
   name: string,
+  modelName?: string,
 ): Promise<ModelRuntime> {
   const connection = config.connections[name];
   if (!connection) throw new AgentError("CONFIG", `Unknown connection ${name}`);
+  if (modelName && config.models[modelName]?.connection !== name)
+    throw new AgentError(
+      "CONFIG",
+      "Model profile does not belong to this connection",
+    );
   const directory = join(paths.auth, name);
   await privateDirectory(directory);
   const runtime = await ModelRuntime.create({
@@ -53,16 +59,20 @@ export async function connectionRuntime(
       api: "openai-completions",
       apiKey: key ?? "unconfigured",
       models: Object.entries(config.models)
-        .filter(([, m]) => m.connection === name)
+        .filter(
+          ([alias, m]) =>
+            m.connection === name && (!modelName || alias === modelName),
+        )
         .map(([alias, model]) => ({
           id: model.id,
           name: alias,
-          reasoning: false,
+          reasoning: model.reasoning === true,
           input: model.images === true ? ["text", "image"] : ["text"],
           contextWindow: model.contextWindow,
           maxTokens: model.maxOutputTokens,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           compat: {
+            supportsReasoningEffort: model.reasoning === true,
             supportsStore: false,
             supportsDeveloperRole: false,
             supportsUsageInStreaming: connection.type !== "sarashina",

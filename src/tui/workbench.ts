@@ -40,11 +40,23 @@ export function taskDetails(run: Run): string {
     `作業状況 · ${runLabels[run.state]}`,
     run.objective,
     ...(run.reason ? [`\n理由: ${run.reason}`] : []),
+    ...(run.mode !== "single"
+      ? [
+          "協調実行: 各担当の報告は未検証のモデル出力です。利用者への最終回答は統合担当だけが作成します。",
+        ]
+      : []),
     "\n担当",
     ...run.tasks.map((task) =>
       [
         `${activityLabels[task.state]} / ${roles[task.role]} / ${task.id}`,
         `モデル: ${task.model ?? "選択前"} · 試行 ${task.attempts}`,
+        `作業コピー: ${task.write ? "変更あり" : "読み取り専用"}${task.role === "reviewer" && run.access === "change" ? "（検査は使い捨てコピー）" : ""}${task.purpose === "synthesis" ? " · 最終回答の統合" : ""}`,
+        ...(task.delegatedBy
+          ? [
+              `委任元: ${task.delegatedBy}`,
+              `許可資料: ${task.assignment?.sourceIds.join(", ") || "なし"}`,
+            ]
+          : []),
         ...(task.dependsOn.length
           ? [`依存する担当: ${task.dependsOn.join(", ")}`]
           : []),
@@ -55,9 +67,38 @@ export function taskDetails(run: Run): string {
               ...task.result.unresolved.map((text) => `未解決: ${text}`),
             ]
           : []),
+        ...(task.attemptReportIds?.length
+          ? [
+              `試行報告: ${task.attemptReportIds.length} 件（直近5件・モデルの報告であり検査の証明ではありません）`,
+              ...task.attemptReportIds.slice(-5),
+            ]
+          : []),
+        ...(task.reworkLinks?.length
+          ? [
+              `修正履歴: ${task.reworkLinks.length} 件（直近3件）`,
+              ...task.reworkLinks
+                .slice(-3)
+                .map(
+                  (link) =>
+                    `修正 ${link.repairAttempt} · ${link.status === "resolved" ? "後続報告あり（検査合格とは別）" : "未解決"}\n${excerpt(link.reason, 1200)}${Buffer.byteLength(link.reason) > 1200 ? "…（省略）" : ""}\n元の報告: ${link.priorReportIds.join(", ")}\n後続の報告: ${link.resolvedByReportIds?.join(", ") || "なし"}`,
+                ),
+            ]
+          : []),
         "",
       ].join("\n"),
     ),
+    ...(run.modelChanges?.length
+      ? [
+          `モデル切替: ${run.modelChanges.length} 件（直近10件・意味的同等性は未確認）`,
+          ...run.modelChanges
+            .slice(-10)
+            .map(
+              (change) =>
+                `${change.taskId}: ${change.fromModel} → ${change.toModel}\n再実行対象: ${change.affectedTaskIds.join(", ")}\n変更記録: ${change.reportId}\n${change.supersededByReportId ? `さらに変更: ${change.supersededByReportId}` : change.resolutionReportId ? `実行・検証の記録: ${change.resolutionReportId}（合否・範囲は記録本文を確認）` : "再実行・検証の記録待ち"}`,
+            ),
+          "報告の全文・過去の記録は /artifacts で確認できます。",
+        ]
+      : []),
   ].join("\n");
 }
 

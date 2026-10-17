@@ -18,6 +18,11 @@ export function serverFetch(
   server: Server,
   signal: AbortSignal,
 ): (input: string | URL, init?: RequestInit) => Promise<Response> {
+  const mutations = new Set(
+    Object.entries(server.tools)
+      .filter(([, permission]) => !permission.readOnly)
+      .map(([name]) => name),
+  );
   return async (input, init) => {
     signal.throwIfAborted();
     const url = new URL(String(input));
@@ -35,11 +40,31 @@ export function serverFetch(
         "MCP_DESTINATION",
         "MCP/OAuth attempted a destination outside allowedOrigins",
       );
-    return fetch(url, {
+    let mutating = false;
+    if (init?.method === "POST" && typeof init.body === "string") {
+      try {
+        const request = JSON.parse(init.body);
+        mutating =
+          request?.method === "tools/call" &&
+          mutations.has(request.params?.name);
+      } catch {
+        /* OAuth form bodies are not JSON-RPC. */
+      }
+    }
+    const response = await fetch(url, {
       ...init,
       redirect: "error",
       signal: AbortSignal.any([signal, ...(init?.signal ? [init.signal] : [])]),
     });
+    // The SDK otherwise resends a POST after an authentication challenge.
+    if (mutating && [401, 403].includes(response.status)) {
+      await response.body?.cancel().catch(() => {});
+      throw new AgentError(
+        "MCP_MUTATION_AUTH",
+        "Authentication failed after dispatch; automatic mutation retry was blocked. Check the external result before resolving the operation and trying again.",
+      );
+    }
+    return response;
   };
 }
 async function oauthProvider(

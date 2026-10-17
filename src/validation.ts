@@ -28,6 +28,13 @@ export class Evaluator {
     ) => void = () => {},
   ) {}
   async validate(run: Run, signal: AbortSignal): Promise<CheckResult[]> {
+    this.store.assertManagedProcessesStopped(run);
+    if (run.forkCheckpointId)
+      throw new AgentError(
+        "FORK_SEED",
+        "保存状態復元シードは検証に使用できません。",
+      );
+    if (run.access === "read-only") return [];
     const directory = this.store.runDir(run.id),
       work = join(directory, "work");
     const results: CheckResult[] = [];
@@ -50,7 +57,12 @@ export class Evaluator {
             "CHECK_CONFIG",
             `No baseline files match protected path ${prefix}`,
           );
-        for (const path of protectedFiles)
+        for (const path of protectedFiles) {
+          if (snapshot.redactedPaths?.includes(path))
+            throw new AgentError(
+              "IMAGE_REDACTED",
+              `Required check input was excluded by image redaction: ${path}`,
+            );
           if (
             canonical(snapshot.files[path]) !== canonical(current[path] ?? null)
           )
@@ -58,6 +70,7 @@ export class Evaluator {
               "PROTECTED_CHECK",
               `Required check input was modified: ${path}`,
             );
+        }
       }
       const checkDir = await mkdtemp(join(directory, "check-"));
       try {
@@ -130,6 +143,12 @@ export class Evaluator {
         detail: "No output document was reported",
       });
     let combined = "";
+    const documentArtifacts: Array<{
+      id: string;
+      sha256: string;
+      name: string;
+      text: string;
+    }> = [];
     for (const path of documents) {
       const content = await readText(
         await safePath(work, path),
@@ -138,7 +157,18 @@ export class Evaluator {
       if (!content.trim())
         throw new AgentError("ARTIFACT_MISSING", `Empty output ${path}`);
       combined += "\n" + content;
-      await this.store.artifact(run, path, "document", content);
+      const artifact = await this.store.artifact(
+        run,
+        path,
+        "document",
+        content,
+      );
+      documentArtifacts.push({
+        id: artifact.id,
+        sha256: artifact.sha256,
+        name: artifact.name,
+        text: content,
+      });
     }
     for (const text of run.mustKeep)
       results.push({
@@ -149,9 +179,23 @@ export class Evaluator {
           : `Required text is absent: ${text}`,
       });
     if (run.kind === "research") {
+      const excluded = new Set(run.contextState?.excludedSourceIds ?? []);
+      const excludedHashes = new Set(
+        run.contextState?.excludedSourceHashes ?? [],
+      );
+      const excludedUrls = new Set(run.contextState?.excludedSourceUrls ?? []);
       const sources = this.store
         .artifacts(run.id)
-        .filter((a) => a.kind === "source");
+        .filter(
+          (a) =>
+            a.kind === "source" &&
+            !excluded.has(a.id) &&
+            !excludedHashes.has(a.sha256) &&
+            !excludedHashes.has(String(a.metadata.rawSha256 ?? "")) &&
+            !excludedHashes.has(String(a.metadata.selectedSha256 ?? "")) &&
+            !excludedUrls.has(String(a.metadata.url ?? "")) &&
+            !excludedUrls.has(String(a.metadata.requestedUrl ?? "")),
+        );
       const citations = [
         ...combined.matchAll(/\[source:([a-f0-9-]{36}):L(\d+)(?:-L(\d+))?\]/g),
       ];
@@ -160,22 +204,33 @@ export class Evaluator {
         passed: citations.length > 0,
         detail: `${citations.length} source citations`,
       });
-      for (const citation of citations) {
+      for (const [index, citation] of citations.entries()) {
         const source = sources.find((s) => s.id === citation[1]);
-        if (!source)
-          throw new AgentError(
-            "INVALID_CITATION",
-            `Unknown source ${citation[1]}`,
-          );
+        if (!source) {
+          results.push({
+            id: `research-citation-${index + 1}`,
+            passed: false,
+            detail: `Unknown source ${citation[1]}`,
+          });
+          continue;
+        }
         const text = (await this.store.content(source)).toString("utf8"),
           lines = text.split("\n").length;
         const first = Number(citation[2]),
           last = Number(citation[3] ?? citation[2]);
-        if (first < 1 || last < first || last > lines)
-          throw new AgentError(
-            "INVALID_CITATION",
-            "Citation is outside the stored source",
-          );
+        const passed =
+          Number.isSafeInteger(first) &&
+          Number.isSafeInteger(last) &&
+          first >= 1 &&
+          last >= first &&
+          last <= lines;
+        results.push({
+          id: `research-citation-${index + 1}`,
+          passed,
+          detail: passed
+            ? `${source.id}:L${first}-L${last} is within the stored source (meaning not verified)`
+            : `Citation is outside the stored source: ${citation[0]}`,
+        });
       }
     }
     if (run.kind === "coding") {
@@ -206,12 +261,90 @@ export class Evaluator {
         "WORKSPACE_CHANGED",
         "Working copy changed during validation",
       );
-    await this.store.artifact(
+    const validationArtifact = await this.store.artifact(
       run,
       "validation.json",
       "check",
       JSON.stringify(results, null, 2),
     );
+    const excludedSourceIds = new Set(
+      run.contextState?.excludedSourceIds ?? [],
+    );
+    const excludedSourceHashes = new Set(
+      run.contextState?.excludedSourceHashes ?? [],
+    );
+    const excludedSourceUrls = new Set(
+      run.contextState?.excludedSourceUrls ?? [],
+    );
+    const availableSourceIds = this.store
+      .artifacts(run.id)
+      .filter(
+        (artifact) =>
+          artifact.kind === "source" &&
+          !excludedSourceIds.has(artifact.id) &&
+          !excludedSourceHashes.has(artifact.sha256) &&
+          !excludedSourceHashes.has(
+            String(artifact.metadata.rawSha256 ?? ""),
+          ) &&
+          !excludedSourceHashes.has(
+            String(artifact.metadata.selectedSha256 ?? ""),
+          ) &&
+          !excludedSourceUrls.has(String(artifact.metadata.url ?? "")) &&
+          !excludedSourceUrls.has(String(artifact.metadata.requestedUrl ?? "")),
+      )
+      .map((artifact) => artifact.id);
+    for (const document of documentArtifacts) {
+      const citedSourceRanges = [
+        ...document.text.matchAll(
+          /\[source:([a-f0-9-]{36}):L(\d+)(?:-L(\d+))?\]/g,
+        ),
+      ].map((match) => ({
+        sourceId: match[1],
+        startLine: Number.isSafeInteger(Number(match[2]))
+          ? Number(match[2])
+          : null,
+        endLine: Number.isSafeInteger(Number(match[3] ?? match[2]))
+          ? Number(match[3] ?? match[2])
+          : null,
+        rawCitation: match[0],
+      }));
+      const unavailableCitedSourceIds = [
+        ...new Set(
+          citedSourceRanges
+            .map((range) => range.sourceId)
+            .filter(
+              (sourceId): sourceId is string =>
+                typeof sourceId === "string" &&
+                !availableSourceIds.includes(sourceId),
+            ),
+        ),
+      ].sort();
+      await this.store.artifact(
+        run,
+        `provenance/${document.id}.json`,
+        "report",
+        JSON.stringify({
+          version: 1,
+          type: "provenance",
+          documentId: document.id,
+          artifactId: document.id,
+          artifactSha256: document.sha256,
+          producingRunId: run.id,
+          parentRunId: run.parentRunId,
+          availableInputSourceIds: availableSourceIds,
+          citedSourceRanges,
+          unavailableCitedSourceIds,
+          validationArtifactId: validationArtifact.id,
+          semanticCorrectness: "not-established",
+        }),
+        {
+          type: "provenance",
+          documentId: document.id,
+          documentSha256: document.sha256,
+          validationArtifactId: validationArtifact.id,
+        },
+      );
+    }
     if (results.every((r) => r.passed)) {
       await atomicWrite(
         join(directory, "validated-manifest.json"),
@@ -227,6 +360,8 @@ export class Evaluator {
     return results;
   }
   async verifyPublished(run: Run): Promise<void> {
+    this.store.assertManagedProcessesStopped(run);
+    if (run.access === "read-only") return;
     for (const artifact of this.store.artifacts(run.id))
       await this.store.content(artifact);
     const directory = this.store.runDir(run.id),

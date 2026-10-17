@@ -42,6 +42,13 @@ export function testConfig(): Config {
   });
 }
 export class ScriptedRuntime implements Runtime {
+  readonly contract = {
+    version: 1 as const,
+    context: "messages-v1" as const,
+    tools: true,
+    images: true,
+    sessionFormat: "scripted-v1",
+  };
   requests: RuntimeRequest[] = [];
   constructor(
     readonly respond: (

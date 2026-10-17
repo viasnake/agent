@@ -4,6 +4,8 @@
 
 The application is one foreground Node.js process. Pi owns model conversations; the application owns permissions, budgets, validation and success state.
 
+Inference adapters implement the [versioned runtime contract](runtime-contract.md). The host checks capabilities, accounting, cancellation and native-session format compatibility; native SDK transcripts are never implicitly handed to an incompatible adapter.
+
 | Code                                                                        | Responsibility                                                                                     |
 | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `src/tui/`, `src/cli.ts`                                                    | Interactive entry, Pi terminal components, searchable dialogs and lazy-loaded maintenance commands |
@@ -15,6 +17,20 @@ The application is one foreground Node.js process. Pi owns model conversations; 
 | `src/config.ts`, `src/storage.ts`                                           | Validated configuration, immutable run settings, SQLite leases, operation journal and artifacts    |
 
 External text and repository instructions cannot grant permissions. Pi's automatic retries, compaction, project extensions and default tools are disabled. Incomplete responses cannot dispatch tools; preview text cannot establish success.
+
+Conversation JSON separately stores trusted user notes, verbatim conversation instructions, explicit constraints, host-derived run/check/artifact references, image/source IDs and deterministic compaction records. Model summaries remain marked as untrusted reports. Legacy conversation fields remain optional and normalize on read. Provider session files remain Pi-owned and are not a source of durable user permissions. `/pins` and `/context` edits require an idle conversation lease; they cannot modify connection policy. Context does not cross conversation boundaries.
+
+Structural protected-context candidates are rejected before adoption. Bounded
+host and model context concerns are persisted separately as issues on the
+owning run, never promoted to conversation authority. A pending issue blocks
+later tools, inference, transforms and final success until a human previews the
+current binding and confirms with an explicit note. Confirmation preserves
+policy, usage, constraints and pending inputs; it never auto-resumes or
+resurrects a terminal run.
+
+The host may compact only older verbose tool results at the guarded request boundary. It first writes the exact pre-transform context to a private, content-addressed conversation archive, then preserves message ordering and tool-call IDs while replacing eligible results with bounded excerpts. `read_context` reads bounded ranges from that conversation's archive lineage. User text, assistant final/decision text, current tool results, errors, images, permissions and constraints remain verbatim. If protected content exceeds the usable budget, the request stops with `CONTEXT_LIMIT`. Manual `/compact` uses the same archive format without a provider request; older per-run `handoff.json` files remain readable. The budget uses bytes/3 plus 8,192 tokens-equivalent per image as a heuristic; provider-reported usage is authoritative and the estimate does not guarantee real-provider fit.
+
+Repository explanation, review and planning use a read-only request mode, separate from work kind. They receive bounded file/source tools over a private snapshot of the original repository or latest unapplied coding copy. Write, shell and MCP capabilities are excluded. Ambiguous requests default to read-only; explicit no-change prohibitions take precedence over change verbs. A normal greeting remains tools-free.
 
 Conversations and runs have renewable leases. Resume preserves the saved configuration, budget and attempt limits. Dispatched operations without a confirmed result remain `unknown` and require reconciliation. Applying rechecks the source snapshot and confirmation token; file writes are journaled but are not one filesystem transaction.
 

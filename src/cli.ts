@@ -44,6 +44,7 @@ try {
       import("./cli/maintenance.js"),
       import("./cli/integrations.js"),
       import("./cli/environments.js"),
+      import("./cli/processes.js"),
     ]);
     modules[0].registerSetupCommands(cli);
     modules[1].registerConnectionsCommands(cli);
@@ -52,6 +53,7 @@ try {
     modules[4].registerMaintenanceCommands(cli);
     modules[5].registerIntegrationsCommands(cli);
     modules[6].registerEnvironmentCommands(cli);
+    modules[7].registerProcessCommands(cli);
   }
   await program.parseAsync();
 } catch (error) {

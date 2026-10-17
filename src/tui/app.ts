@@ -7,6 +7,18 @@ import {
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { SettingsDialog } from "./settings.js";
+import { confirmToolOperation } from "./tool-approval.js";
+import type { ToolApprovalRequest } from "../tool-approval.js";
+import { ResearchBrowser } from "./research-browser.js";
+import { SearchBrowser } from "./search-browser.js";
+import { SkillBrowser } from "./skill-browser.js";
+import { ForkBrowser } from "./fork-browser.js";
+import { ModelChangeBrowser } from "./model-change-browser.js";
+import { ContextReviewBrowser } from "./context-review-browser.js";
+import { BackupBrowser } from "./backup-browser.js";
+import { BackupReaderBrowser } from "./backup-reader-browser.js";
+import { DiagnosticsBrowser } from "./diagnostics-browser.js";
+import { HistoryBrowser } from "./history-browser.js";
 import {
   SettingsEditor,
   type SettingsField,
@@ -18,9 +30,23 @@ import { initialize, loadConfig, paths, type Config } from "../config.js";
 import { Store } from "../storage.js";
 import type { ConversationMessage } from "../conversations.js";
 import { AgentError } from "../types.js";
+import { loadPreparedInput } from "../documents.js";
 import { errorMessage, privateDirectory } from "../util.js";
 import { interactiveLogin } from "../interactive-services.js";
-import { actions, actionFor, commands } from "./actions.js";
+import {
+  actions,
+  actionFor,
+  commands,
+  commandPath,
+  type ActionName,
+} from "./actions.js";
+import {
+  loadPreferences,
+  parsePreferences,
+  savePreferences,
+  type TerminalPreferences,
+} from "./preferences.js";
+import { editExternalText } from "../external-editor.js";
 import {
   Dialog,
   Reader,
@@ -71,6 +97,10 @@ export class TerminalApp {
   private done!: () => void;
   private fail!: (error: unknown) => void;
   private loginAbort?: AbortController;
+  private editorAbort?: AbortController;
+  private preferences: TerminalPreferences = parsePreferences({
+    schemaVersion: 1,
+  });
   private fatal?: unknown;
   private disposeSignals?: () => void;
   private restored = false;
@@ -128,7 +158,7 @@ export class TerminalApp {
   private key(data: string): { consume: boolean } | undefined {
     // Consume LF before Pi can interpret Ctrl+J as newline or dialog confirmation.
     if (matchesKey(data, "ctrl+j")) return { consume: true };
-    const action = actionFor(data);
+    const action = actionFor(data, this.preferences.keys);
     if (this.tui.hasOverlay()) {
       if (this.reader && this.acceptReader && matchesKey(data, "enter")) {
         this.acceptReader();
@@ -145,7 +175,11 @@ export class TerminalApp {
         this.reader.turnPage(matchesKey(data, "left") ? -1 : 1);
         return { consume: true };
       }
-      if (action === "cancel" || action === "interrupt") {
+      if (
+        action === "cancel" ||
+        action === "interrupt" ||
+        matchesKey(data, "escape")
+      ) {
         this.cancelDialog?.();
         return { consume: true };
       }
@@ -209,6 +243,13 @@ export class TerminalApp {
       this.dispatch("quit");
       return { consume: true };
     }
+    if (action === "up" || action === "down") {
+      this.layout.scroll.scrollBy(
+        (action === "up" ? -1 : 1) * Math.max(1, this.terminal.rows - 6),
+      );
+      this.tui.requestRender();
+      return { consume: true };
+    }
     return undefined;
   }
   async start(): Promise<void> {
@@ -235,12 +276,15 @@ export class TerminalApp {
       void this.shutdown().catch(() => {});
       this.fail(error);
     };
-    process.on("SIGINT", signal);
+    const interrupt = () => {
+      if (!this.editorAbort) signal();
+    };
+    process.on("SIGINT", interrupt);
     process.on("SIGTERM", signal);
     process.on("uncaughtException", exception);
     process.on("unhandledRejection", exception);
     this.disposeSignals = () => {
-      process.off("SIGINT", signal);
+      process.off("SIGINT", interrupt);
       process.off("SIGTERM", signal);
       process.off("uncaughtException", exception);
       process.off("unhandledRejection", exception);
@@ -272,7 +316,10 @@ export class TerminalApp {
         config = await loadConfig(p);
       }
       if (this.earlyExit) return;
+      this.preferences = await loadPreferences(p);
       this.app = new Application(config, p, new Store(p), process.cwd());
+      this.app.toolApproval = (request, signal) =>
+        this.approveTool(request, signal);
       this.app.on("event", (event: AppEvent) => this.event(event));
       await this.app.initialize();
       if (this.earlyExit) {
@@ -304,6 +351,7 @@ export class TerminalApp {
     if (this.draftTimer) clearTimeout(this.draftTimer);
     if (this.renderTimer) clearTimeout(this.renderTimer);
     this.loginAbort?.abort();
+    this.editorAbort?.abort();
     this.cancelDialog?.();
     try {
       if (this.app?.session) {
@@ -402,7 +450,9 @@ export class TerminalApp {
           ? failureGuidance(run.reason, this.app.config, this.app.session)
           : this.app.interrupted()
             ? "前の作業は未完了です。/tasks で確認し /resume で明示再開できます。"
-            : "会話を開きました。待機入力は /queue で確認できます。";
+            : this.app.session.lineage && !run
+              ? "分岐した会話です。保存状態の復元は推論・検査成功ではありません。新しい依頼で続けてください。"
+              : "会話を開きました。待機入力は /queue で確認できます。";
       }
     } else if (event.type === "run_finished") {
       this.stream.clear();
@@ -527,6 +577,7 @@ export class TerminalApp {
     }
     if (text.startsWith("/")) {
       this.input.setText("");
+      if (this.draftTimer) clearTimeout(this.draftTimer);
       await this.command(text.slice(1));
       return;
     }
@@ -545,24 +596,55 @@ export class TerminalApp {
   private async confirmInput(
     preview: Awaited<ReturnType<Application["previewInput"]>>,
   ): Promise<boolean> {
-    if (!preview.attachments.length && !preview.images.length) return true;
+    if (
+      !preview.attachments.length &&
+      !preview.images.length &&
+      !preview.documents.length &&
+      !preview.accessOverride
+    )
+      return true;
+    const app = this.app;
+    if (!app) return false;
+    const documents = [];
+    for (const reference of preview.documents)
+      documents.push(await loadPreparedInput(app.paths, reference));
     return this.confirm(
       [
+        ...(preview.accessOverride
+          ? [
+              `一回限りの access override: ${preview.accessOverride}（確認後、この送信で消費）`,
+              ...(preview.accessOverride !== preview.access
+                ? [
+                    "現在の依頼に明示的な禁止があるため、有効 access は read-only です。",
+                  ]
+                : []),
+            ]
+          : []),
         ...preview.attachments
           .filter((ref) => !ref.mimeType)
           .map((ref) => `資料: ${ref.path} (${ref.bytes} bytes)`),
+        ...preview.documents.map(
+          (ref) =>
+            `選択: ${ref.format} · ${ref.locator}${ref.partial ? " · partial" : ""}\nSHA-256: ${ref.selectedSha256}`,
+        ),
         ...preview.images.map(
           (ref, index) =>
-            `画像 ${index + 1}: ${ref.name} · ${ref.mimeType} · ${ref.width}×${ref.height} · ${ref.bytes} bytes\n参照ID: ${ref.id}`,
+            `画像 ${index + 1}: ${ref.name} · ${ref.mimeType} · ${ref.editWidth ?? ref.width}×${ref.editHeight ?? ref.height} · ${ref.bytes} bytes\n参照ID: ${ref.id}`,
         ),
         `送信区分: ${preview.dataClass}${preview.localOnly ? " / local-only" : ""}`,
-        ...(preview.images.length
+        ...(preview.images.length || preview.documents.length
           ? [
-              "保存済み画像も含めて送信します。",
+              ...(preview.images.length
+                ? ["保存済み画像も含めて送信します。"]
+                : []),
               "送信先（自動振り分けを含む候補）:",
               ...preview.destinations,
             ]
           : []),
+        ...documents.map(({ reference, text }) => {
+          const visible = excerpt(text, 4000);
+          return `\n資料内容: ${reference.originalName}\n${visible}${visible.length < text.length ? "\n（表示のみ省略。送信範囲は上記の選択・サイズを確認してください。）" : ""}`;
+        }),
       ].join("\n"),
     );
   }
@@ -574,11 +656,40 @@ export class TerminalApp {
     this.tui.setFocus(this.input);
     this.tui.requestRender();
   }
+  private async approveTool(
+    request: ToolApprovalRequest,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (
+      this.closing ||
+      this.busyDialog ||
+      this.tui.hasOverlay() ||
+      signal.aborted
+    ) {
+      this.notice =
+        "外部操作の確認画面を開けないため、この操作は実行しません。";
+      this.render();
+      return false;
+    }
+    this.busyDialog = true;
+    try {
+      return await confirmToolOperation(request, signal, {
+        show: (text, title, accept, signal) =>
+          this.show(text, title, accept, signal),
+        choose: (title, choices, signal) =>
+          this.choose(title, choices, false, signal),
+      });
+    } finally {
+      this.busyDialog = false;
+    }
+  }
   private async choose(
     title: string,
     choices: { value: string; label: string; description?: string }[],
     searchable = choices.length > 5,
+    signal?: AbortSignal,
   ): Promise<string | undefined> {
+    if (signal?.aborted) return undefined;
     if (this.tui.hasOverlay())
       throw new AgentError("DIALOG", "現在の画面を閉じてください。");
     return new Promise((resolve) => {
@@ -592,17 +703,24 @@ export class TerminalApp {
         searchable,
         () => this.terminal.rows,
       );
+      let settled = false;
+      const cancel = () => finish();
       const finish = (value?: string) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", cancel);
         this.closeDialog();
         resolve(value);
       };
       picker.onSelect = finish;
-      this.cancelDialog = () => finish();
+      this.cancelDialog = cancel;
       this.tui.showOverlay(new ResponsiveOverlay(picker), {
         width: "100%",
         margin: 1,
         anchor: "center",
       });
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
     });
   }
   private async editSettings(
@@ -682,24 +800,30 @@ export class TerminalApp {
     text: string,
     title = "詳細",
     accept = "",
+    signal?: AbortSignal,
   ): Promise<boolean> {
+    if (signal?.aborted) return false;
     if (this.tui.hasOverlay()) return false;
     return new Promise((resolve) => {
       this.reader = new Reader(this.tui, text, title, accept);
-      this.cancelDialog = () => {
+      let settled = false;
+      const cancel = () => finish(false);
+      const finish = (accepted: boolean) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", cancel);
         this.closeDialog();
-        resolve(false);
+        resolve(accepted);
       };
-      if (accept)
-        this.acceptReader = () => {
-          this.closeDialog();
-          resolve(true);
-        };
+      this.cancelDialog = cancel;
+      if (accept) this.acceptReader = () => finish(true);
       this.tui.showOverlay(new ResponsiveOverlay(this.reader, 104), {
         width: "100%",
         margin: 1,
         anchor: "center",
       });
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
     });
   }
   private async command(line: string): Promise<void> {
@@ -707,10 +831,26 @@ export class TerminalApp {
     if (!app) return;
     if (this.busyDialog)
       throw new AgentError("BUSY", "認証・診断の終了を待ってください。");
+    const draft = this.input.getExpandedText();
+    if (draft && !draft.startsWith("/")) app.setDraft(draft);
     const [command, ...args] = line.trim().split(/\s+/);
-    const argument = args.join(" ");
+    const argument = line.trim().slice(command!.length).trim();
     if (command !== "status") this.notice = "";
     switch (command) {
+      case "skills": {
+        await new SkillBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+          active: () => !this.closing && this.app === app,
+        }).select(argument ? commandPath(argument) : undefined);
+        if (!this.closing && this.app === app)
+          this.input.setText(app.session.draft);
+        break;
+      }
       case "commands": {
         const preferred = app.busy
           ? ["tasks", "stop", "queue"]
@@ -754,7 +894,10 @@ export class TerminalApp {
             ...(run?.reason ? ["\n技術詳細", safeText(run.reason)] : []),
             "",
             `要求: ${view.usage?.requests ?? 0}/${app.config.limits.maxRequests}`,
-            `入力 ${view.usage?.input ?? "不明"} / 出力 ${view.usage?.output ?? "不明"} tokens`,
+            view.context
+              ? `コンテキスト推定: ${view.context.bytes}/${view.context.limit} bytes · 残り約 ${Math.max(0, view.context.limit - view.context.bytes)} bytes${view.context.imageCount ? ` · 画像 ${view.context.imageCount} 件 / 約 ${view.context.estimatedImageTokens} tokens相当 (heuristic)` : ""}`
+              : "コンテキスト推定: 不明",
+            `プロバイダー報告: 入力 ${view.usage?.input ?? "不明"} / 出力 ${view.usage?.output ?? "不明"} tokens${view.usage?.usageComplete ? "" : " · 使用量不明または一部未報告"}`,
             `待機入力: ${app.session.queue.length} 件`,
             "詳しい担当・検査は /tasks、接続の変更は /settings。",
           ].join("\n"),
@@ -767,10 +910,13 @@ export class TerminalApp {
           "操作\n\n" +
             commands.map((c) => `/${c.name} — ${c.description}`).join("\n") +
             "\n\nキー\n" +
-            Object.values(actions)
-              .map((a) => `${a.keys.join(" / ")} — ${a.description}`)
+            (Object.keys(actions) as ActionName[])
+              .map(
+                (name) =>
+                  `${(this.preferences.keys[name] ?? actions[name].keys).join(" / ") || "未割当"} — ${actions[name].description}`,
+              )
               .join("\n") +
-            "\nShift+Enter — 改行\nEnter — 送信／実行中は追加指示\nTab — コマンド・パス・@ファイル補完\n↑/↓ — 入力履歴\nCtrl+C の空入力、Ctrl+D の空入力、/quit は保存して終了。作業中のみ確認します。\n/tools list — 保存済みツール結果を選ぶ\n/expand [番号] — 長文の続きを同じ場所に表示",
+            "\nShift+Enter — 改行\nEnter — 送信／実行中は追加指示\nTab — コマンド・パス・@ファイル補完\n↑/↓ — 入力履歴\ninterrupt / eof の空入力、/quit は保存して終了。作業中のみ確認します。\n/tools list — 保存済みツール結果を選ぶ\n/expand [番号] — 長文の続きを同じ場所に表示\n/clipboard — 画像を非公開領域にステージ\n/git — 読み取り専用の状態を参照\n/images add|crop|mask|remove|compare — 送信せずに画像を追加・編集\n/keys — キー割当を確認・変更\n/editor — 外部エディタで下書きを編集\n/editor artifact — 文書の改訂案を編集（元の成果物は変更しません）",
         );
         break;
       case "new":
@@ -782,6 +928,106 @@ export class TerminalApp {
           .find((s) => s.id !== app.session.id && (s.draft || s.latestRunId));
         if (recent) app.openSession(recent.id);
         else this.notice = "保存済みの会話はありません。";
+        break;
+      }
+      case "fork": {
+        await new ForkBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).fork(argument || undefined);
+        break;
+      }
+      case "diagnostics": {
+        await new DiagnosticsBrowser(app, {
+          prompt: this.prompt.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).save(argument || undefined);
+        break;
+      }
+      case "backup": {
+        await new BackupBrowser(app, {
+          prompt: this.prompt.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).save(argument || undefined);
+        break;
+      }
+      case "backup-open": {
+        await new BackupReaderBrowser(app, {
+          prompt: this.prompt.bind(this),
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).open(argument || undefined);
+        break;
+      }
+      case "delete":
+      case "prune":
+      case "prune-pins":
+      case "cleanup-deletions": {
+        const browser = new HistoryBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        });
+        if (command === "delete") await browser.remove(argument || undefined);
+        else if (command === "prune-pins")
+          await browser.prunePins(argument || undefined);
+        else {
+          if (argument)
+            throw new AgentError(
+              "DELETE_REQUEST",
+              `/${command} は引数なしで候補を確認してください。`,
+            );
+          if (command === "prune") await browser.prune();
+          else await browser.cleanup();
+        }
+        break;
+      }
+      case "cache-cleanup":
+        if (argument)
+          throw new AgentError(
+            "DELETE_REQUEST",
+            "/cache-cleanup は引数なしで候補を確認してください。",
+          );
+        await new HistoryBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).cacheCleanup();
+        break;
+      case "search": {
+        const text =
+          argument ||
+          (await this.prompt("検索する文字列（正規表現ではありません）"));
+        if (text)
+          await new SearchBrowser(app, {
+            choose: this.choose.bind(this),
+            show: this.show.bind(this),
+            notice: (notice) => {
+              this.notice = notice;
+            },
+          }).search(text);
         break;
       }
       case "sessions": {
@@ -868,6 +1114,13 @@ export class TerminalApp {
         }
         break;
       }
+      case "access": {
+        if (argument === "read-only" || argument === "change") {
+          app.setAccessOverride(argument);
+          this.notice = `次の送信1回のみ ${argument} を使用します。確認後に消費されます。`;
+        } else this.notice = "/access read-only|change";
+        break;
+      }
       case "history":
         await this.history();
         break;
@@ -883,6 +1136,26 @@ export class TerminalApp {
         break;
       case "model":
         await this.model();
+        break;
+      case "model-change":
+        await new ModelChangeBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).change(argument || undefined);
+        break;
+      case "context-review":
+        await new ContextReviewBrowser(app, {
+          show: this.show.bind(this),
+          prompt: this.prompt.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).review();
         break;
       case "tasks": {
         const run = app.currentRun();
@@ -923,7 +1196,8 @@ export class TerminalApp {
                   `コンテキスト: ${view.context.bytes}/${view.context.limit} bytes · ${view.context.model} / ${view.context.taskId}`,
                 ]
               : []),
-            "\n/artifacts 検査の詳細 · Ctrl+O ツール結果",
+            "\n/artifacts 報告・検査の詳細 · /tools ツール結果",
+            "/model 次の依頼の設定 · /model-change 待機中の担当を切替（再開なし）",
           ].join("\n"),
         );
         break;
@@ -952,18 +1226,132 @@ export class TerminalApp {
           await app.apply(diff.token);
         break;
       }
+      case "keys": {
+        if (argument === "reset") {
+          this.preferences = await savePreferences(app.paths, {
+            ...this.preferences,
+            keys: {},
+          });
+          this.notice = "キー割当を既定に戻しました。";
+        } else if (args.length >= 1 && argument) {
+          const name = args[0]!;
+          if (!Object.hasOwn(actions, name))
+            throw new AgentError(
+              "KEY_BINDING",
+              "/keys で操作名を確認してください。",
+            );
+          const next = parsePreferences({
+            ...this.preferences,
+            keys: { ...this.preferences.keys, [name]: args.slice(1) },
+          });
+          this.preferences = await savePreferences(app.paths, next);
+          this.notice = `${name} のキー割当を保存しました。キー省略は割当解除、/keys reset は全割当を復元します。`;
+        } else {
+          await this.show(
+            (Object.keys(actions) as ActionName[])
+              .map(
+                (name) =>
+                  `${name}: ${(this.preferences.keys[name] ?? actions[name].keys).join(" / ") || "未割当"} — ${actions[name].description}`,
+              )
+              .join("\n") +
+              "\n\n/keys <操作名> <キー...> で変更します（例: /keys palette ctrl+g）。\n/keys <操作名> は解除、/keys reset は既定へ復元。\n改行・Ctrl+J は入力保護用の予約キーです。端末や tmux が消費するキーは利用できません。",
+            "端末ごとのキー割当",
+          );
+        }
+        break;
+      }
+      case "editor-config": {
+        const value =
+          argument ||
+          (await this.prompt(
+            "信頼するエディタの起動引数（JSON配列）。ファイルパスは最後に追加します。GUIエディタには --wait 等が必要です。",
+            JSON.stringify(this.preferences.editor),
+          ));
+        if (!value) break;
+        const next = parsePreferences({
+          ...this.preferences,
+          editor: JSON.parse(value),
+        });
+        if (
+          await this.confirm(
+            `このエディタをホスト上で起動する設定を保存しますか？\n${JSON.stringify(next.editor)}\nモデル用ツールではなく、利用者が /editor を選んだときだけ実行します。`,
+          )
+        ) {
+          this.preferences = await savePreferences(app.paths, next);
+          this.notice =
+            "エディタ設定を保存しました。/editor で未送信の下書きを編集できます。";
+        }
+        break;
+      }
+      case "editor":
+        if (argument && argument !== "artifact")
+          throw new AgentError(
+            "EDITOR",
+            "/editor または /editor artifact を指定してください。",
+          );
+        await this.externalEditor(argument === "artifact");
+        break;
       case "images":
-        this.showDetails(
-          "保存済み画像",
-          app.session.images?.length
-            ? app.session.images
-                .map(
-                  (ref, index) =>
-                    `${index + 1}. ${ref.name}\n${ref.id}\n${ref.mimeType} · ${ref.width}×${ref.height} · ${ref.bytes} bytes\n元画像: ${app.imagePath(ref)}`,
-                )
-                .join("\n\n")
-            : '画像はありません。@画像.png または @"空白を含む画像.jpg" で添付できます。SSH では接続先の作業ディレクトリからの相対パスを指定してください。',
-        );
+        if (args[0] === "add") {
+          const image = await app.stageImageFromPath(
+            commandPath(argument.slice("add".length)),
+          );
+          this.notice = `画像をローカル保存しました。まだ送信していません。\n参照ID: ${image.id}\n/images mask または crop で編集後、通常の依頼を入力してください。`;
+        } else if (args[0] === "remove" && args[1] && args.length === 2) {
+          app.removeImage(args[1]);
+          this.notice =
+            "画像を今後の送信から除外しました。既に送信した内容や保存済み原本は消去されません。";
+        } else if (
+          (args[0] === "crop" || args[0] === "mask") &&
+          args[1] &&
+          args.length === 6
+        ) {
+          const [x, y, width, height] = args.slice(2).map(Number);
+          if (![x, y, width, height].every(Number.isSafeInteger))
+            throw new AgentError(
+              "IMAGE_BOUNDS",
+              "Use integer x y width height bounds",
+            );
+          const image = await app.editImage(args[1], args[0], {
+            x: x!,
+            y: y!,
+            width: width!,
+            height: height!,
+          });
+          this.notice = `${args[0] === "mask" ? "マスク" : "切り抜き"}後の画像を保存しました: ${image.id}\n今後の送信には編集後の画像を使います。既に送信した内容は取り消せません。`;
+        } else if (
+          args[0] === "compare" &&
+          args[1] &&
+          args[2] &&
+          args.length === 3
+        )
+          app.setImageComparison(args[1], args[2]);
+        else if (argument)
+          this.notice =
+            "/images add <path> | remove <id> | crop|mask <id> <x> <y> <width> <height> | compare <before-id> <after-id>";
+        else
+          this.showDetails(
+            "保存済み画像",
+            app.session.images?.length
+              ? app.session.images
+                  .map(
+                    (ref, index) =>
+                      `${index + 1}. ${ref.name}\n${ref.id}\n${ref.mimeType} · 編集座標 ${ref.editWidth ?? ref.width}×${ref.editHeight ?? ref.height} · ${ref.bytes} bytes${ref.comparisonOrder ? ` · comparison ${ref.comparisonOrder}` : ""}${ref.transformation ? `\n変換: ${ref.transformation}` : ""}\nローカル保存先: ${app.imagePath(ref)}`,
+                  )
+                  .join("\n\n")
+              : '画像はありません。/images add "画像のパス.png" で送信せずに追加し、mask・crop で編集できます。@画像.png は通常の送信前確認で添付します。SSH では scp/sftp で workspace に転送してください。',
+          );
+        break;
+      case "clipboard":
+        try {
+          const image = await app.stageClipboardImage();
+          this.notice = `画像を非公開領域に保存しました (${image.id})。通常の依頼を入力すると、送信前にプレビュー確認します。`;
+        } catch (error) {
+          this.notice = errorMessage(error);
+        }
+        break;
+      case "git":
+        this.showDetails("読み取り専用 Git 状態", await app.gitStatus());
         break;
       case "artifacts":
       case "tools":
@@ -980,9 +1368,96 @@ export class TerminalApp {
             argument === "list",
           );
         break;
+      case "sources":
+      case "versions":
+      case "research": {
+        const browser = new ResearchBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        });
+        if (command === "versions")
+          await browser.versions(argument || undefined);
+        else if (command === "research") await browser.research();
+        else if (!argument) await browser.sources();
+        else if (args[0] === "exclude" && args.length === 2)
+          await browser.excludeSource(args[1]!);
+        else
+          throw new AgentError(
+            "SOURCE",
+            "/sources または /sources exclude <資料ID> を指定してください。",
+          );
+        break;
+      }
       case "compact":
         await app.compact();
         break;
+      case "pins": {
+        const [operation, noteId, ...rest] = args;
+        if (!argument || operation === "list") {
+          await this.show(
+            app
+              .pins()
+              .map((pin) => `${pin.id}  ${pin.text}`)
+              .join("\n") || "固定メモはありません。",
+            "固定メモ",
+          );
+          break;
+        }
+        if (operation === "add") {
+          const text =
+            args.slice(1).join(" ") || (await this.prompt("固定メモ", ""));
+          if (text) app.addPin(text);
+        } else if (operation === "remove" && noteId) app.removePin(noteId);
+        else if (operation === "edit" && noteId) {
+          const text = rest.join(" ") || (await this.prompt("固定メモ", ""));
+          if (text) app.editPin(noteId, text);
+        } else this.notice = "/pins add|remove|edit [id] [text]";
+        break;
+      }
+      case "context": {
+        if (args[0] === "read" && args[1])
+          await this.show(
+            await app.readContext(
+              args[1],
+              args[2] === undefined ? 0 : Number(args[2]),
+              args[3] === undefined ? 32_000 : Number(args[3]),
+            ),
+            "保存済みコンテキスト",
+          );
+        else if (args[0] === "original" && args[1])
+          await this.show(
+            app.contextOriginal(
+              Number(args[1]),
+              args[2] === undefined ? 0 : Number(args[2]),
+              args[3] === undefined ? 32_000 : Number(args[3]),
+            ),
+            "会話原文",
+          );
+        else if (args[0] === "edit" && args[1]) {
+          const text =
+            args.slice(2).join(" ") || (await this.prompt("メモ", ""));
+          if (text) app.editContextNote(args[1], text);
+        } else if (
+          args[0] === "add" &&
+          ["decision", "question"].includes(args[1] ?? "")
+        ) {
+          const text =
+            args.slice(2).join(" ") || (await this.prompt("メモ", ""));
+          if (text)
+            app.addContextNote(args[1] as "decision" | "question", text);
+        } else if (args[0] === "constraint" && args[1] === "add") {
+          const text =
+            args.slice(2).join(" ") || (await this.prompt("制約", ""));
+          if (text) app.addConstraint(text);
+        } else if (args[0] === "constraint" && args[1] === "remove" && args[2])
+          app.removeConstraint(Number(args[2]));
+        else await this.show(app.contextDetails(), "会話コンテキスト");
+        break;
+      }
       case "settings":
         await new SettingsDialog(app, {
           edit: this.editSettings.bind(this),
@@ -1184,13 +1659,97 @@ export class TerminalApp {
     if (tools) {
       this.showDetails(
         "ツール結果",
-        `${artifact.name}\n\n${text}\n\n/tools list で別の結果を選択 · Ctrl+O で閉じる`,
+        `${artifact.name}\n\n${text}\n\n/tools list で別の結果を選択 · /tools で閉じる`,
       );
       return;
     }
     await this.show(
       `${artifact.name}\n${JSON.stringify(artifact.metadata)}\n\n${text}`,
     );
+  }
+  private async externalEditor(artifact: boolean): Promise<void> {
+    const app = this.app!;
+    if (app.busy)
+      throw new AgentError(
+        "EDITOR_BUSY",
+        "作業を停止または完了してから外部編集してください。",
+      );
+    const draft = this.input.getExpandedText() || app.session.draft;
+    let content = draft,
+      prefix = "";
+    if (artifact) {
+      let offset = 0;
+      while (true) {
+        const runs = app.artifactRuns(offset),
+          documents = runs.flatMap((run) =>
+            app
+              .view(run.id)
+              .artifacts.filter((item) => item.kind === "document")
+              .map((item) => ({ item, run })),
+          );
+        const selected = await this.choose(
+          "改訂案を外部編集する文書（元の成果物は変更しません）",
+          [
+            ...documents.map(({ item, run }) => ({
+              value: item.id,
+              label: item.name,
+              description: `${run.state} · ${item.bytes} bytes · ${run.id}`,
+            })),
+            ...(runs.length === 30
+              ? [{ value: "older", label: "さらに前の文書" }]
+              : []),
+          ],
+        );
+        if (selected === "older") {
+          offset += 30;
+          continue;
+        }
+        const document = documents.find(({ item }) => item.id === selected);
+        if (!document) return;
+        content = await app.artifactText(document.item.id, document.run.id);
+        prefix = `次の文書改訂案を確認し、新しい文書として保存してください。まだ検査していません。\n参照元: ${JSON.stringify({ id: document.item.id, name: document.item.name, sha256: document.item.sha256 })}\n\n`;
+        break;
+      }
+    }
+    const limit = app.config.limits.maxInputBytes - Buffer.byteLength(prefix);
+    if (limit <= 0 || Buffer.byteLength(content) > limit)
+      throw new AgentError(
+        "INPUT_SIZE",
+        "編集対象が入力上限を超えています。必要な部分だけを下書きへコピーしてください。",
+      );
+    app.setDraft(draft);
+    if (this.draftTimer) clearTimeout(this.draftTimer);
+    if (this.renderTimer) clearTimeout(this.renderTimer);
+    this.busyDialog = true;
+    this.editorAbort = new AbortController();
+    this.tui.stop({ preserveScreen: true });
+    try {
+      const edited = await editExternalText(
+        app.paths,
+        content,
+        this.preferences.editor,
+        limit,
+        this.editorAbort.signal,
+      );
+      if (!this.closing) {
+        const next = prefix + safeText(edited);
+        app.setDraft(next);
+        this.input.setText(next);
+        this.notice =
+          "編集内容を未送信の下書きに戻しました。送信・成果物の更新・検査はまだ実行していません。";
+      }
+    } catch (error) {
+      if (!this.closing) this.input.setText(draft);
+      throw error;
+    } finally {
+      this.editorAbort = undefined;
+      this.busyDialog = false;
+      if (!this.closing) {
+        this.tui.start();
+        this.tui.invalidate();
+        this.render();
+      }
+    }
   }
   private async model(): Promise<void> {
     const app = this.app!;

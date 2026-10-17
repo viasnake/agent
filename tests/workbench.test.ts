@@ -25,8 +25,123 @@ import {
   failureGuidance,
   doctorSummary,
 } from "../src/tui/guidance.js";
-import { testConfig } from "./helpers.js";
+import { fixture, ScriptedRuntime, testConfig } from "./helpers.js";
 import { TerminalApp } from "../src/tui/app.js";
+import { Application } from "../src/application.js";
+
+test("saved drafts survive slash commands and selecting the same conversation", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const runtime = new ScriptedRuntime(async () => {
+    throw new Error("Draft operations must not call a model");
+  });
+  const f = await fixture(runtime);
+  const app = new Application(f.config, f.p, f.store, f.root);
+  const terminal = new TerminalApp();
+  terminal.tui.requestRender = () => {};
+  terminal.app = app;
+  app.on("event", (event) => terminal["event"](event));
+  try {
+    await app.initialize();
+    const draft =
+      '売上を確認してください @"sales.csv::rows=2-3" OFFLINE_EDITOR_OK\n';
+    terminal.input.setText(draft);
+    t.mock.timers.tick(250);
+    terminal["key"]("\x03");
+    t.mock.timers.tick(250);
+    assert.equal(terminal.input.getExpandedText(), "");
+    assert.equal(app.conversations.get(app.session.id).draft, draft);
+
+    terminal.input.setText("/keys palette ctrl+g");
+    await terminal["submit"]("/keys palette ctrl+g");
+    t.mock.timers.tick(250);
+    assert.equal(app.conversations.get(app.session.id).draft, draft);
+
+    terminal["choose"] = async () => {
+      t.mock.timers.tick(500);
+      return app.session.id;
+    };
+    terminal.input.setText("/sessions");
+    await terminal["submit"]("/sessions");
+    t.mock.timers.tick(250);
+    assert.equal(terminal.input.getExpandedText(), draft);
+    assert.equal(app.conversations.get(app.session.id).draft, draft);
+    assert.equal(runtime.requests.length, 0);
+    assert.deepEqual(f.store.list(), []);
+
+    terminal.input.setText("");
+    t.mock.timers.tick(250);
+    assert.equal(app.conversations.get(app.session.id).draft, "");
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("palette navigation saves the current draft before its debounce expires", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const app = new Application(f.config, f.p, f.store, f.root);
+  const terminal = new TerminalApp();
+  terminal.tui.requestRender = () => {};
+  terminal.app = app;
+  app.on("event", (event) => terminal["event"](event));
+  try {
+    await app.initialize();
+    const previous = app.session.id;
+    terminal.input.setText("まだ自動保存されていない下書き");
+    await terminal["command"]("new");
+    t.mock.timers.tick(250);
+    assert.equal(
+      app.conversations.get(previous).draft,
+      "まだ自動保存されていない下書き",
+    );
+    assert.notEqual(app.session.id, previous);
+    assert.equal(app.session.draft, "");
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("external editing does not copy the TUI draft into the shell buffer", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const app = new Application(f.config, f.p, f.store, f.root);
+  const terminal = new TerminalApp();
+  const writes: string[] = [];
+  terminal.terminal.start = () => {};
+  terminal.terminal.stop = () => {};
+  terminal.terminal.write = (text) => writes.push(text);
+  terminal.app = app;
+  terminal["preferences"].editor = [
+    process.execPath,
+    "-e",
+    "require('node:fs').appendFileSync(process.argv[1], ' edited')",
+  ];
+  try {
+    await app.initialize();
+    const draft = "SHELL_MUST_NOT_CONTAIN_THIS_DRAFT";
+    terminal.input.setText(draft);
+    terminal.tui.start();
+    terminal.tui.renderNow(true);
+    writes.length = 0;
+
+    await terminal["externalEditor"](false);
+    assert.equal(terminal.input.getExpandedText(), `${draft} edited`);
+    assert.equal(app.session.draft, `${draft} edited`);
+    const output = writes.join("");
+    const exit = output.indexOf("\x1b[?1049l");
+    const restart = output.indexOf("\x1b[?1049h", exit + 1);
+    assert.ok(exit >= 0);
+    assert.ok(restart > exit);
+    assert.ok(!output.slice(exit, restart).includes(draft));
+  } finally {
+    if (terminal["draftTimer"]) clearTimeout(terminal["draftTimer"]);
+    if (terminal["renderTimer"]) clearTimeout(terminal["renderTimer"]);
+    terminal.tui.stop({ preserveScreen: true });
+    await app.close();
+    await f.cleanup();
+  }
+});
 
 test("fullscreen uses the viewport width and pins controls while scrolling and resizing", async () => {
   let columns = 157;
