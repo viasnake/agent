@@ -11,6 +11,7 @@ import { confirmToolOperation } from "./tool-approval.js";
 import type { ToolApprovalRequest } from "../tool-approval.js";
 import { ResearchBrowser } from "./research-browser.js";
 import { SearchBrowser } from "./search-browser.js";
+import { SkillBrowser } from "./skill-browser.js";
 import { ForkBrowser } from "./fork-browser.js";
 import { ModelChangeBrowser } from "./model-change-browser.js";
 import { BackupBrowser } from "./backup-browser.js";
@@ -835,6 +836,20 @@ export class TerminalApp {
     const argument = line.trim().slice(command!.length).trim();
     if (command !== "status") this.notice = "";
     switch (command) {
+      case "skills": {
+        await new SkillBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+          active: () => !this.closing && this.app === app,
+        }).select(argument ? commandPath(argument) : undefined);
+        if (!this.closing && this.app === app)
+          this.input.setText(app.session.draft);
+        break;
+      }
       case "commands": {
         const preferred = app.busy
           ? ["tasks", "stop", "queue"]

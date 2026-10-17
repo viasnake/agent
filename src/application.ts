@@ -115,6 +115,7 @@ import {
   loadPreparedInput,
   maxDocumentBytes,
   maxPreparedDocuments,
+  maxSkillBytes,
   maxPreparedInputBytes,
   parseDocumentToken,
   prepareDocument,
@@ -208,6 +209,7 @@ export function inferAccess(
   text: string,
   previous: RequestAccess = "read-only",
 ): RequestAccess {
+  text = intentText(text);
   if (explicitReadOnly.test(text) || exploratoryRequest.test(text))
     return "read-only";
   if (
@@ -226,15 +228,18 @@ function effectiveAccess(
   previous: RequestAccess,
   override?: RequestAccess,
 ): RequestAccess {
+  text = intentText(text);
   if (explicitReadOnly.test(text)) return "read-only";
   return override ?? inferAccess(text, previous);
 }
 function repositoryIntent(text: string): boolean {
+  text = intentText(text);
   return /repo|repository|codebase|source|file|review|explain|plan|構成|リポジトリ|コード|ファイル|レビュー|説明|計画|調べ/i.test(
     text,
   );
 }
 export function inferKind(text: string, previous?: WorkKind): WorkKind {
+  text = intentText(text);
   if (
     /まだ(?:は)?変更しない|変更せず|変更はしない|do not change|without changing|no changes/i.test(
       text,
@@ -270,6 +275,10 @@ export function fileReferences(text: string): string[] {
       ),
     ),
   ];
+}
+
+function intentText(text: string): string {
+  return text.replace(/(?:^|\s)@(?:"([^"\n]+)"|([^\s]+))/g, " ");
 }
 
 function isProvenanceSourceRange(
@@ -499,7 +508,9 @@ export class Application extends EventEmitter {
           );
         gitSelections.set(index, selection);
       } else {
-        const actualPath = token.split("::", 1)[0]!;
+        const actualPath = token.startsWith("skill:")
+          ? parseDocumentToken(token).path
+          : token.split("::", 1)[0]!;
         if (secretPath(actualPath))
           throw new AgentError(
             "PATH_DENIED",
@@ -512,6 +523,11 @@ export class Application extends EventEmitter {
           throw new AgentError(
             "PATH_DENIED",
             "Attachment must be a regular non-linked file",
+          );
+        if (token.startsWith("skill:") && info.size > maxSkillBytes)
+          throw new AgentError(
+            "INPUT_SIZE",
+            `Skills must not exceed ${maxSkillBytes} bytes`,
           );
         rawDocumentBytes += info.size;
         if (rawDocumentBytes > maxPreparedInputBytes)
@@ -538,7 +554,9 @@ export class Application extends EventEmitter {
         });
         continue;
       }
-      const actualPath = token.split("::", 1)[0]!;
+      const actualPath = token.startsWith("skill:")
+        ? parseDocumentToken(token).path
+        : token.split("::", 1)[0]!;
       const checkedFile = checkedFiles.get(index),
         safe =
           checkedFile?.path ??

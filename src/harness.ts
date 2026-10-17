@@ -42,6 +42,7 @@ import {
   errorMessage,
   id,
   privateDirectory,
+  safePath,
   sha256,
 } from "./util.js";
 import { Evaluator } from "./validation.js";
@@ -59,6 +60,7 @@ import {
   maxDocumentBytes,
   maxPreparedDocuments,
   maxPreparedInputBytes,
+  maxSkillBytes,
   parseDocumentToken,
   prepareDocument,
 } from "./documents.js";
@@ -276,8 +278,15 @@ export class Harness {
         inputPlans.push({ kind: "git", selection });
         continue;
       }
-      const parsed = parseDocumentToken(token),
-        path = resolve(parsed.path);
+      const parsed = parseDocumentToken(token);
+      if (parsed.skill && !workspace)
+        throw new AgentError(
+          "WORKSPACE",
+          "Skill inputs require --workspace and a workspace-relative SKILL.md path",
+        );
+      const path = parsed.skill
+        ? await safePath(workspace!, parsed.path)
+        : resolve(parsed.path);
       if (secretPath(parsed.path))
         throw new AgentError(
           "INPUT",
@@ -288,7 +297,7 @@ export class Harness {
         !info.isFile() ||
         info.isSymbolicLink() ||
         info.nlink !== 1 ||
-        info.size > maxDocumentBytes
+        info.size > (parsed.skill ? maxSkillBytes : maxDocumentBytes)
       )
         throw new AgentError(
           "PATH_DENIED",

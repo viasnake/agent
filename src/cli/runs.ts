@@ -35,7 +35,12 @@ export function registerRunsCommands(cli: CliContext): void {
     )
     .option("--workspace <path>", "source Git repository")
     .option("--include-untracked", "include non-ignored untracked files")
-    .option("--input <file>", "input document (repeatable)", collect, [])
+    .option(
+      "--input <file>",
+      "input document, or skill:workspace-relative/SKILL.md (repeatable)",
+      collect,
+      [],
+    )
     .option("--check <id>", "trusted required check (repeatable)", collect, [])
     .option(
       "--preserve <literal>",

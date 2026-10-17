@@ -26,6 +26,7 @@ export const maxZipTotalBytes = 50_000_000;
 export const maxDocumentPreviewBytes = 8_000;
 export const maxPreparedDocuments = 8;
 export const maxPreparedInputBytes = maxDocumentBytes;
+export const maxSkillBytes = 64_000;
 
 const formats: Record<string, string> = {
   ".txt": "text",
@@ -55,6 +56,7 @@ export interface DocumentSelector {
 export interface DocumentToken {
   path: string;
   selector: DocumentSelector;
+  skill?: true;
 }
 
 export interface DocumentPreparationOptions {
@@ -67,9 +69,15 @@ export interface DocumentPreparationOptions {
 }
 
 export function parseDocumentToken(token: string): DocumentToken {
-  const [path, ...parts] = token.split("::");
+  const skill = token.startsWith("skill:");
+  const [path, ...parts] = (skill ? token.slice(6) : token).split("::");
   if (!path || path.includes("\0"))
     throw new AgentError("INPUT_SELECTOR", "Specify a valid attachment path.");
+  if (skill && (basename(path) !== "SKILL.md" || parts.length))
+    throw new AgentError(
+      "INPUT_SELECTOR",
+      "Skills require a complete SKILL.md entrypoint without selectors",
+    );
   const selector: DocumentSelector = {};
   for (const part of parts) {
     const separator = part.indexOf("=");
@@ -135,7 +143,7 @@ export function parseDocumentToken(token: string): DocumentToken {
       "INPUT_SELECTOR",
       "Ranges use positive integers such as 2-20",
     );
-  return { path, selector };
+  return { path, selector, ...(skill ? { skill: true as const } : {}) };
 }
 
 function validRange(value: string): boolean {
@@ -158,11 +166,17 @@ export async function prepareDocument(
   if (!Number.isSafeInteger(maxExtractBytes) || maxExtractBytes < 0)
     throw new AgentError("INPUT_SIZE", "Document input budget is invalid");
   const parsed = parseDocumentToken(token);
-  const raw = await readBoundedFile(sourcePath, maxDocumentBytes, {
-    expectedBytes: options.expectedBytes,
-  });
+  const raw = await readBoundedFile(
+    sourcePath,
+    parsed.skill ? maxSkillBytes : maxDocumentBytes,
+    {
+      expectedBytes: options.expectedBytes,
+    },
+  );
   const rawSha256 = sha256(raw);
-  const format = formats[extname(parsed.path).toLowerCase()] ?? "text";
+  const format = parsed.skill
+    ? "skill"
+    : (formats[extname(parsed.path).toLowerCase()] ?? "text");
   await privateDirectory(paths.attachments);
   let selected: {
     text: string;
@@ -170,7 +184,18 @@ export async function prepareDocument(
     partial: boolean;
     images?: ImageReference[];
   };
-  if (["docx", "pptx", "xlsx"].includes(format)) {
+  if (parsed.skill) {
+    const decoded = decodeText(raw);
+    const text = raw.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))
+      ? `\ufeff${decoded}`
+      : decoded;
+    if (!text.trim() || Buffer.byteLength(text) > maxExtractBytes)
+      throw new AgentError(
+        "INPUT_SIZE",
+        "A skill must fit in full within the request input budget",
+      );
+    selected = { text, locator: `skill: ${parsed.path}`, partial: false };
+  } else if (["docx", "pptx", "xlsx"].includes(format)) {
     selected = await extractOffice(
       raw,
       format as "docx" | "pptx" | "xlsx",
@@ -204,7 +229,10 @@ export async function prepareDocument(
     );
   await privateDirectory(paths.attachments);
   const blob = join(paths.attachments, `${rawSha256}.raw`);
-  const id = `doc-${sha256(`${rawSha256}\0${parsed.path}\0${JSON.stringify(parsed.selector)}\0${sha256(selected.text)}`)}`;
+  const selectorIdentity = parsed.skill
+    ? "skill"
+    : JSON.stringify(parsed.selector);
+  const id = `doc-${sha256(`${rawSha256}\0${parsed.path}\0${selectorIdentity}\0${sha256(selected.text)}`)}`;
   await pinSharedBlobs(paths, [
     `attachments/${rawSha256}.raw`,
     `attachments/${id}.selected`,
@@ -235,7 +263,7 @@ export async function prepareDocument(
     id,
     originalName: basename(parsed.path),
     format,
-    selector: token.slice(parsed.path.length),
+    selector: parsed.skill ? "skill" : token.slice(parsed.path.length),
     rawSha256,
     selectedSha256: sha256(selected.text),
     rawBytes: raw.length,
@@ -363,6 +391,7 @@ export async function loadPreparedInput(
       "pptx",
       "xlsx",
       "git",
+      "skill",
     ].includes(reference.format) ||
     typeof reference.selector !== "string" ||
     reference.selector.length > 2048 ||
@@ -373,7 +402,13 @@ export async function loadPreparedInput(
     reference.rawBytes < 0 ||
     reference.rawBytes > maxDocumentBytes ||
     reference.selectedBytes < 0 ||
-    reference.selectedBytes > maxDocumentBytes
+    reference.selectedBytes > maxDocumentBytes ||
+    (reference.format === "skill" &&
+      (reference.rawBytes > maxSkillBytes ||
+        reference.partial ||
+        reference.originalName !== "SKILL.md" ||
+        reference.selector !== "skill" ||
+        reference.rawSha256 !== reference.selectedSha256))
   )
     throw new AgentError(
       "INPUT_INTEGRITY",
@@ -397,7 +432,10 @@ export async function loadPreparedInput(
   });
   return {
     reference: structuredClone(reference),
-    text: new TextDecoder("utf-8", { fatal: true }).decode(selectedBytes),
+    text: new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: reference.format === "skill",
+    }).decode(selectedBytes),
   };
 }
 
