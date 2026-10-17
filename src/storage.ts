@@ -859,7 +859,7 @@ export class Store {
     });
     const heartbeat = setInterval(() => this.heartbeat(run), 1000);
     try {
-      await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       const preview = previewHistoryDeletion(
         this,
         undefined,

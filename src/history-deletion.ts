@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import {
   closeSync,
   constants,
-  existsSync,
   fstatSync,
   lstatSync,
   openSync,
@@ -10,7 +9,7 @@ import {
   realpathSync,
   type Stats,
 } from "node:fs";
-import { rm } from "node:fs/promises";
+import fs from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
 import lockfile from "proper-lockfile";
@@ -41,6 +40,8 @@ const maxRows = 100_000;
 const maxBytes = 64_000_000;
 const maxUnits = 500;
 const maxConfigBytes = 4_000_000;
+const maxQueueBytes = 32_000_000;
+const sqlChunkSize = 400;
 const staleAfter = 15_000;
 const deletionVersion = 1;
 const snapshotTimeoutMs = 10_000;
@@ -104,6 +105,7 @@ interface SnapshotRow {
 interface Snapshot {
   rows: SnapshotRow[];
   binding: string;
+  deadline: number;
 }
 interface Unit {
   key: string;
@@ -182,22 +184,38 @@ function sameConfigStat(a: Stats, b: Stats): boolean {
 }
 
 function storageRoot(store: Store): { path: string; identity: Identity } {
-  const home = resolve(store.paths.home);
-  const runs = resolve(store.paths.runs);
-  if (runs !== join(home, "runs"))
+  const homePath = resolve(store.paths.home);
+  const runsPath = resolve(store.paths.runs);
+  if (runsPath !== join(homePath, "runs"))
     fail("DELETE_UNSAFE", "The run storage root must be home/runs");
-  privateDirectory(home, "Agent home");
-  const rootIdentity = privateDirectory(runs, "Run storage root");
+  privateDirectory(homePath, "Agent home");
+  const rootIdentity = privateDirectory(runsPath, "Run storage root");
+  let home: string;
+  let runs: string;
   try {
-    if (
-      resolve(realpathSync(home)) !== home ||
-      resolve(realpathSync(runs)) !== runs
-    )
-      fail("DELETE_UNSAFE", "The run storage root must not be a symlink");
+    home = resolve(realpathSync(homePath));
+    runs = resolve(realpathSync(runsPath));
   } catch {
     fail("DELETE_UNSAFE", "The run storage root cannot be resolved");
   }
+  if (runs !== join(home, "runs"))
+    fail("DELETE_UNSAFE", "The run storage root must be home/runs");
   return { path: runs, identity: rootIdentity };
+}
+
+function lstatIfPresent(path: string) {
+  try {
+    return lstatSync(path, { bigint: true });
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    )
+      return undefined;
+    throw error;
+  }
 }
 
 function readConfigBinding(
@@ -326,7 +344,7 @@ function snapshot(store: Store): Snapshot {
       digest.update("\0");
     }
   }
-  return { rows, binding: digest.digest("hex") };
+  return { rows, binding: digest.digest("hex"), deadline };
 }
 
 function payload(row: SnapshotRow): Record<string, unknown> {
@@ -360,6 +378,8 @@ function buildUnits(snapshotValue: Snapshot): {
     if (item.table === "conversations") {
       const idValue = ensureUuid(item.row.id, "Conversation row ID");
       const data = payload(item);
+      if (!Number.isSafeInteger(item.row.updated_at))
+        fail("DELETE_UNSAFE", "Conversation timestamp is malformed");
       conversations.set(idValue, {
         key: `conversation:${idValue}`,
         kind: "conversation",
@@ -375,6 +395,8 @@ function buildUnits(snapshotValue: Snapshot): {
     if (item.table === "runs") {
       const idValue = ensureUuid(item.row.id, "Run row ID");
       const data = payload(item) as unknown as Run;
+      if (!Number.isSafeInteger(data.updatedAt))
+        fail("DELETE_UNSAFE", "Run timestamp is malformed");
       runs.set(idValue, data);
     }
   }
@@ -442,33 +464,6 @@ function buildUnits(snapshotValue: Snapshot): {
   };
 }
 
-function liveState(store: Store, lease?: DeletionOptions["lease"]): void {
-  const cutoff = Date.now() - staleAfter;
-  for (const row of store.db
-    .prepare(
-      "SELECT id,generation,heartbeat FROM runs WHERE heartbeat IS NOT NULL",
-    )
-    .all() as Array<{
-    id: string;
-    generation: number;
-    heartbeat: number;
-  }>) {
-    if (
-      row.heartbeat > cutoff &&
-      (!lease || row.id !== lease.runId || row.generation !== lease.generation)
-    )
-      fail("RUN_BUSY", "A live run lease prevents history deletion");
-  }
-  if (
-    store.db
-      .prepare(
-        "SELECT 1 FROM conversations WHERE owner IS NOT NULL AND heartbeat>?",
-      )
-      .get(cutoff)
-  )
-    fail("SESSION_BUSY", "A live conversation owner prevents history deletion");
-}
-
 function unitForRow(
   row: SnapshotRow,
   maps: ReturnType<typeof buildUnits>,
@@ -526,18 +521,28 @@ function refsAndRetention(
   snapshotValue: Snapshot,
   maps: ReturnType<typeof buildUnits>,
   candidates: Set<string>,
+  initialReasons: Map<string, string[]>,
 ): { reasons: Map<string, string[]>; edges: Map<string, Set<string>> } {
-  const reasons = new Map<string, string[]>();
+  const reasons = new Map(
+    [...initialReasons]
+      .filter(([key]) => candidates.has(key))
+      .map(([key, values]) => [key, [...values]]),
+  );
   const edges = new Map<string, Set<string>>();
   const uuidPattern =
     /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
-  const retain = (key: string, reason: string) => {
+  const retain = (key: string, reason: string, pending: string[]) => {
     if (!candidates.has(key)) return;
     const list = reasons.get(key) ?? [];
-    if (!list.includes(reason)) list.push(reason);
+    if (list.includes(reason)) return;
+    list.push(reason);
     reasons.set(key, list);
+    if (list.length === 1) pending.push(key);
   };
+  const pending = [...reasons.keys()];
   for (const item of snapshotValue.rows) {
+    if (Date.now() >= snapshotValue.deadline)
+      fail("DELETE_LIMIT", "Deletion reference scan timed out");
     const owner = unitForRow(item, maps);
     const matches = new Set<string>();
     for (const match of item.text.matchAll(uuidPattern)) {
@@ -550,20 +555,16 @@ function refsAndRetention(
         const targets = edges.get(owner) ?? new Set<string>();
         targets.add(target);
         edges.set(owner, targets);
-      } else retain(target, `外部の${item.table}参照`);
+      } else retain(target, `外部の${item.table}参照`, pending);
     }
   }
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const [source, targets] of edges) {
-      if (!reasons.has(source)) continue;
-      for (const target of targets) {
-        if (candidates.has(target) && !reasons.has(target)) {
-          retain(target, `保持された履歴からの参照`);
-          changed = true;
-        }
-      }
+  for (let index = 0; index < pending.length; index++) {
+    if (Date.now() >= snapshotValue.deadline)
+      fail("DELETE_LIMIT", "Deletion reference propagation timed out");
+    const source = pending[index]!;
+    for (const target of edges.get(source) ?? []) {
+      if (!reasons.has(target))
+        retain(target, "保持された履歴からの参照", pending);
     }
   }
   return { reasons, edges };
@@ -592,7 +593,6 @@ function preparePlan(
   config: Config | undefined,
   requestInput: HistoryDeletionRequest,
   options: DeletionOptions,
-  allowLegacyLease = false,
 ): Plan {
   checkSignal(options.signal);
   const request = normalizeRequest(requestInput);
@@ -600,7 +600,6 @@ function preparePlan(
     fail("CONFIG", "Retention deletion requires current configuration");
   if (!config && !options.lease)
     fail("CONFIG", "A configuration is required for history deletion");
-  liveState(store, options.lease);
   if (options.lease)
     store.assertLease(options.lease.runId, options.lease.generation);
   const storage = storageRoot(store);
@@ -612,6 +611,40 @@ function preparePlan(
       .filter((row) => row.table === "conversations")
       .map((row) => [String(row.row.id), row]),
   );
+  const operationStates = new Map<string, Set<string>>();
+  const requestStates = new Map<string, Set<string>>();
+  const addStatus = (
+    index: Map<string, Set<string>>,
+    row: SnapshotRow,
+  ): void => {
+    if (typeof row.row.run_id !== "string") return;
+    const values = index.get(row.row.run_id) ?? new Set<string>();
+    values.add(String(row.row.status));
+    index.set(row.row.run_id, values);
+  };
+  for (const row of snapshotValue.rows) {
+    if (row.table === "operations") addStatus(operationStates, row);
+    if (row.table === "requests") addStatus(requestStates, row);
+  }
+  const hasUnresolved = (
+    index: Map<string, Set<string>>,
+    runId: string,
+    unresolved: readonly string[],
+  ) => unresolved.some((status) => index.get(runId)?.has(status));
+  const liveCutoff = Date.now() - staleAfter;
+  const runIsLive = (runId: string): boolean => {
+    const row = runData.get(runId)?.row;
+    if (
+      !row ||
+      typeof row.heartbeat !== "number" ||
+      row.heartbeat <= liveCutoff
+    )
+      return false;
+    return !(
+      options.lease?.runId === runId &&
+      options.lease.generation === row.generation
+    );
+  };
   const reasons = new Map<string, string[]>();
   const selected = new Set<string>();
   const explicitConversations = new Set(
@@ -621,6 +654,7 @@ function preparePlan(
     selected.add(key);
     if (reason) addReason(reasons, key, reason);
   };
+  let moreCandidates = 0;
   if (request.kind === "selection") {
     for (const sessionId of request.conversationIds) {
       const unit = maps.conversations.get(sessionId);
@@ -658,11 +692,8 @@ function preparePlan(
             : (payload(runData.get(unit.id)!) as unknown as Run).updatedAt;
         return updatedAt(a) - updatedAt(b) || a.id.localeCompare(b.id);
       });
+    moreCandidates = Math.max(0, eligible.length - maxUnits);
     for (const unit of eligible.slice(0, maxUnits)) addSelected(unit.key);
-    for (const unit of eligible.slice(maxUnits)) {
-      selected.add(unit.key);
-      addReason(reasons, unit.key, "候補上限により今回の対象外");
-    }
   }
   for (const key of selected) {
     const unit = maps.units.get(key)!;
@@ -673,33 +704,31 @@ function preparePlan(
         addReason(reasons, key, "指定 workspace の範囲外");
     }
     if (unit.kind === "conversation") {
+      const conversation = conversationData.get(unit.id)!.row;
+      if (
+        conversation.owner !== null &&
+        conversation.owner !== undefined &&
+        typeof conversation.heartbeat === "number" &&
+        conversation.heartbeat > liveCutoff
+      )
+        addReason(reasons, key, "会話が別のプロセスで使用中です");
       for (const runId of unit.runIds) {
         const runRow = runData.get(runId)!;
         if (!terminalStates.includes(String(runRow.row.state) as Run["state"]))
           addReason(reasons, key, "非 terminal run を含みます");
         const run = payload(runRow) as unknown as Run;
         if (
-          !allowLegacyLease &&
-          snapshotValue.rows.some(
-            (item) =>
-              item.table === "operations" &&
-              item.row.run_id === runId &&
-              ["prepared", "dispatched", "unknown"].includes(
-                String(item.row.status),
-              ),
-          )
+          hasUnresolved(operationStates, runId, [
+            "prepared",
+            "dispatched",
+            "unknown",
+          ])
         )
           addReason(reasons, key, "未解決 operation を含みます");
-        if (
-          !allowLegacyLease &&
-          snapshotValue.rows.some(
-            (item) =>
-              item.table === "requests" &&
-              item.row.run_id === runId &&
-              ["reserved", "unknown"].includes(String(item.row.status)),
-          )
-        )
+        if (hasUnresolved(requestStates, runId, ["reserved", "unknown"]))
           addReason(reasons, key, "未解決 provider request を含みます");
+        if (runIsLive(runId))
+          addReason(reasons, key, "run に live lease があります");
         if (request.kind === "retention" && run.updatedAt > request.cutoff)
           addReason(reasons, key, "会話内に cutoff 後の run があります");
       }
@@ -708,27 +737,17 @@ function preparePlan(
       if (!terminalStates.includes(String(runRow.row.state) as Run["state"]))
         addReason(reasons, key, "非 terminal run です");
       if (
-        !allowLegacyLease &&
-        snapshotValue.rows.some(
-          (item) =>
-            item.table === "operations" &&
-            item.row.run_id === unit.id &&
-            ["prepared", "dispatched", "unknown"].includes(
-              String(item.row.status),
-            ),
-        )
+        hasUnresolved(operationStates, unit.id, [
+          "prepared",
+          "dispatched",
+          "unknown",
+        ])
       )
         addReason(reasons, key, "未解決 operation を含みます");
-      if (
-        !allowLegacyLease &&
-        snapshotValue.rows.some(
-          (item) =>
-            item.table === "requests" &&
-            item.row.run_id === unit.id &&
-            ["reserved", "unknown"].includes(String(item.row.status)),
-        )
-      )
+      if (hasUnresolved(requestStates, unit.id, ["reserved", "unknown"]))
         addReason(reasons, key, "未解決 provider request を含みます");
+      if (runIsLive(unit.id))
+        addReason(reasons, key, "run に live lease があります");
     }
   }
   const candidateForRefs = new Set(selected);
@@ -736,6 +755,7 @@ function preparePlan(
     snapshotValue,
     maps,
     candidateForRefs,
+    reasons,
   );
   for (const [key, values] of refReasons)
     for (const reason of values) addReason(reasons, key, reason);
@@ -753,22 +773,16 @@ function preparePlan(
         reason: (reasons.get(key) ?? ["保持"]).join("、").slice(0, 512),
       };
     });
-  const moreCandidates =
-    request.kind === "retention"
-      ? [...reasons.values()].filter((values) =>
-          values.includes("候補上限により今回の対象外"),
-        ).length
-      : 0;
   const configBinding = readConfigBinding(store, config);
   const directories: QueueRecord["directories"] = [];
   for (const key of deletion) {
     for (const runId of maps.units.get(key)!.runIds) {
       const path = join(storage.path, runId);
-      if (!existsSync(path)) {
+      const stat = lstatIfPresent(path);
+      if (!stat) {
         directories.push({ runId, identity: null });
         continue;
       }
-      const stat = lstatSync(path, { bigint: true });
       if (
         !stat.isDirectory() ||
         stat.isSymbolicLink() ||
@@ -793,9 +807,7 @@ function preparePlan(
     .map((unit) => unit.id)
     .sort();
   const runIds = [...deletion]
-    .map((key) => maps.units.get(key)!)
-    .filter((unit) => unit.kind === "run")
-    .map((unit) => unit.id)
+    .flatMap((key) => maps.units.get(key)!.runIds)
     .sort();
   const more = request.kind === "retention" ? moreCandidates : 0;
   const preview: HistoryDeletionPreview = {
@@ -831,36 +843,77 @@ function preparePlan(
   };
 }
 
+function chunks<T>(values: T[], size = sqlChunkSize): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size)
+    result.push(values.slice(index, index + size));
+  return result;
+}
+
+function selectIds(
+  store: Store,
+  table: "artifacts" | "boundaries",
+  column: "run_id" | "session_id",
+  values: string[],
+): string[] {
+  const result: string[] = [];
+  for (const group of chunks(values)) {
+    result.push(
+      ...(
+        store.db
+          .prepare(
+            `SELECT id FROM ${table} WHERE ${column} IN (${group.map(() => "?").join(",")})`,
+          )
+          .all(...group) as Array<{ id: string }>
+      ).map((row) => ensureUuid(row.id, `${table} ID`)),
+    );
+  }
+  return result;
+}
+
+function deleteByIds(
+  store: Store,
+  table: string,
+  column: string,
+  values: string[],
+): void {
+  for (const group of chunks(values))
+    store.db
+      .prepare(
+        `DELETE FROM ${table} WHERE ${column} IN (${group.map(() => "?").join(",")})`,
+      )
+      .run(...group);
+}
+
 function deleteMetadata(
   store: Store,
   plan: Plan,
   options: DeletionOptions,
 ): string[] {
-  const runIds = [...plan.deletion].flatMap(
-    (key) => plan.units.get(key)!.runIds,
-  );
+  const runIds = [
+    ...new Set(
+      [...plan.deletion].flatMap((key) => plan.units.get(key)!.runIds),
+    ),
+  ].sort();
   const conversationIds = [...plan.deletion]
     .map((key) => plan.units.get(key)!)
     .filter((unit) => unit.kind === "conversation")
-    .map((unit) => unit.id);
-  const artifactIds = (
-    store.db
-      .prepare(
-        `SELECT id FROM artifacts WHERE run_id IN (${runIds.map(() => "?").join(",") || "NULL"})`,
-      )
-      .all(...runIds) as Array<{ id: string }>
-  ).map((row) => ensureUuid(row.id, "Artifact ID"));
-  const boundaryIds = (
-    store.db
-      .prepare(
-        `SELECT id FROM boundaries WHERE session_id IN (${conversationIds.map(() => "?").join(",") || "NULL"})`,
-      )
-      .all(...conversationIds) as Array<{ id: string }>
-  ).map((row) => ensureUuid(row.id, "Boundary ID"));
+    .map((unit) => unit.id)
+    .sort();
+  const artifactIds = selectIds(store, "artifacts", "run_id", runIds);
+  const boundaryIds = selectIds(
+    store,
+    "boundaries",
+    "session_id",
+    conversationIds,
+  );
   options.signal?.throwIfAborted();
   if (options.lease)
     store.assertLease(options.lease.runId, options.lease.generation);
   options.beforeCommit?.();
+  options.signal?.throwIfAborted();
+  if (options.lease)
+    store.assertLease(options.lease.runId, options.lease.generation);
   const queueId = id();
   const storage = storageRoot(store);
   const queue: QueueRecord = {
@@ -869,81 +922,25 @@ function deleteMetadata(
     root: storage.identity,
     directories: plan.runDirectories,
   };
+  const serializedQueue = JSON.stringify(queue);
+  if (Buffer.byteLength(serializedQueue) > maxQueueBytes)
+    fail("DELETE_LIMIT", "Deletion cleanup intent exceeds its size limit");
   store.db
     .prepare("INSERT INTO deletion_queue VALUES (?,?,?)")
-    .run(queueId, Date.now(), JSON.stringify(queue));
-  if (boundaryIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM message_boundaries WHERE boundary_id IN (${boundaryIds.map(() => "?").join(",")})`,
-      )
-      .run(...boundaryIds);
-  if (conversationIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM message_boundaries WHERE session_id IN (${conversationIds.map(() => "?").join(",")})`,
-      )
-      .run(...conversationIds);
-  if (boundaryIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM boundary_artifacts WHERE boundary_id IN (${boundaryIds.map(() => "?").join(",")})`,
-      )
-      .run(...boundaryIds);
-  if (conversationIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM boundaries WHERE session_id IN (${conversationIds.map(() => "?").join(",")})`,
-      )
-      .run(...conversationIds);
-  if (conversationIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM messages WHERE session_id IN (${conversationIds.map(() => "?").join(",")})`,
-      )
-      .run(...conversationIds);
-  if (artifactIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM source_links WHERE artifact_id IN (${artifactIds.map(() => "?").join(",")})`,
-      )
-      .run(...artifactIds);
-  if (runIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM source_links WHERE run_id IN (${runIds.map(() => "?").join(",")})`,
-      )
-      .run(...runIds);
-  if (conversationIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM fork_lineages WHERE child_session_id IN (${conversationIds.map(() => "?").join(",")})`,
-      )
-      .run(...conversationIds);
-  if (runIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM conversation_runs WHERE run_id IN (${runIds.map(() => "?").join(",")})`,
-      )
-      .run(...runIds);
-  if (conversationIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM conversation_runs WHERE session_id IN (${conversationIds.map(() => "?").join(",")})`,
-      )
-      .run(...conversationIds);
-  if (conversationIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM conversations WHERE id IN (${conversationIds.map(() => "?").join(",")})`,
-      )
-      .run(...conversationIds);
-  if (runIds.length)
-    store.db
-      .prepare(
-        `DELETE FROM runs WHERE id IN (${runIds.map(() => "?").join(",")})`,
-      )
-      .run(...runIds);
+    .run(queueId, Date.now(), serializedQueue);
+  deleteByIds(store, "message_boundaries", "boundary_id", boundaryIds);
+  deleteByIds(store, "message_boundaries", "session_id", conversationIds);
+  deleteByIds(store, "boundary_artifacts", "boundary_id", boundaryIds);
+  deleteByIds(store, "boundaries", "session_id", conversationIds);
+  deleteByIds(store, "messages", "session_id", conversationIds);
+  deleteByIds(store, "source_links", "artifact_id", artifactIds);
+  deleteByIds(store, "source_links", "run_id", runIds);
+  deleteByIds(store, "fork_lineages", "child_session_id", conversationIds);
+  deleteByIds(store, "fork_lineages", "parent_session_id", conversationIds);
+  deleteByIds(store, "conversation_runs", "run_id", runIds);
+  deleteByIds(store, "conversation_runs", "session_id", conversationIds);
+  deleteByIds(store, "conversations", "id", conversationIds);
+  deleteByIds(store, "runs", "id", runIds);
   return [queueId];
 }
 
@@ -954,32 +951,118 @@ function queueRows(
   id: string;
   payload: QueueRecord;
 }> {
-  const rows = (
-    ids?.length
-      ? store.db
+  const rows: Array<{ id: string; payload: string }> = [];
+  if (ids?.length) {
+    if (ids.length > maxRows)
+      fail("DELETE_LIMIT", "Too many deletion jobs were requested");
+    for (const group of chunks(ids))
+      rows.push(
+        ...(store.db
           .prepare(
-            `SELECT id,payload FROM deletion_queue WHERE id IN (${ids.map(() => "?").join(",")})`,
+            `SELECT id,payload FROM deletion_queue WHERE id IN (${group.map(() => "?").join(",")})`,
           )
-          .all(...ids)
-      : store.db
-          .prepare("SELECT id,payload FROM deletion_queue ORDER BY created_at")
-          .all()
-  ) as Array<{ id: string; payload: string }>;
+          .all(...group) as Array<{ id: string; payload: string }>),
+      );
+  } else {
+    rows.push(
+      ...(store.db
+        .prepare(
+          "SELECT id,payload FROM deletion_queue ORDER BY created_at LIMIT ?",
+        )
+        .all(maxRows + 1) as Array<{ id: string; payload: string }>),
+    );
+    if (rows.length > maxRows)
+      fail("DELETE_LIMIT", "Too many pending deletion jobs to list");
+  }
   return rows.map((row) => {
     try {
-      const data = JSON.parse(row.payload) as QueueRecord;
+      ensureUuid(row.id, "Deletion job ID");
       if (
-        data.version !== deletionVersion ||
-        !Array.isArray(data.runIds) ||
-        !data.root ||
-        !Array.isArray(data.directories)
+        typeof row.payload !== "string" ||
+        Buffer.byteLength(row.payload) > maxQueueBytes
       )
         throw new Error();
-      return { id: ensureUuid(row.id, "Deletion job ID"), payload: data };
+      const raw: unknown = JSON.parse(row.payload);
+      if (!raw || typeof raw !== "object" || Array.isArray(raw))
+        throw new Error();
+      const data = raw as Record<string, unknown>;
+      const keys = Object.keys(data).sort();
+      if (
+        keys.some(
+          (key) =>
+            !["version", "runIds", "root", "directories", "error"].includes(
+              key,
+            ),
+        ) ||
+        data.version !== deletionVersion ||
+        !Array.isArray(data.runIds) ||
+        data.runIds.length > maxRows ||
+        !Array.isArray(data.directories) ||
+        data.directories.length !== data.runIds.length
+      )
+        throw new Error();
+      if (
+        data.error !== undefined &&
+        (typeof data.error !== "string" || data.error.length > 512)
+      )
+        throw new Error();
+      const runIds = data.runIds.map((value) =>
+        ensureUuid(value, "Queued run ID"),
+      );
+      if (new Set(runIds).size !== runIds.length) throw new Error();
+      const root = parseQueueIdentity(data.root);
+      const directories = data.directories.map((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value))
+          throw new Error();
+        const directory = value as Record<string, unknown>;
+        if (Object.keys(directory).sort().join(",") !== "identity,runId")
+          throw new Error();
+        const runId = ensureUuid(directory.runId, "Queued run ID");
+        const identity =
+          directory.identity === null
+            ? null
+            : parseQueueIdentity(directory.identity);
+        return { runId, identity };
+      });
+      const directoryRuns = new Set(
+        directories.map((directory) => directory.runId),
+      );
+      if (
+        directoryRuns.size !== directories.length ||
+        runIds.some((runId) => !directoryRuns.has(runId))
+      )
+        throw new Error();
+      return {
+        id: row.id,
+        payload: {
+          version: deletionVersion,
+          runIds,
+          root,
+          directories,
+          ...(data.error === undefined ? {} : { error: data.error }),
+        },
+      };
     } catch {
       fail("DELETE_UNSAFE", "Deletion queue contains malformed metadata");
     }
   });
+}
+
+function parseQueueIdentity(value: unknown): Identity {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    fail("DELETE_UNSAFE", "Deletion queue contains an invalid identity");
+  const identity = value as Record<string, unknown>;
+  if (
+    Object.keys(identity).sort().join(",") !== "dev,ino" ||
+    typeof identity.dev !== "string" ||
+    typeof identity.ino !== "string" ||
+    !/^(0|[1-9]\d*)$/.test(identity.dev) ||
+    !/^(0|[1-9]\d*)$/.test(identity.ino) ||
+    identity.dev.length > 64 ||
+    identity.ino.length > 64
+  )
+    fail("DELETE_UNSAFE", "Deletion queue contains an invalid identity");
+  return { dev: identity.dev, ino: identity.ino };
 }
 
 async function cleanupJobs(store: Store, ids: string[]): Promise<void> {
@@ -1000,9 +1083,7 @@ async function cleanupJobs(store: Store, ids: string[]): Promise<void> {
         )
           throw new AgentError("DELETE_CLEANUP", "Run ID was reused");
         const path = join(currentRoot.path, directory.runId);
-        const current = existsSync(path)
-          ? lstatSync(path, { bigint: true })
-          : undefined;
+        const current = lstatIfPresent(path);
         if (!directory.identity) {
           if (current)
             throw new AgentError(
@@ -1021,8 +1102,8 @@ async function cleanupJobs(store: Store, ids: string[]): Promise<void> {
             "DELETE_CLEANUP",
             "Run directory identity changed; cleanup was retained",
           );
-        await rm(path, { recursive: true, force: true });
-        if (existsSync(path))
+        await fs.rm(path, { recursive: true, force: true });
+        if (lstatIfPresent(path))
           throw new AgentError("DELETE_CLEANUP", "Run directory remains");
       }
     } catch (caught) {
@@ -1049,10 +1130,9 @@ export function previewHistoryDeletion(
   request: HistoryDeletionRequest,
   options: DeletionOptions = {},
 ): HistoryDeletionPreview {
+  checkSignal(options.signal);
   return store.transaction(
-    () =>
-      preparePlan(store, config, request, options, !config && !!options.lease)
-        .preview,
+    () => preparePlan(store, config, request, options).preview,
   );
 }
 
@@ -1065,24 +1145,24 @@ export async function confirmHistoryDeletion(
   checkSignal(options.signal);
   if (!config && !options.lease)
     fail("CONFIG", "A configuration is required for history deletion");
-  const releaseConfig = config
-    ? await lockfile.lock(store.paths.config, { retries: 0, stale: 30_000 })
-    : undefined;
-  const releaseDatabase = await lockfile.lock(store.paths.database, {
-    retries: 0,
-    stale: 30_000,
-  });
+  let releaseConfig: (() => Promise<void>) | undefined;
+  let releaseDatabase: (() => Promise<void>) | undefined;
   let queueIds: string[] = [];
   try {
+    if (config)
+      releaseConfig = await lockfile.lock(store.paths.config, {
+        retries: 0,
+        stale: 30_000,
+      });
+    checkSignal(options.signal);
+    releaseDatabase = await lockfile.lock(store.paths.database, {
+      retries: 0,
+      stale: 30_000,
+    });
+    checkSignal(options.signal);
     const plan = store.transaction(() => {
-      const current = preparePlan(
-        store,
-        config,
-        preview.request,
-        options,
-        !config && !!options.lease,
-      );
-      if (current.preview.binding !== preview.binding)
+      const current = preparePlan(store, config, preview.request, options);
+      if (canonical(current.preview) !== canonical(preview))
         fail("STALE_VIEW", "Deletion preview is stale; choose it again");
       if (
         preview.request.kind === "selection" &&
@@ -1114,8 +1194,11 @@ export async function confirmHistoryDeletion(
       pendingCleanup: remaining,
     };
   } finally {
-    await releaseDatabase();
-    await releaseConfig?.();
+    try {
+      await releaseDatabase?.();
+    } finally {
+      await releaseConfig?.();
+    }
   }
 }
 
@@ -1137,6 +1220,8 @@ export async function retryDeletionCleanup(
     ensureUuid(value, "Deletion job ID"),
   );
   if (!unique.length) return pendingDeletions(store);
+  if (unique.length > maxUnits)
+    fail("DELETE_LIMIT", "Too many cleanup jobs were requested");
   const release = await lockfile.lock(store.paths.database, {
     retries: 0,
     stale: 30_000,

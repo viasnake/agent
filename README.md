@@ -1,18 +1,3 @@
-## 履歴の削除と保持
-
-履歴削除は自動では実行されません。`remove`、`remove-session`、`prune` は既定で
-preview を表示し、削除には `--write` が必要です。削除対象は inactive な会話と
-terminal run のメタデータ、およびその run 専用ディレクトリだけです。会話・run の
-JSON、本文、出典、fork lineage、boundary などに残る UUID 参照も保守的に検査し、
-外部から参照される単位は削除せず、選択削除では全選択を拒否します。
-
-削除はメタデータを一つの SQLite transaction で先に削除し、物理ディレクトリの削除
-に失敗した場合は bounded な pending cleanup job として返します。再試行は
-`cleanup-deletions --write <job-id>` のように明示した job ID に限られます。共有
-画像・準備済み文書・checkpoint blob、SQLite の残存ページ、外部バックアップは
-この slice の対象外であり、暗号学的消去も保証しません。pending job は backup の
-論理的な証拠として保存されますが、自動実行や import はされません。
-
 # Local Agent
 
 コード変更・調査・文書作成を続けて依頼できる、個人用の対話型ターミナル AI Agent です。コードは作業コピーで変更・検査し、差分を確認してから元のリポジトリへ適用します。
@@ -124,6 +109,20 @@ Git 添付の差分は保存された raw bytes を比較し、Git attributes・
 保存先は既存の所有ディレクトリ内に新しく作り、Agent 保存領域と全作業ディレクトリの外に置きます。権限はディレクトリ `0700`、ファイル `0600` です。SQLite の書込ロック中に整合した DB と参照ファイルを保存し、`backup.json` を最後に書きます。失敗時はこの操作で作った不完全な保存先を削除します。バックアップは既定で 512 MB・50,000 ファイルまで、メタデータは 100,000 行・64 MB までです。CLI の `--max-bytes`、`--max-files`、`--timeout-seconds` で保存処理の上限を指定できます（最大 5 GB・100,000 ファイル・120 秒、時間はローカル処理の境界で確認）。単一資料は 64 MB、設定は 4 MB までです。
 
 `agent backup-verify /保存先` はハッシュ・DB・資料参照の完全性をローカル検査し、復元や実行はしません。検査は内容の正しさ・署名・意味的品質を保証しません。履歴には private / restricted の本文や過去の除外済み資料も含まれ、手入力した秘密は除去されません。暗号化されていないため、共有用診断として渡さず、保存先の同期・共有にも注意してください。`auth/` を含む保存領域全体の手動コピーは、別途認証情報として保護する必要があります。
+
+## 履歴の削除と保持
+
+履歴削除は自動では実行されません。`remove`、`remove-session`、`prune` は既定で
+プレビューを表示し、削除には `--write` が必要です。対象は選択した閉じた会話と
+terminal run のメタデータ、およびその run 専用ディレクトリです。会話・run の
+JSON、本文、出典、fork lineage、boundary などに残る UUID 参照も保守的に調べます。
+外部から参照される単位は保持し、選択削除では選択全体を拒否します。
+
+メタデータは一つの SQLite transaction で先に削除します。物理削除に失敗した場合は
+保留中の cleanup job として表示し、`cleanup-deletions --write <job-id>` で明示した
+job ID だけを再試行できます。共有画像・準備済み文書・checkpoint blob、SQLite の
+残存ページ、外部バックアップは削除対象外です。暗号学的消去は保証しません。
+バックアップ内の pending job は記録として保存されますが、cleanup は実行されません。
 
 開発・検証方法は [docs/architecture.md](docs/architecture.md)、保守用 CLI は `agent --help` を参照してください。
 

@@ -13,7 +13,7 @@ import {
 } from "../history-deletion.js";
 
 const deletionWarning =
-  "メタデータを先に削除する bounded cleanup です。共有 image/document/checkpoint cache は残り、SQLite の残存ページや外部 backup に内容が残る場合があります。物理 cleanup は pending になり得ますが自動実行せず、暗号学的消去も保証しません。";
+  "メタデータを先に削除する限定的な処理です。共有画像・文書・checkpoint は残り、SQLite の残存ページや外部バックアップにも内容が残る場合があります。物理削除は保留になることがあり、自動再試行や暗号学的消去は行いません。";
 export function registerMaintenanceCommands(cli: CliContext): void {
   const { program, print, context, signal } = cli;
   program
@@ -102,11 +102,16 @@ export function registerMaintenanceCommands(cli: CliContext): void {
     .option("--write", "explicitly confirm the deletion")
     .action((runId: string, options) =>
       context(async (config, _p, store) => {
-        const preview = previewHistoryDeletion(store, config, {
-          kind: "selection",
-          conversationIds: [],
-          runIds: [runId],
-        });
+        const preview = previewHistoryDeletion(
+          store,
+          config,
+          {
+            kind: "selection",
+            conversationIds: [],
+            runIds: [runId],
+          },
+          { signal },
+        );
         if (!options.write) {
           print({
             ...preview,
@@ -115,9 +120,13 @@ export function registerMaintenanceCommands(cli: CliContext): void {
           });
           return;
         }
-        const result = await confirmHistoryDeletion(store, config, preview);
+        const result = await confirmHistoryDeletion(store, config, preview, {
+          signal,
+        });
         print({
           written: true,
+          metadataRemoved: true,
+          cleanupComplete: result.pendingCleanup.length === 0,
           ...result,
           warning: deletionWarning,
         });
@@ -131,11 +140,16 @@ export function registerMaintenanceCommands(cli: CliContext): void {
     .option("--write", "explicitly confirm the deletion")
     .action((sessionIds: string[], options) =>
       context(async (config, _p, store) => {
-        const preview = previewHistoryDeletion(store, config, {
-          kind: "selection",
-          conversationIds: sessionIds,
-          runIds: [],
-        });
+        const preview = previewHistoryDeletion(
+          store,
+          config,
+          {
+            kind: "selection",
+            conversationIds: sessionIds,
+            runIds: [],
+          },
+          { signal },
+        );
         if (!options.write) {
           print({
             ...preview,
@@ -144,9 +158,13 @@ export function registerMaintenanceCommands(cli: CliContext): void {
           });
           return;
         }
-        const result = await confirmHistoryDeletion(store, config, preview);
+        const result = await confirmHistoryDeletion(store, config, preview, {
+          signal,
+        });
         print({
           written: true,
+          metadataRemoved: true,
+          cleanupComplete: result.pendingCleanup.length === 0,
           ...result,
           warning: `${deletionWarning} cleanup-deletions --write <job-id> で明示retryします。`,
         });
@@ -162,10 +180,12 @@ export function registerMaintenanceCommands(cli: CliContext): void {
         if (options.dryRun && options.write)
           throw new Error("--dry-run and --write cannot be combined");
         const cutoff = Date.now() - config.retentionDays * 86400000;
-        const preview = previewHistoryDeletion(store, config, {
-          kind: "retention",
-          cutoff,
-        });
+        const preview = previewHistoryDeletion(
+          store,
+          config,
+          { kind: "retention", cutoff },
+          { signal },
+        );
         if (!options.write) {
           print({
             ...preview,
@@ -176,9 +196,13 @@ export function registerMaintenanceCommands(cli: CliContext): void {
           });
           return;
         }
-        const result = await confirmHistoryDeletion(store, config, preview);
+        const result = await confirmHistoryDeletion(store, config, preview, {
+          signal,
+        });
         print({
           written: true,
+          metadataRemoved: true,
+          cleanupComplete: result.pendingCleanup.length === 0,
           retentionDays: config.retentionDays,
           ...result,
           warning: `自動retentionではありません。${deletionWarning}`,
