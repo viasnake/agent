@@ -859,10 +859,12 @@ export class ManagedProcesses {
         processId: operationId,
         status: record.phase === "cleaned" ? "removed" : "cleanup-unresolved",
       };
+    if (!isId(inspection.job.Id))
+      throw generic("PROCESS_ENGINE", "Managed-process identity is invalid");
     return {
       processId: operationId,
       status: status(inspection.job),
-      containerId: record.containerId,
+      containerId: inspection.job.Id,
       exitCode: exitCode(inspection.job),
     };
   }
@@ -874,7 +876,9 @@ export class ManagedProcesses {
         "PROCESS_NOT_FOUND",
         "Managed process is unavailable; stop it to complete cleanup",
       );
-    const id = record.containerId!;
+    const id = inspection.job.Id;
+    if (!isId(id))
+      throw generic("PROCESS_ENGINE", "Managed-process identity is invalid");
     const result = await this.execute("podman", ["logs", "--tail=200", id], {
       env: this.env,
       timeoutMs: 10000,
@@ -1012,23 +1016,28 @@ export class ManagedProcesses {
   }
 
   async list(): Promise<Array<Record<string, unknown>>> {
+    let names: string[] = [];
     try {
       await this.assertPrivateDirectory(this.store.paths.runs, false);
       await this.assertPrivateDirectory(this.store.runDir(this.run.id), false);
       await this.assertPrivateDirectory(this.directory, false);
+      names = await readdir(this.directory);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    const operationMap = new Map(
+      this.operations()
+        .filter((entry) => entry.name === "process_start")
+        .map((entry) => [entry.id, entry] as const),
+    );
+    const operationIds = new Set(operationMap.keys());
+    for (const name of names)
+      if (name.endsWith(".json")) operationIds.add(name.slice(0, -5));
     const records: Array<Record<string, unknown>> = [];
-    for (const name of await readdir(this.directory)) {
-      if (!name.endsWith(".json")) continue;
-      const operationId = name.slice(0, -5);
+    for (const operationId of operationIds) {
+      const operation = operationMap.get(operationId);
       try {
         const record = await this.read(operationId, true);
-        const operation = this.operations().find(
-          (entry) => entry.id === operationId,
-        );
         records.push({
           processId: operationId,
           taskId: record.taskId,
@@ -1037,7 +1046,13 @@ export class ManagedProcesses {
           containerId: record.containerId,
         });
       } catch {
-        records.push({ processId: operationId, status: "cleanup-unresolved" });
+        records.push({
+          processId: operationId,
+          ...(operation ? { taskId: operation.task_id } : {}),
+          phase: "unknown",
+          lifecycle: operation?.status ?? "unknown",
+          status: "cleanup-unresolved",
+        });
       }
     }
     return records;

@@ -275,6 +275,45 @@ test("cancellation between create and start leaves a cleanable identity", async 
         ?.status,
       "completed",
     );
+    const missingFileOperation = f.store.prepare(
+      run,
+      task.id,
+      "process_start",
+      { command: "printf missing-file" },
+    );
+    const corruptOperation = f.store.prepare(run, task.id, "process_start", {
+      command: "printf corrupt-file",
+    });
+    const managedDirectory = join(f.store.runDir(run.id), "managed-processes");
+    await writeFile(
+      join(managedDirectory, `${corruptOperation}.json`),
+      "{corrupt",
+    );
+    const missingFileEntry = (await manager.list()).find(
+      (entry) => entry.processId === missingFileOperation,
+    );
+    assert.deepEqual(missingFileEntry, {
+      processId: missingFileOperation,
+      taskId: task.id,
+      phase: "unknown",
+      lifecycle: "prepared",
+      status: "cleanup-unresolved",
+    });
+    const corruptEntry = (await manager.list()).find(
+      (entry) => entry.processId === corruptOperation,
+    );
+    assert.deepEqual(corruptEntry, {
+      processId: corruptOperation,
+      taskId: task.id,
+      phase: "unknown",
+      lifecycle: "prepared",
+      status: "cleanup-unresolved",
+    });
+    await rm(managedDirectory, { recursive: true, force: true });
+    const missingDirectoryEntry = (await manager.list()).find(
+      (entry) => entry.processId === missingFileOperation,
+    );
+    assert.deepEqual(missingDirectoryEntry, missingFileEntry);
   } finally {
     await f.cleanup();
   }
@@ -325,6 +364,7 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
     let omitAnchor = false;
     let inspectError: string | undefined;
     let throwOnRm = false;
+    let logsArgs: string[] | undefined;
     const runner = async (_command: string, args: string[]) => {
       if (args[0] === "info")
         return { code: 0, stdout: "true\n", stderr: "", truncated: false };
@@ -385,13 +425,15 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
         started = true;
         return { code: 0, stdout: "", stderr: "", truncated: false };
       }
-      if (args[0] === "logs")
+      if (args[0] === "logs") {
+        logsArgs = args;
         return {
           code: 0,
           stdout: "managed log\n",
           stderr: "",
           truncated: false,
         };
+      }
       if (args[0] === "rm") {
         rmArgs = args;
         if (throwOnRm) throw new Error("synthetic removal failure");
@@ -438,6 +480,24 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
       `${operation}.json`,
     );
     const beforeRead = await readFile(recordPath);
+    const ambiguous = JSON.parse(beforeRead.toString()) as {
+      containerId?: string;
+      phase: string;
+    };
+    delete ambiguous.containerId;
+    ambiguous.phase = "intent";
+    await writeFile(recordPath, JSON.stringify(ambiguous));
+    const descriptorBeforeQueries = await readFile(recordPath);
+    const recoveredStatus = await manager.status(operation);
+    assert.equal(recoveredStatus.containerId, processId);
+    assert.deepEqual(await manager.logs(operation), {
+      processId: operation,
+      output: "managed log\n",
+      truncated: false,
+    });
+    assert.deepEqual(logsArgs, ["logs", "--tail=200", processId]);
+    assert.deepEqual(await readFile(recordPath), descriptorBeforeQueries);
+    await writeFile(recordPath, beforeRead);
     assert.equal(
       JSON.stringify(await manager.status(operation)).includes("running"),
       true,
@@ -513,6 +573,161 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
     });
     await recovered.stop(operation);
     assert.equal(contactedEngine, false);
+    assert.equal(
+      f.store.operations(run.id).find((entry) => entry.id === operation)
+        ?.status,
+      "completed",
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("managed cleanup refuses a lost lease before rm", async () => {
+  const config = testConfig();
+  config.execution.backend = "podman";
+  config.execution.image = `fixture@sha256:${"b".repeat(64)}`;
+  config.execution.managedProcesses = {
+    engineAnchor: {
+      containerId: anchorId,
+      token: "00000000-0000-4000-8000-000000000000",
+    },
+    maxSeconds: 60,
+    maxProcesses: 1,
+  };
+  const f = await fixture(new ScriptedRuntime(async () => completed()), config);
+  try {
+    const origin = await gitWorkspace(f.root, { "README.md": "fixture\n" });
+    const created = await f.harness.create({
+      kind: "coding",
+      objective: "verify lease-bound cleanup",
+      workspace: origin,
+      access: "change",
+    });
+    const run = f.store.claim(created.id);
+    const task = {
+      id: "writer",
+      role: "worker" as const,
+      objective: "run bounded process",
+      dependsOn: [],
+      write: true,
+      state: "pending" as const,
+      attempts: 0,
+    };
+    const command = "printf managed";
+    const operation = f.store.prepare(run, task.id, "process_start", {
+      command,
+    });
+    const processId = "d".repeat(64);
+    const name = `local-agent-process-${operation}`;
+    let exists = false;
+    let started = false;
+    let jobToken = "";
+    let loseLeaseBeforeRm = false;
+    let rmArgs: string[] | undefined;
+    const runner = async (_command: string, args: string[]) => {
+      if (args[0] === "info")
+        return { code: 0, stdout: "true\n", stderr: "", truncated: false };
+      if (args[0] === "inspect") {
+        const target = args[3];
+        const anchor = {
+          Id: anchorId,
+          Config: {
+            Labels: {
+              "local-agent.process-anchor":
+                config.execution.managedProcesses!.engineAnchor.token,
+            },
+          },
+        };
+        const job = {
+          Id: processId,
+          Name: name,
+          Config: {
+            Labels: {
+              "local-agent.process-token": jobToken,
+              "local-agent.process-run": run.id,
+              "local-agent.process-task": task.id,
+              "local-agent.process-operation": operation,
+            },
+          },
+          State: { Status: started ? "running" : "created", ExitCode: 0 },
+        };
+        if (target && exists) {
+          if (loseLeaseBeforeRm) {
+            loseLeaseBeforeRm = false;
+            f.store.release(run);
+          }
+          return {
+            code: 0,
+            stdout: JSON.stringify([anchor, job]),
+            stderr: "",
+            truncated: false,
+          };
+        }
+        return {
+          code: target ? 1 : 0,
+          stdout: JSON.stringify([anchor]),
+          stderr: target ? `no such container ${target}` : "",
+          truncated: false,
+        };
+      }
+      if (args[0] === "create") {
+        await readFile(
+          join(
+            f.store.runDir(run.id),
+            "managed-processes",
+            `${operation}.json`,
+          ),
+        );
+        exists = true;
+        jobToken = args
+          .find((arg) => arg.startsWith("--label=local-agent.process-token="))!
+          .split("=")
+          .at(-1)!;
+        return {
+          code: 0,
+          stdout: `${processId}\n`,
+          stderr: "",
+          truncated: false,
+        };
+      }
+      if (args[0] === "start") {
+        started = true;
+        return { code: 0, stdout: "", stderr: "", truncated: false };
+      }
+      if (args[0] === "rm") {
+        rmArgs = args;
+        exists = false;
+        return { code: 0, stdout: "", stderr: "", truncated: false };
+      }
+      throw new Error(`unexpected podman call: ${args.join(" ")}`);
+    };
+    const manager = new ManagedProcesses(config, f.store, run, task, runner);
+    await manager.prepare(task, operation, command);
+    f.store.operation(run, operation, "dispatched");
+    await manager.start(task, operation, command, new AbortController().signal);
+
+    loseLeaseBeforeRm = true;
+    await assert.rejects(() => manager.stop(operation), {
+      code: "STALE_ATTEMPT",
+    });
+    assert.equal(rmArgs, undefined);
+    assert.equal(
+      f.store.operations(run.id).find((entry) => entry.id === operation)
+        ?.status,
+      "dispatched",
+    );
+
+    const freshRun = f.store.claim(run.id);
+    const freshManager = new ManagedProcesses(
+      config,
+      f.store,
+      freshRun,
+      task,
+      runner,
+    );
+    await freshManager.stop(operation);
+    assert.deepEqual(rmArgs, ["rm", "--force", processId]);
     assert.equal(
       f.store.operations(run.id).find((entry) => entry.id === operation)
         ?.status,
