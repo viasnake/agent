@@ -55,7 +55,7 @@ export class Store {
     const version = this.db.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
-    if (version.user_version > 2)
+    if (version.user_version > 3)
       throw new AgentError(
         "SCHEMA_VERSION",
         "Database was created by a newer agent",
@@ -88,8 +88,8 @@ export class Store {
       CREATE INDEX IF NOT EXISTS requests_connection_time ON requests(quota_scope, at);
       CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);
     `);
-    if (version.user_version === 1) {
-      const backup = `${paths.database}.v1-${id()}.bak`;
+    if (version.user_version > 0 && version.user_version < 3) {
+      const backup = `${paths.database}.v${version.user_version}-${id()}.bak`;
       this.db.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
       chmodSync(backup, 0o600);
     }
@@ -113,12 +113,146 @@ export class Store {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS conversations_workspace ON conversations(workspace, updated_at);
       CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, seq);
-      PRAGMA user_version=2;
+      CREATE TABLE IF NOT EXISTS boundaries (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES conversations(id),
+        message_seq INTEGER NOT NULL, hash TEXT NOT NULL, payload TEXT NOT NULL,
+        state_available INTEGER NOT NULL, created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS message_boundaries (
+        session_id TEXT NOT NULL REFERENCES conversations(id),
+        message_seq INTEGER NOT NULL, boundary_id TEXT NOT NULL REFERENCES boundaries(id),
+        PRIMARY KEY(session_id, message_seq)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS boundary_artifacts (
+        boundary_id TEXT NOT NULL REFERENCES boundaries(id) ON DELETE CASCADE,
+        artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+        PRIMARY KEY(boundary_id, artifact_id)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS fork_lineages (
+        child_session_id TEXT PRIMARY KEY REFERENCES conversations(id),
+        parent_session_id TEXT NOT NULL REFERENCES conversations(id),
+        source_message_seq INTEGER NOT NULL, mode TEXT NOT NULL,
+        checkpoint_id TEXT, policy_floor TEXT NOT NULL, created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS boundaries_session_seq ON boundaries(session_id, message_seq);
+      PRAGMA user_version=3;
     `),
     );
   }
   close(): void {
     this.db.close();
+  }
+  saveBoundary(record: {
+    id: string;
+    sessionId: string;
+    messageSeq: number;
+    hash: string;
+    payload: string;
+    stateAvailable: boolean;
+    artifactIds: string[];
+  }): void {
+    this.db
+      .prepare("INSERT INTO boundaries VALUES (?,?,?,?,?,?,?)")
+      .run(
+        record.id,
+        record.sessionId,
+        record.messageSeq,
+        record.hash,
+        record.payload,
+        record.stateAvailable ? 1 : 0,
+        Date.now(),
+      );
+    this.db
+      .prepare("INSERT INTO message_boundaries VALUES (?,?,?)")
+      .run(record.sessionId, record.messageSeq, record.id);
+    for (const artifactId of record.artifactIds)
+      this.db
+        .prepare("INSERT INTO boundary_artifacts VALUES (?,?)")
+        .run(record.id, artifactId);
+  }
+  boundary(sessionId: string, messageSeq: number) {
+    return this.db
+      .prepare(
+        "SELECT b.id,b.session_id,b.message_seq,b.hash,b.payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND mb.message_seq=?",
+      )
+      .get(sessionId, messageSeq) as
+      | {
+          id: string;
+          session_id: string;
+          message_seq: number;
+          hash: string;
+          payload: string;
+          state_available: number;
+          created_at: number;
+        }
+      | undefined;
+  }
+  boundaryById(boundaryId: string) {
+    return this.db
+      .prepare(
+        "SELECT id,session_id,message_seq,hash,payload,state_available,created_at FROM boundaries WHERE id=?",
+      )
+      .get(boundaryId) as
+      | {
+          id: string;
+          session_id: string;
+          message_seq: number;
+          hash: string;
+          payload: string;
+          state_available: number;
+          created_at: number;
+        }
+      | undefined;
+  }
+  boundaries(sessionId: string, before = Number.MAX_SAFE_INTEGER, limit = 30) {
+    return this.db
+      .prepare(
+        "SELECT b.id,b.session_id,b.message_seq,b.hash,b.payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND b.message_seq<? ORDER BY b.message_seq DESC LIMIT ?",
+      )
+      .all(sessionId, before, limit) as Array<{
+      id: string;
+      session_id: string;
+      message_seq: number;
+      hash: string;
+      payload: string;
+      state_available: number;
+      created_at: number;
+    }>;
+  }
+  setLineage(value: {
+    childSessionId: string;
+    parentSessionId: string;
+    sourceMessageSeq: number;
+    mode: "state" | "history";
+    checkpointId?: string;
+    policyFloor: string;
+  }): void {
+    this.db
+      .prepare("INSERT INTO fork_lineages VALUES (?,?,?,?,?,?,?)")
+      .run(
+        value.childSessionId,
+        value.parentSessionId,
+        value.sourceMessageSeq,
+        value.mode,
+        value.checkpointId ?? null,
+        value.policyFloor,
+        Date.now(),
+      );
+  }
+  lineage(sessionId: string) {
+    return this.db
+      .prepare("SELECT * FROM fork_lineages WHERE child_session_id=?")
+      .get(sessionId) as
+      | {
+          child_session_id: string;
+          parent_session_id: string;
+          source_message_seq: number;
+          mode: "state" | "history";
+          checkpoint_id: string | null;
+          policy_floor: string;
+          created_at: number;
+        }
+      | undefined;
   }
   transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
@@ -644,6 +778,11 @@ export class Store {
       this.db
         .prepare(
           "SELECT 1 FROM source_links s JOIN artifacts a ON a.id=s.artifact_id WHERE a.run_id=?",
+        )
+        .get(runId) ||
+      this.db
+        .prepare(
+          "SELECT 1 FROM boundary_artifacts ba JOIN artifacts a ON a.id=ba.artifact_id WHERE a.run_id=?",
         )
         .get(runId)
     )

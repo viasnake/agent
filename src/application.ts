@@ -29,6 +29,7 @@ import {
   type DataClass,
   type RequestAccess,
   type ContextNote,
+  type ConversationContext,
   type WorkKind,
   type DocumentReference,
   type PreparedInput,
@@ -40,6 +41,7 @@ import {
 } from "./types.js";
 import {
   compactContext,
+  emptyConversationContext,
   normalizeConversationContext,
   readContextArchive,
 } from "./context.js";
@@ -90,6 +92,22 @@ import {
   type SearchPage,
   type SearchRequest,
 } from "./search.js";
+import {
+  captureBoundary,
+  assertPrefixBounds,
+  countTreeFiles,
+  forkHash,
+  pointFromMessage,
+  persistBoundary,
+  restoreBoundaryTree,
+  saveUnavailableBoundary,
+  stateForBoundary,
+  forkObjective,
+  type ForkMode,
+  type ForkPoint,
+  type ForkPreview,
+} from "./branching.js";
+import type { BoundaryState } from "./branching.js";
 
 export interface AppEvent {
   type: string;
@@ -1000,6 +1018,54 @@ export class Application extends EventEmitter {
     generation: number,
   ): Promise<void> {
     const signal = this.controller!.signal;
+    const lineage = this.store.lineage(this.session.id);
+    if (lineage) {
+      let floor: {
+        dataClass?: DataClass;
+        localOnly?: boolean;
+        excluded?: ConversationContext;
+      };
+      try {
+        floor = JSON.parse(lineage.policy_floor) as typeof floor;
+      } catch {
+        throw new AgentError("FORK_CORRUPT", "Branch policy floor is invalid");
+      }
+      const levels: DataClass[] = ["public", "private", "restricted"];
+      if (
+        floor.dataClass &&
+        levels.indexOf(floor.dataClass) > levels.indexOf(this.session.dataClass)
+      )
+        this.session.dataClass = floor.dataClass;
+      if (floor.localOnly) this.session.localOnly = true;
+      if (floor.excluded) {
+        const context = normalizeConversationContext(this.session.context);
+        context.excludedSourceIds = [
+          ...new Set([
+            ...(context.excludedSourceIds ?? []),
+            ...(floor.excluded.excludedSourceIds ?? []),
+          ]),
+        ];
+        context.excludedSourceHashes = [
+          ...new Set([
+            ...(context.excludedSourceHashes ?? []),
+            ...(floor.excluded.excludedSourceHashes ?? []),
+          ]),
+        ];
+        context.excludedSourceUrls = [
+          ...new Set([
+            ...(context.excludedSourceUrls ?? []),
+            ...(floor.excluded.excludedSourceUrls ?? []),
+          ]),
+        ];
+        context.redactedImageIds = [
+          ...new Set([
+            ...(context.redactedImageIds ?? []),
+            ...(floor.excluded.redactedImageIds ?? []),
+          ]),
+        ];
+        this.session.context = context;
+      }
+    }
     const previous = this.session.latestRunId
       ? this.store.get(this.session.latestRunId)
       : undefined;
@@ -1403,6 +1469,36 @@ export class Application extends EventEmitter {
       checks: kind === "coding" ? this.session.checks : [],
     });
     this.activeRunId = run.id;
+    const captureSession: Conversation = {
+      ...this.session,
+      latestRunId: run.id,
+      context: contextState,
+      ...(access === "change" && kind === "coding"
+        ? { workRunId: run.id }
+        : {}),
+      ...(access === "change" && (kind === "writing" || kind === "research")
+        ? { documentRunId: run.id }
+        : {}),
+    };
+    let userBoundary;
+    try {
+      userBoundary = await captureBoundary(
+        this.paths,
+        this.config,
+        this.store,
+        captureSession,
+        0,
+      );
+    } catch (error) {
+      userBoundary = saveUnavailableBoundary(
+        this.store,
+        captureSession,
+        0,
+        `保存状態を取得できませんでした: ${errorMessage(error)}`,
+        false,
+      );
+    }
+    let userMessageSeq = 0;
     this.store.transaction(() => {
       this.conversations.link(this.session, run);
       this.session.latestRunId = run.id;
@@ -1412,7 +1508,13 @@ export class Application extends EventEmitter {
       if (access === "change" && (kind === "writing" || kind === "research"))
         this.session.documentRunId = run.id;
       this.session.queue = this.session.queue.filter((q) => q.id !== input.id);
-      this.conversations.message(this.session, "user", input.text, run.id);
+      userMessageSeq = this.conversations.message(
+        this.session,
+        "user",
+        input.text,
+        run.id,
+      );
+      persistBoundary(this.store, userBoundary, userMessageSeq);
       this.conversations.save(this.session);
     });
     this.publish("run_started", { kind, mode: run.mode });
@@ -1669,8 +1771,20 @@ export class Application extends EventEmitter {
         return instructions.map((q) => q.text);
       },
       () => {
-        for (const item of instructions)
-          this.conversations.message(this.session, "user", item.text, run.id);
+        for (const item of instructions) {
+          const seq = this.conversations.message(
+            this.session,
+            "user",
+            item.text,
+            run.id,
+          );
+          saveUnavailableBoundary(
+            this.store,
+            this.session,
+            seq,
+            "実行中の同期指示には完全な保存状態がありません。",
+          );
+        }
         this.session.queue = this.session.queue.filter(
           (q) => !instructions.some((i) => i.id === q.id),
         );
@@ -1763,8 +1877,34 @@ export class Application extends EventEmitter {
             .filter(Boolean)
             .join("\n\n")
         : `${result.state}: ${result.reason ?? "未完了"}`;
-    this.conversations.message(this.session, "assistant", summary, result.id);
-    this.save();
+    let assistantBoundary;
+    try {
+      assistantBoundary = await captureBoundary(
+        this.paths,
+        this.config,
+        this.store,
+        this.session,
+        0,
+      );
+    } catch (error) {
+      assistantBoundary = saveUnavailableBoundary(
+        this.store,
+        this.session,
+        0,
+        `保存状態を取得できませんでした: ${errorMessage(error)}`,
+        false,
+      );
+    }
+    this.store.transaction(() => {
+      const assistantSeq = this.conversations.message(
+        this.session,
+        "assistant",
+        summary,
+        result.id,
+      );
+      persistBoundary(this.store, assistantBoundary, assistantSeq);
+      this.conversations.save(this.session);
+    });
     this.publish("run_finished", { run: result });
   }
   async resume(): Promise<void> {
@@ -2164,13 +2304,33 @@ export class Application extends EventEmitter {
   }
   private conversationArtifacts(): Map<
     string,
-    { artifact: Artifact; run: Run }
+    { artifact: Artifact; run: Run; saveSeq?: number }
   > {
-    const result = new Map<string, { artifact: Artifact; run: Run }>();
+    const result = new Map<
+      string,
+      { artifact: Artifact; run: Run; saveSeq?: number }
+    >();
+    const lineage = this.store.lineage(this.session.id);
+    const checkpoint = lineage?.checkpoint_id
+      ? this.store.boundaryById(lineage.checkpoint_id)
+      : undefined;
+    const savedOrder = new Map<string, number>();
+    if (checkpoint) {
+      const state = stateForBoundary(checkpoint);
+      for (const item of state.artifacts)
+        savedOrder.set(item.artifact.id, item.saveSeq);
+    }
     for (const runId of this.conversations.runs(this.session.id)) {
-      const run = this.store.get(runId);
-      for (const artifact of this.store.artifacts(runId))
-        result.set(artifact.id, { artifact, run });
+      for (const artifact of this.store.artifacts(runId)) {
+        const producer = this.store.get(artifact.runId);
+        result.set(artifact.id, {
+          artifact,
+          run: producer,
+          ...(savedOrder.has(artifact.id)
+            ? { saveSeq: savedOrder.get(artifact.id) }
+            : {}),
+        });
+      }
     }
     return result;
   }
@@ -2561,6 +2721,8 @@ export class Application extends EventEmitter {
           savedAt.set(detail.artifactId, row.seq);
       }
     }
+    for (const [artifactId, item] of authorized)
+      if (item.saveSeq !== undefined) savedAt.set(artifactId, item.saveSeq);
     const entries = [...authorized.values()]
       .filter(
         ({ artifact }) =>
@@ -3109,6 +3271,363 @@ export class Application extends EventEmitter {
   }
   history(before?: number) {
     return this.conversations.messages(this.session.id, before);
+  }
+  forkPoints(beforeSeq?: number): {
+    points: ForkPoint[];
+    nextBefore?: number;
+  } {
+    if (
+      beforeSeq !== undefined &&
+      (!Number.isSafeInteger(beforeSeq) || beforeSeq <= 0)
+    )
+      throw new AgentError("FORK_INPUT", "Message cursor is invalid");
+    const rows = this.store.db
+      .prepare(
+        "SELECT seq,role,substr(text,1,1200) AS text,at FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT 31",
+      )
+      .all(this.session.id, beforeSeq ?? Number.MAX_SAFE_INTEGER) as Array<{
+      seq: number;
+      role: string;
+      text: string;
+      at: number;
+    }>;
+    const page = rows.slice(0, 30);
+    return {
+      points: page.map((message) =>
+        pointFromMessage(
+          message,
+          this.store.boundary(this.session.id, message.seq),
+        ),
+      ),
+      ...(rows.length > 30 ? { nextBefore: page.at(-1)!.seq } : {}),
+    };
+  }
+  async previewFork(seq: number, mode: ForkMode): Promise<ForkPreview> {
+    this.idle();
+    if (mode !== "state" && mode !== "history")
+      throw new AgentError("FORK_INPUT", "Unknown fork mode");
+    if (!Number.isSafeInteger(seq) || seq <= 0)
+      throw new AgentError("FORK_INPUT", "Message sequence is invalid");
+    const message = this.store.db
+      .prepare(
+        "SELECT seq,role,substr(text,1,1200) AS text FROM messages WHERE session_id=? AND seq=?",
+      )
+      .get(this.session.id, seq) as
+      { seq: number; role: string; text: string } | undefined;
+    if (!message)
+      throw new AgentError("FORK_SCOPE", "Message is not in this conversation");
+    const boundary = this.store.boundary(this.session.id, seq);
+    if (mode === "state" && (!boundary || !boundary.state_available))
+      throw new AgentError(
+        "FORK_STATE",
+        "選択点には復元可能な保存状態がありません。履歴モードを選択してください。",
+      );
+    const stats = this.store.db
+      .prepare(
+        "SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(text AS BLOB))),0) AS bytes FROM messages WHERE session_id=? AND seq<=?",
+      )
+      .get(this.session.id, seq) as { count: number; bytes: number };
+    assertPrefixBounds(stats.count, stats.bytes);
+    const state = boundary ? stateForBoundary(boundary) : undefined;
+    const hash = boundary?.hash ?? sha256(canonical({ this: "history", seq }));
+    const binding = forkHash(
+      this.session.id,
+      seq,
+      mode,
+      hash,
+      this.generation,
+      this.session.workspace,
+      configHash(this.config),
+      canonical(this.session.context),
+    );
+    return {
+      sessionId: this.session.id,
+      seq,
+      mode,
+      binding,
+      messageCount: stats.count,
+      message: {
+        role: message.role,
+        excerpt: [...message.text].slice(0, 300).join(""),
+      },
+      stateAvailable: !!boundary?.state_available,
+      warnings: [
+        ...(mode === "history"
+          ? ["モデル・ツールの provider archive は元の会話にのみ残ります。"]
+          : []),
+        ...(!boundary
+          ? ["この履歴には保存状態がありません。履歴のみ分岐できます。"]
+          : []),
+      ],
+      savedWorkspaceFiles:
+        (state ? countTreeFiles(state.coding) : 0) +
+        (state ? countTreeFiles(state.document) : 0),
+      savedDocumentFiles: countTreeFiles(state?.document),
+    };
+  }
+  async forkConversation(
+    seq: number,
+    mode: ForkMode,
+    binding: string,
+    name?: string,
+  ): Promise<void> {
+    this.idle();
+    const preview = await this.previewFork(seq, mode);
+    if (preview.binding !== binding)
+      throw new AgentError("STALE_VIEW", "分岐の確認内容が古くなっています。");
+    const parent = this.session;
+    const boundary = this.store.boundary(parent.id, seq);
+    if (mode === "state" && (!boundary || !boundary.state_available))
+      throw new AgentError(
+        "FORK_STATE",
+        "選択点には復元可能な保存状態がありません。",
+      );
+    const state = boundary ? stateForBoundary(boundary) : undefined;
+    const hasState = !!boundary?.state_available;
+    const child = this.conversations.create(parent.workspace, {
+      dataClass:
+        state?.policy.dataClass === "restricted"
+          ? "restricted"
+          : state?.policy.dataClass === "private" ||
+              parent.dataClass === "private"
+            ? "private"
+            : parent.dataClass,
+      strategy: hasState ? state!.settings.strategy : this.config.defaults.mode,
+      checks: hasState
+        ? state!.settings.checks
+        : Object.keys(this.config.checks),
+    });
+    try {
+      child.name =
+        name?.trim().slice(0, 100) ||
+        `${(state?.settings.name ?? parent.name).slice(0, 80)} 分岐`;
+      child.kind = hasState ? state!.settings.kind : "auto";
+      child.model = hasState ? state!.settings.model : undefined;
+      child.reviewer = hasState ? state!.settings.reviewer : undefined;
+      child.localOnly = (state?.policy.localOnly ?? false) || parent.localOnly;
+      child.includeUntracked =
+        state?.settings.includeUntracked ?? parent.includeUntracked;
+      child.context = hasState
+        ? structuredClone(state!.context)
+        : emptyConversationContext();
+      child.context ??= emptyConversationContext();
+      const childContext = child.context;
+      if (state) {
+        const current = normalizeConversationContext(parent.context);
+        childContext.excludedSourceIds = [
+          ...new Set([
+            ...(childContext.excludedSourceIds ?? []),
+            ...(current.excludedSourceIds ?? []),
+          ]),
+        ];
+        childContext.excludedSourceHashes = [
+          ...new Set([
+            ...(childContext.excludedSourceHashes ?? []),
+            ...(current.excludedSourceHashes ?? []),
+          ]),
+        ];
+        childContext.excludedSourceUrls = [
+          ...new Set([
+            ...(childContext.excludedSourceUrls ?? []),
+            ...(current.excludedSourceUrls ?? []),
+          ]),
+        ];
+        const levels: DataClass[] = ["public", "private", "restricted"];
+        if (levels.indexOf(parent.dataClass) > levels.indexOf(child.dataClass))
+          child.dataClass = parent.dataClass;
+        child.localOnly ||= parent.localOnly;
+        child.images = hasState
+          ? structuredClone(state.images).filter(
+              (image) =>
+                !childContext.excludedSourceIds?.includes(image.id) &&
+                !childContext.excludedSourceHashes?.includes(image.sha256),
+            )
+          : [];
+      }
+      childContext.instructions = [];
+      child.queue = [];
+      child.draft = "";
+      child.access = "read-only";
+      const prefixStats = this.store.db
+        .prepare(
+          "SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(text AS BLOB))),0) AS bytes FROM messages WHERE session_id=? AND seq<=?",
+        )
+        .get(parent.id, seq) as { count: number; bytes: number };
+      assertPrefixBounds(prefixStats.count, prefixStats.bytes);
+      const prefix = this.conversations.messages(parent.id, seq + 1);
+      this.store.transaction(() => {
+        const copiedInstructions: ConversationContext["instructions"] = [];
+        for (const message of prefix) {
+          const inserted = this.store.db
+            .prepare(
+              "INSERT INTO messages(session_id,role,text,run_id,at) VALUES (?,?,?,?,?)",
+            )
+            .run(child.id, message.role, message.text, null, message.at);
+          const copied = Number(inserted.lastInsertRowid);
+          copiedInstructions.push({
+            seq: copied,
+            role: message.role,
+            text: message.text,
+          });
+          const source = this.store.boundary(parent.id, message.seq);
+          if (source) {
+            const copiedBoundary = {
+              ...source,
+              id: id(),
+              session_id: child.id,
+              message_seq: copied,
+            };
+            const artifacts = stateForBoundary(source).artifacts.map(
+              ({ artifact }) => artifact.id,
+            );
+            this.store.saveBoundary({
+              id: copiedBoundary.id,
+              sessionId: child.id,
+              messageSeq: copied,
+              hash: source.hash,
+              payload: source.payload,
+              stateAvailable: !!source.state_available,
+              artifactIds: artifacts,
+            });
+          }
+        }
+        childContext.instructions = copiedInstructions;
+        child.lineage = {
+          sourceConversationId: parent.id,
+          sourceMessageSeq: seq,
+          mode,
+          ...(boundary && mode === "state"
+            ? { checkpointId: boundary.id }
+            : {}),
+        };
+        this.conversations.save(child);
+        this.store.setLineage({
+          childSessionId: child.id,
+          parentSessionId: parent.id,
+          sourceMessageSeq: seq,
+          mode,
+          checkpointId: boundary && mode === "state" ? boundary.id : undefined,
+          policyFloor: canonical({
+            dataClass: child.dataClass,
+            localOnly: child.localOnly,
+            excluded: child.context,
+          }),
+        });
+      });
+      if (state && mode === "state") {
+        const makeSeed = async (
+          treeSnapshot: BoundaryState["coding"],
+          sourceRunId: string | undefined,
+          kind: "coding" | "writing",
+        ) => {
+          if (!treeSnapshot) return undefined;
+          const source = sourceRunId ? this.store.get(sourceRunId) : undefined;
+          if (!source)
+            throw new AgentError("FORK_CORRUPT", "Seed source run is missing");
+          const seed: Run = {
+            ...structuredClone(source),
+            id: id(),
+            conversationId: child.id,
+            parentRunId: undefined,
+            objective: forkObjective,
+            kind,
+            state: "created",
+            prepared: true,
+            tasks: [],
+            inputs: [],
+            requests: undefined,
+            operations: undefined,
+            previousSessions: undefined,
+            contextState: undefined,
+            context: undefined,
+            access: "read-only",
+            reason: undefined,
+            lastFailureFingerprint: undefined,
+            elapsedMs: 0,
+            planAttempts: 0,
+            repairAttempts: 0,
+            mustKeep: [],
+            forkCheckpointId: boundary!.id,
+            images: structuredClone(state.images),
+            preparedInputs: structuredClone(state.preparedInputs),
+            constraints: structuredClone(state.context.constraints),
+            compactions: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          } as Run;
+          this.store.create(seed);
+          this.store.db
+            .prepare("INSERT INTO conversation_runs VALUES (?,?)")
+            .run(child.id, seed.id);
+          await restoreBoundaryTree(
+            this.paths,
+            this.store.runDir(seed.id),
+            treeSnapshot,
+          );
+          for (const item of state.artifacts)
+            this.store.db
+              .prepare("INSERT OR IGNORE INTO source_links VALUES (?,?)")
+              .run(seed.id, item.artifact.id);
+          return seed.id;
+        };
+        child.workRunId = await makeSeed(
+          state.coding,
+          state.codingRunId,
+          "coding",
+        );
+        child.documentRunId = await makeSeed(
+          state.document,
+          state.documentRunId,
+          "writing",
+        );
+        child.contextRunId = undefined;
+        child.latestRunId = undefined;
+        child.appliedRunId = undefined;
+        this.conversations.save(child);
+      }
+      this.conversations.release(parent.id);
+      this.session = this.conversations.acquire(child.id);
+      ++this.generation;
+      this.publish("session");
+    } catch (error) {
+      const runIds = this.conversations.runs(child.id);
+      this.conversations.release(child.id);
+      this.store.transaction(() => {
+        this.store.db
+          .prepare("DELETE FROM message_boundaries WHERE session_id=?")
+          .run(child.id);
+        this.store.db
+          .prepare("DELETE FROM boundaries WHERE session_id=?")
+          .run(child.id);
+        this.store.db
+          .prepare("DELETE FROM fork_lineages WHERE child_session_id=?")
+          .run(child.id);
+        for (const runId of runIds) {
+          this.store.db
+            .prepare("DELETE FROM source_links WHERE run_id=?")
+            .run(runId);
+          this.store.db
+            .prepare("DELETE FROM conversation_runs WHERE run_id=?")
+            .run(runId);
+          this.store.db.prepare("DELETE FROM runs WHERE id=?").run(runId);
+        }
+        this.store.db
+          .prepare("DELETE FROM messages WHERE session_id=?")
+          .run(child.id);
+        this.store.db
+          .prepare("DELETE FROM conversations WHERE id=?")
+          .run(child.id);
+      });
+      await Promise.all(
+        runIds.map((runId) =>
+          rm(this.store.runDir(runId), {
+            recursive: true,
+            force: true,
+          }),
+        ),
+      );
+      throw error;
+    }
   }
   async search(request: SearchRequest): Promise<SearchPage> {
     this.idle();

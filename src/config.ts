@@ -157,6 +157,7 @@ export interface Paths {
   config: string;
   database: string;
   runs: string;
+  checkpoints: string;
   auth: string;
   attachments: string;
 }
@@ -167,6 +168,7 @@ export function paths(home?: string): Paths {
     config: join(root, "config.yaml"),
     database: join(root, "state.sqlite"),
     runs: join(root, "runs"),
+    checkpoints: join(root, "checkpoints"),
     auth: join(root, "auth"),
     attachments: join(root, "attachments"),
   };

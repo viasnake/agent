@@ -814,7 +814,7 @@ test("version-one database migration preserves runs and writes a consistent back
           user_version: number;
         }
       ).user_version,
-      2,
+      3,
     );
     assert.ok(
       (await readdir(f.p.home)).some(

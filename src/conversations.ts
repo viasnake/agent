@@ -53,6 +53,12 @@ export interface Conversation {
   localOnly: boolean;
   includeUntracked: boolean;
   compacted?: boolean;
+  lineage?: {
+    sourceConversationId: string;
+    sourceMessageSeq: number;
+    mode: "state" | "history";
+    checkpointId?: string;
+  };
   handoffDigest?: string;
   handoff?: string;
   images?: ImageReference[];
@@ -166,12 +172,13 @@ export class Conversations {
     role: string,
     text: string,
     runId?: string,
-  ): void {
-    this.store.db
+  ): number {
+    const result = this.store.db
       .prepare(
         "INSERT INTO messages(session_id,role,text,run_id,at) VALUES (?,?,?,?,?)",
       )
       .run(session.id, role, text, runId ?? null, Date.now());
+    return Number(result.lastInsertRowid);
   }
   messages(
     sessionId: string,
@@ -189,6 +196,16 @@ export class Conversations {
   private normalize(session: Conversation): Conversation {
     session.context = normalizeConversationContext(session.context);
     session.access ??= "read-only";
+    const lineage = this.store.lineage(session.id);
+    if (lineage)
+      session.lineage = {
+        sourceConversationId: lineage.parent_session_id,
+        sourceMessageSeq: lineage.source_message_seq,
+        mode: lineage.mode,
+        ...(lineage.checkpoint_id
+          ? { checkpointId: lineage.checkpoint_id }
+          : {}),
+      };
     return session;
   }
   runs(sessionId: string): string[] {

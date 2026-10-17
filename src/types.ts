@@ -191,6 +191,7 @@ export interface Run {
   planAttempts: number;
   repairAttempts: number;
   lastFailureFingerprint?: string;
+  forkCheckpointId?: string;
 }
 export interface Artifact {
   id: string;

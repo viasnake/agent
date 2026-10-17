@@ -427,6 +427,20 @@ export class Harness {
           "SOURCE",
           "Source references must belong to this conversation",
         );
+      if (linkedRun.forkCheckpointId) {
+        const lineage = options.conversationId
+          ? this.store.lineage(options.conversationId)
+          : undefined;
+        if (
+          !lineage ||
+          lineage.child_session_id !== options.conversationId ||
+          lineage.checkpoint_id !== linkedRun.forkCheckpointId
+        )
+          throw new AgentError(
+            "SOURCE",
+            "Branch checkpoint must remain owned by its child conversation",
+          );
+      }
       if (
         ["public", "private", "restricted"].indexOf(run.dataClass) <
           ["public", "private", "restricted"].indexOf(linkedRun.dataClass) ||
@@ -696,6 +710,11 @@ export class Harness {
     acknowledgeInstructions: () => void = () => {},
   ): Promise<Run> {
     let run = this.store.get(runId);
+    if (run.forkCheckpointId)
+      throw new AgentError(
+        "FORK_SEED",
+        "保存状態復元シードは推論・実行に使用できません。",
+      );
     if (run.configHash !== configHash(this.config))
       throw new AgentError(
         "POLICY_CHANGED",

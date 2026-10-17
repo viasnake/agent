@@ -490,7 +490,7 @@ function candidateRows(
       case "artifacts":
         return context.store.db
           .prepare(
-            "SELECT a.rowid AS cursor,c.id AS conversationId,a.run_id AS runId,a.id AS id FROM artifacts a JOIN conversation_runs cr ON cr.run_id=a.run_id JOIN conversations c ON c.id=cr.session_id WHERE c.workspace=? AND (? IS NULL OR c.id=?) AND a.rowid>? AND json_extract(a.payload,'$.kind') <> 'source-raw' ORDER BY a.rowid LIMIT 101",
+            "SELECT a.rowid AS cursor,MIN(c.id) AS conversationId,a.run_id AS runId,a.id AS id FROM artifacts a JOIN conversations c ON c.workspace=? WHERE (? IS NULL OR c.id=?) AND a.rowid>? AND json_extract(a.payload,'$.kind') <> 'source-raw' AND (EXISTS (SELECT 1 FROM conversation_runs cr WHERE cr.session_id=c.id AND cr.run_id=a.run_id) OR EXISTS (SELECT 1 FROM source_links sl JOIN conversation_runs cr2 ON cr2.run_id=sl.run_id WHERE cr2.session_id=c.id AND sl.artifact_id=a.id)) GROUP BY a.rowid ORDER BY a.rowid LIMIT 101",
           )
           .all(context.workspace, scope, scope, after);
       case "files":
@@ -1072,9 +1072,9 @@ async function readArtifact(
 ): Promise<{ title: string; text: string; hash: string }> {
   const row = context.store.db
     .prepare(
-      "SELECT CASE WHEN length(CAST(a.payload AS BLOB))<=? THEN a.payload END AS payload,length(CAST(a.payload AS BLOB)) AS bytes,c.id AS conversationId FROM artifacts a JOIN conversation_runs cr ON cr.run_id=a.run_id JOIN conversations c ON c.id=cr.session_id WHERE a.id=? AND c.workspace=?",
+      "SELECT CASE WHEN length(CAST(a.payload AS BLOB))<=? THEN a.payload END AS payload,length(CAST(a.payload AS BLOB)) AS bytes,c.id AS conversationId FROM artifacts a JOIN conversations c ON c.workspace=? AND c.id=? WHERE a.id=? AND (EXISTS (SELECT 1 FROM conversation_runs cr WHERE cr.session_id=c.id AND cr.run_id=a.run_id) OR EXISTS (SELECT 1 FROM source_links sl JOIN conversation_runs cr2 ON cr2.run_id=sl.run_id WHERE cr2.session_id=c.id AND sl.artifact_id=a.id)) GROUP BY a.rowid",
     )
-    .get(maxRecordBytes, hit.id, context.workspace) as
+    .get(maxRecordBytes, context.workspace, hit.conversationId, hit.id) as
     | { payload: string | null; bytes: number; conversationId: string }
     | undefined;
   if (!row || row.conversationId !== hit.conversationId)
