@@ -8,6 +8,7 @@ const resumableTaskErrors = new Set([
   "NO_MODEL",
   "PROVIDER",
   "REQUEST_TIMEOUT",
+  "RUNTIME_SESSION",
 ]);
 const inputErrors = new Set([
   ...resumableTaskErrors,

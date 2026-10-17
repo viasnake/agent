@@ -774,6 +774,12 @@ test("TaskExecutor finally cleans a dispatched process after cancellation", asyn
   };
   const controller = new AbortController();
   const runtime = {
+    contract: {
+      version: 1 as const,
+      context: "messages-v1" as const,
+      tools: true,
+      images: false,
+    },
     async run(request: {
       tools: Array<{
         name: string;
@@ -783,13 +789,28 @@ test("TaskExecutor finally cleans a dispatched process after cancellation", asyn
         ): Promise<string>;
       }>;
       signal: AbortSignal;
+      beforeRequest(inputBytes: number): string;
+      afterRequest(
+        reservationId: string,
+        usage: {
+          input: number | null;
+          output: number | null;
+          costUsd: number | null;
+        },
+      ): void;
     }) {
       const tool = request.tools.find(
         (entry) => entry.name === "process_start",
       );
       assert.ok(tool);
+      const reservation = request.beforeRequest(1);
       await tool.execute({ command: "sleep 30" }, request.signal);
       controller.abort();
+      request.afterRequest(reservation, {
+        input: null,
+        output: null,
+        costUsd: null,
+      });
       throw new Error("synthetic provider failure after cancellation");
     },
     async close() {},

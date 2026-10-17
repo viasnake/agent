@@ -255,8 +255,10 @@ export class Planner {
     if (run.mode === "single")
       for (const task of plannedTasks) {
         const previous = run.previousSessions?.[task.id];
-        if (previous && previous.model === task.model)
+        if (previous && previous.model === task.model) {
           task.sessionFile = previous.file;
+          task.sessionFormat = previous.format;
+        }
       }
     this.requireRequestBudget(run, plannedTasks.length);
     run.tasks = plannedTasks;
@@ -361,6 +363,7 @@ export class Planner {
       nextParent.state = "pending";
       nextParent.result = undefined;
       nextParent.sessionFile = undefined;
+      nextParent.sessionFormat = undefined;
       admissions.push({
         parentId: parent.id,
         childIds: pendingChildren.map((task) => task.id),

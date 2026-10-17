@@ -420,6 +420,7 @@ test("user context notes and constraints survive a conversation restart without 
 
 test("status keeps context estimates separate from unknown provider usage", async () => {
   const runtime: Runtime = {
+    contract: new ScriptedRuntime(async () => "unused").contract,
     async run(request) {
       request.signal.throwIfAborted();
       const reservation = request.beforeRequest(

@@ -51,6 +51,14 @@ export function isolatedLoader(system: string): ResourceLoader {
   };
 }
 export class PiRuntime implements Runtime {
+  readonly contract = {
+    version: 1 as const,
+    context: "messages-v1" as const,
+    tools: true,
+    images: true,
+    sessionFormat: "pi-jsonl-v1",
+    acceptsLegacySessions: true,
+  };
   constructor(
     readonly config: Config,
     readonly paths: Paths,

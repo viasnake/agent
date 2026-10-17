@@ -590,6 +590,7 @@ export async function confirmTaskModelChange(
             candidate.state = "pending";
             candidate.result = undefined;
             candidate.sessionFile = undefined;
+            candidate.sessionFormat = undefined;
             if (run.previousSessions) delete run.previousSessions[candidate.id];
           }
         const changes = [...(run.modelChanges ?? [])];

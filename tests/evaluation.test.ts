@@ -217,6 +217,7 @@ test("input drift invalidates all paired measurements and does not send the chan
 test("provider-unknown usage and failed attempts remain unknown rather than zero", async () => {
   let calls = 0;
   const runtime: Runtime = {
+    contract: new ScriptedRuntime(async () => "unused").contract,
     async run(request) {
       const reservation = request.beforeRequest(
         Buffer.byteLength(request.objective),

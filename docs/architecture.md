@@ -4,6 +4,8 @@
 
 The application is one foreground Node.js process. Pi owns model conversations; the application owns permissions, budgets, validation and success state.
 
+Inference adapters implement the [versioned runtime contract](runtime-contract.md). The host checks capabilities, accounting, cancellation and native-session format compatibility; native SDK transcripts are never implicitly handed to an incompatible adapter.
+
 | Code                                                                        | Responsibility                                                                                     |
 | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `src/tui/`, `src/cli.ts`                                                    | Interactive entry, Pi terminal components, searchable dialogs and lazy-loaded maintenance commands |

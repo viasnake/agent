@@ -34,6 +34,7 @@ export interface Task {
   attempts: number;
   result?: TaskResult;
   sessionFile?: string;
+  sessionFormat?: string;
   resultFormat?: "text" | "structured";
   purpose?: "synthesis";
   delegatedBy?: string;
@@ -198,7 +199,10 @@ export interface Run {
   constraints?: string[];
   access?: RequestAccess;
   compactions?: ContextCompaction[];
-  previousSessions?: Record<string, { model: string; file: string }>;
+  previousSessions?: Record<
+    string,
+    { model: string; file: string; format?: string }
+  >;
   prepared: boolean;
   id: string;
   objective: string;
@@ -311,7 +315,7 @@ export interface RuntimeRequest {
     context: unknown,
     signal: AbortSignal,
   ) => Promise<unknown>;
-  onSession(file: string): void;
+  onSession(file: string, format?: string): void;
   beforeRequest(
     inputBytes: number,
     imageCount?: number,
@@ -321,8 +325,17 @@ export interface RuntimeRequest {
   onEvent(type: string, detail: Record<string, unknown>): void;
 }
 export interface Runtime {
+  readonly contract: RuntimeContract;
   run(request: RuntimeRequest): Promise<string>;
   close(): Promise<void>;
+}
+export interface RuntimeContract {
+  version: 1;
+  context: "messages-v1";
+  tools: boolean;
+  images: boolean;
+  sessionFormat?: string;
+  acceptsLegacySessions?: boolean;
 }
 export class AgentError extends Error {
   constructor(

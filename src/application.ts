@@ -1358,6 +1358,7 @@ export class Application extends EventEmitter {
           previousSessions[task.id] = {
             model: task.model,
             file: task.sessionFile,
+            format: task.sessionFormat,
           };
     const parentRunId =
       access !== "change"
@@ -3327,7 +3328,7 @@ export class Application extends EventEmitter {
     this.session.handoff = handoff;
     this.save();
     this.publish("notice", {
-      text: "引き継ぎ情報を保存しました。次の依頼から新しい Pi セッションを使います。原文・出典・検証記録は保持しています。",
+      text: "引き継ぎ情報を保存しました。次の依頼から新しい推論セッションを使います。原文・出典・検証記録は保持しています。",
     });
   }
   async saveConfiguration(input: unknown): Promise<void> {
