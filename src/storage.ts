@@ -182,7 +182,7 @@ export class Store {
   boundary(sessionId: string, messageSeq: number) {
     return this.db
       .prepare(
-        "SELECT b.id,b.session_id,b.message_seq,b.hash,b.payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND mb.message_seq=?",
+        "SELECT b.id,b.session_id,mb.message_seq,b.hash,CASE WHEN length(CAST(b.payload AS BLOB))<=4194304 THEN b.payload ELSE '' END AS payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND mb.message_seq=?",
       )
       .get(sessionId, messageSeq) as
       | {
@@ -199,7 +199,7 @@ export class Store {
   boundaryById(boundaryId: string) {
     return this.db
       .prepare(
-        "SELECT id,session_id,message_seq,hash,payload,state_available,created_at FROM boundaries WHERE id=?",
+        "SELECT id,session_id,message_seq,hash,CASE WHEN length(CAST(payload AS BLOB))<=4194304 THEN payload ELSE '' END AS payload,state_available,created_at FROM boundaries WHERE id=?",
       )
       .get(boundaryId) as
       | {
@@ -216,7 +216,7 @@ export class Store {
   boundaries(sessionId: string, before = Number.MAX_SAFE_INTEGER, limit = 30) {
     return this.db
       .prepare(
-        "SELECT b.id,b.session_id,mb.message_seq,b.hash,b.payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND mb.message_seq<? ORDER BY mb.message_seq DESC LIMIT ?",
+        "SELECT b.id,b.session_id,mb.message_seq,b.hash,CASE WHEN length(CAST(b.payload AS BLOB))<=4194304 THEN b.payload ELSE '' END AS payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND mb.message_seq<? ORDER BY mb.message_seq DESC LIMIT ?",
       )
       .all(sessionId, before, limit) as Array<{
       id: string;

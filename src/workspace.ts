@@ -1,17 +1,24 @@
 import {
-  readdir,
   lstat,
   mkdir,
   readFile,
   chmod,
   rm,
   copyFile,
+  opendir,
 } from "node:fs/promises";
 import { join, dirname, relative, resolve } from "node:path";
 import { createTwoFilesPatch } from "diff";
 import { AgentError } from "./types.js";
 import type { Config } from "./config.js";
-import { atomicWrite, canonical, safePath, sha256, within } from "./util.js";
+import {
+  atomicWrite,
+  canonical,
+  readBoundedFile,
+  safePath,
+  sha256,
+  within,
+} from "./util.js";
 import { cleanEnvironment, runProcess } from "./process.js";
 
 export interface FileEntry {
@@ -56,11 +63,24 @@ export function secretPath(path: string): boolean {
 export async function inventory(
   root: string,
   maxBytes: number,
+  bounds: { maxFiles?: number; deadline?: number } = {},
 ): Promise<Record<string, FileEntry>> {
   const files: Record<string, FileEntry> = {};
   let total = 0;
+  let visited = 0;
+  let count = 0;
   async function walk(directory: string): Promise<void> {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+    for await (const entry of await opendir(directory)) {
+      if (Date.now() > (bounds.deadline ?? Infinity))
+        throw new AgentError(
+          "WORKSPACE_TIMEOUT",
+          "Workspace inventory timed out",
+        );
+      if (++visited > (bounds.maxFiles ?? Infinity) * 2)
+        throw new AgentError(
+          "WORKSPACE_SIZE",
+          "Workspace has too many entries",
+        );
       const path = join(directory, entry.name),
         rel = relative(root, path);
       if (secretPath(rel))
@@ -80,6 +100,11 @@ export async function inventory(
         );
       if (stat.isDirectory()) await walk(path);
       else {
+        if (++count > (bounds.maxFiles ?? Infinity))
+          throw new AgentError(
+            "WORKSPACE_SIZE",
+            "Workspace has too many files",
+          );
         total += stat.size;
         if (total > maxBytes)
           throw new AgentError(
@@ -87,7 +112,9 @@ export async function inventory(
             "Workspace exceeds its configured byte limit",
           );
         files[rel] = {
-          hash: sha256(await readFile(path)),
+          hash: sha256(
+            await readBoundedFile(path, maxBytes, { expectedBytes: stat.size }),
+          ),
           mode: stat.mode & 0o777,
           bytes: stat.size,
         };

@@ -42,6 +42,7 @@ export interface Conversation {
   documentRunId?: string;
   contextRunId?: string;
   appliedRunId?: string;
+  appliedBoundaryId?: string;
   draft: string;
   queue: PendingInput[];
   model?: string;

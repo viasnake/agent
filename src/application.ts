@@ -69,7 +69,7 @@ import {
 } from "./images.js";
 import { modelCandidates } from "./policy.js";
 import { endpoint } from "./runtime/providers.js";
-import { secretPath, workspaceDiff } from "./workspace.js";
+import { sanitizeWorkCopy, secretPath, workspaceDiff } from "./workspace.js";
 import {
   loadPreparedInput,
   maxDocumentBytes,
@@ -103,6 +103,12 @@ import {
   saveUnavailableBoundary,
   stateForBoundary,
   forkObjective,
+  forkPolicy,
+  lineagePolicy,
+  safetyContext,
+  checkpointArtifacts,
+  prefixDigest as digestPrefix,
+  verifyBoundaryState,
   type ForkMode,
   type ForkPoint,
   type ForkPreview,
@@ -351,17 +357,25 @@ export class Application extends EventEmitter {
     localOnly: boolean;
   } {
     const levels: DataClass[] = ["public", "private", "restricted"];
+    const floor = lineagePolicy(this.store, this.session.id);
+    const base =
+      floor &&
+      levels.indexOf(floor.dataClass) > levels.indexOf(this.session.dataClass)
+        ? floor.dataClass
+        : this.session.dataClass;
     const dataClass = images.reduce<DataClass>(
       (current, ref) =>
         levels.indexOf(ref.dataClass ?? "public") > levels.indexOf(current)
           ? (ref.dataClass ?? "public")
           : current,
-      this.session.dataClass,
+      base,
     );
     return {
       dataClass,
       localOnly:
-        this.session.localOnly || images.some((ref) => ref.localOnly === true),
+        this.session.localOnly ||
+        !!floor?.localOnly ||
+        images.some((ref) => ref.localOnly === true),
     };
   }
   private async snapshotInput(text: string): Promise<InputSnapshot> {
@@ -1018,18 +1032,8 @@ export class Application extends EventEmitter {
     generation: number,
   ): Promise<void> {
     const signal = this.controller!.signal;
-    const lineage = this.store.lineage(this.session.id);
-    if (lineage) {
-      let floor: {
-        dataClass?: DataClass;
-        localOnly?: boolean;
-        excluded?: ConversationContext;
-      };
-      try {
-        floor = JSON.parse(lineage.policy_floor) as typeof floor;
-      } catch {
-        throw new AgentError("FORK_CORRUPT", "Branch policy floor is invalid");
-      }
+    const floor = lineagePolicy(this.store, this.session.id);
+    if (floor) {
       const levels: DataClass[] = ["public", "private", "restricted"];
       if (
         floor.dataClass &&
@@ -1476,10 +1480,6 @@ export class Application extends EventEmitter {
         ? { workRunId: run.id }
         : {}),
       ...(access === "change" && (kind === "writing" || kind === "research")
-        ? { documentRunId: run.id }
-        : {}),
-      ...(kind === "coding" && run.workspace ? { workRunId: run.id } : {}),
-      ...(kind === "writing" || kind === "research"
         ? { documentRunId: run.id }
         : {}),
     };
@@ -2073,13 +2073,42 @@ export class Application extends EventEmitter {
       );
       this.session.appliedRunId = current.runId;
       this.session.workRunId = undefined;
-      this.conversations.message(
-        this.session,
-        "system",
-        `適用完了: ${current.files.join(", ")}`,
-        current.runId,
-      );
-      this.save();
+      let boundary;
+      try {
+        boundary = await captureBoundary(
+          this.paths,
+          this.config,
+          this.store,
+          this.session,
+          0,
+          undefined,
+          {
+            applied: true,
+            visibleRunIds: this.session.latestRunId
+              ? [this.session.latestRunId]
+              : [],
+          },
+        );
+      } catch (error) {
+        boundary = saveUnavailableBoundary(
+          this.store,
+          this.session,
+          0,
+          `適用後の状態を保存できませんでした: ${errorMessage(error)}`,
+          false,
+        );
+      }
+      this.store.transaction(() => {
+        const seq = this.conversations.message(
+          this.session,
+          "system",
+          `適用完了: ${current.files.join(", ")}`,
+          current.runId,
+        );
+        persistBoundary(this.store, boundary, seq);
+        this.session.appliedBoundaryId = boundary.id;
+        this.conversations.save(this.session);
+      });
       this.publish("applied", { result });
     })().finally(() => {
       this.busy = false;
@@ -2311,31 +2340,34 @@ export class Application extends EventEmitter {
   }
   private conversationArtifacts(): Map<
     string,
-    { artifact: Artifact; run: Run; saveSeq?: number }
+    {
+      artifact: Artifact;
+      run: Pick<Run, "id" | "state" | "parentRunId">;
+      saveSeq?: number;
+    }
   > {
     const result = new Map<
       string,
-      { artifact: Artifact; run: Run; saveSeq?: number }
+      {
+        artifact: Artifact;
+        run: Pick<Run, "id" | "state" | "parentRunId">;
+        saveSeq?: number;
+      }
     >();
-    const lineage = this.store.lineage(this.session.id);
-    const checkpoint = lineage?.checkpoint_id
-      ? this.store.boundaryById(lineage.checkpoint_id)
-      : undefined;
-    const savedOrder = new Map<string, number>();
-    if (checkpoint) {
-      const state = stateForBoundary(checkpoint);
-      for (const item of state.artifacts)
-        savedOrder.set(item.artifact.id, item.saveSeq);
-    }
+    const frozen = checkpointArtifacts(this.store, this.session.id);
     for (const runId of this.conversations.runs(this.session.id)) {
       for (const artifact of this.store.artifacts(runId)) {
-        const producer = this.store.get(artifact.runId);
+        const captured = frozen.get(artifact.id);
+        if (captured && canonical(captured.artifact) !== canonical(artifact))
+          throw new AgentError(
+            "FORK_CORRUPT",
+            "Captured artifact metadata changed",
+          );
+        const producer = captured?.producer ?? this.store.get(artifact.runId);
         result.set(artifact.id, {
           artifact,
           run: producer,
-          ...(savedOrder.has(artifact.id)
-            ? { saveSeq: savedOrder.get(artifact.id) }
-            : {}),
+          ...(captured ? { saveSeq: captured.saveSeq } : {}),
         });
       }
     }
@@ -2366,6 +2398,12 @@ export class Application extends EventEmitter {
       ...(this.session.images ?? []),
       ...this.session.queue.flatMap((item) => item.images ?? []),
     ];
+    const checkpointId = this.store.lineage(this.session.id)?.checkpoint_id;
+    const checkpoint = checkpointId
+      ? this.store.boundaryById(checkpointId)
+      : undefined;
+    if (checkpoint)
+      allImages.push(...(stateForBoundary(checkpoint).evidenceImages ?? []));
     const images = new Map(allImages.map((image) => [image.id, image]));
     const documents = new Map<
       string,
@@ -2633,6 +2671,12 @@ export class Application extends EventEmitter {
     context.excludedSourceIds = [...excludedIds].sort();
     context.excludedSourceHashes = [...excludedHashes].sort();
     context.excludedSourceUrls = [...excludedUrls].sort();
+    context.redactedImageIds = [
+      ...new Set([
+        ...(context.redactedImageIds ?? []),
+        ...preview.family.imageIds,
+      ]),
+    ].sort();
     context.sourceIds = context.sourceIds.filter((id) => !excludedIds.has(id));
     context.imageIds = context.imageIds.filter((id) => !excludedIds.has(id));
     context.workingState.artifacts = context.workingState.artifacts.filter(
@@ -2826,8 +2870,8 @@ export class Application extends EventEmitter {
       );
     const availableInputSourceIds = sourceIds as string[],
       availableSources = new Set(
-        this.store
-          .artifacts(document.run.id)
+        [...authorized.values()]
+          .map((item) => item.artifact)
           .filter((artifact) => artifact.kind === "source")
           .map((artifact) => artifact.id),
       ),
@@ -3311,6 +3355,23 @@ export class Application extends EventEmitter {
   }
   async previewFork(seq: number, mode: ForkMode): Promise<ForkPreview> {
     this.idle();
+    const selection = this.forkSelection(seq, mode);
+    if (selection.state)
+      await verifyBoundaryState(
+        this.paths,
+        this.config,
+        selection.state,
+        selection.parent.workspace,
+      );
+    this.idle();
+    if (
+      this.forkSelection(seq, mode).preview.binding !==
+      selection.preview.binding
+    )
+      throw new AgentError("STALE_VIEW", "分岐の確認内容が変わりました。");
+    return selection.preview;
+  }
+  private forkSelection(seq: number, mode: ForkMode) {
     if (mode !== "state" && mode !== "history")
       throw new AgentError("FORK_INPUT", "Unknown fork mode");
     if (!Number.isSafeInteger(seq) || seq <= 0)
@@ -3338,17 +3399,22 @@ export class Application extends EventEmitter {
     const state =
       mode === "state" && boundary ? stateForBoundary(boundary) : undefined;
     const hash = boundary?.hash ?? sha256(canonical({ this: "history", seq }));
-    const prefixDigest = sha256(
-      canonical(
-        this.conversations.messages(this.session.id, seq + 1).map((item) => ({
-          seq: item.seq,
-          role: item.role,
-          text: item.text,
-          runId: item.run_id,
-          at: item.at,
-        })),
-      ),
-    );
+    const prefixDigest = digestPrefix(this.store, this.session.id, seq);
+    if (state && state.prefixDigest !== prefixDigest)
+      throw new AgentError(
+        "FORK_CORRUPT",
+        "保存時点から会話本文が変わっています。会話本文のみの分岐を選択してください。",
+      );
+    const policy = forkPolicy(this.store, this.session, state);
+    const owner = this.store.db
+      .prepare("SELECT owner,workspace FROM conversations WHERE id=?")
+      .get(this.session.id) as
+      { owner: string | null; workspace: string } | undefined;
+    if (
+      owner?.owner !== this.conversations.owner ||
+      owner.workspace !== this.session.workspace
+    )
+      throw new AgentError("SESSION_BUSY", "Conversation ownership changed");
     const binding = forkHash(
       this.session.id,
       seq,
@@ -3357,9 +3423,9 @@ export class Application extends EventEmitter {
       this.generation,
       this.session.workspace,
       configHash(this.config),
-      canonical({ context: this.session.context, prefixDigest }),
+      canonical({ context: this.session.context, prefixDigest, policy }),
     );
-    return {
+    const preview: ForkPreview = {
       sessionId: this.session.id,
       seq,
       mode,
@@ -3372,15 +3438,26 @@ export class Application extends EventEmitter {
       stateAvailable: !!boundary?.state_available,
       warnings: [
         "モデル・ツールの provider archive は元の会話にのみ残ります。",
+        "分岐では推論・検証・変更の適用は行いません。続行には新しい依頼が必要です。",
+        `送信制約: ${policy.dataClass}${policy.localOnly ? " / ローカルのみ" : ""}。現在の資料除外・画像マスクを引き継ぎます。`,
+        ...(mode === "history"
+          ? [
+              "会話本文のみをコピーします。固定条件・資料・画像・作業コピーは復元しません。",
+            ]
+          : []),
+        ...(state && !state.coding
+          ? [
+              "保存されたコードの作業コピーはありません。新しいコード作業は、その時点の元のリポジトリから開始します。",
+            ]
+          : []),
         ...(!boundary
           ? ["この履歴には保存状態がありません。履歴のみ分岐できます。"]
           : []),
       ],
-      savedWorkspaceFiles:
-        (state ? countTreeFiles(state.coding) : 0) +
-        (state ? countTreeFiles(state.document) : 0),
+      savedWorkspaceFiles: countTreeFiles(state?.coding),
       savedDocumentFiles: countTreeFiles(state?.document),
     };
+    return { preview, state, boundary, policy, parent: this.session };
   }
   async forkConversation(
     seq: number,
@@ -3389,34 +3466,56 @@ export class Application extends EventEmitter {
     name?: string,
   ): Promise<void> {
     this.idle();
-    const parentId = this.session.id,
-      parentGeneration = this.generation;
-    const preview = await this.previewFork(seq, mode);
-    if (parentId !== this.session.id || parentGeneration !== this.generation)
-      throw new AgentError("STALE_VIEW", "会話が切り替わりました。");
-    if (preview.binding !== binding)
+    const selection = this.forkSelection(seq, mode);
+    if (selection.preview.binding !== binding)
       throw new AgentError("STALE_VIEW", "分岐の確認内容が古くなっています。");
     this.busy = true;
-    const parent = this.session;
-    const boundary = this.store.boundary(parent.id, seq);
-    if (mode === "state" && (!boundary || !boundary.state_available))
-      throw new AgentError(
-        "FORK_STATE",
-        "選択点には復元可能な保存状態がありません。",
-      );
-    const state =
-      mode === "state" && boundary ? stateForBoundary(boundary) : undefined;
+    this.controller = new AbortController();
+    const deadline = Date.now() + 30_000;
+    this.work = (async () => {
+      if (selection.state)
+        await verifyBoundaryState(
+          this.paths,
+          this.config,
+          selection.state,
+          selection.parent.workspace,
+          deadline,
+        );
+      this.controller!.signal.throwIfAborted();
+      if (
+        this.closed ||
+        this.forkSelection(seq, mode).preview.binding !== binding
+      )
+        throw new AgentError("STALE_VIEW", "分岐の確認内容が変わりました。");
+      await this.restoreFork(selection, name, deadline);
+    })().finally(() => {
+      this.busy = false;
+      this.publish("changed");
+    });
+    await this.work;
+  }
+  private async restoreFork(
+    selection: ReturnType<Application["forkSelection"]>,
+    name: string | undefined,
+    deadline: number,
+  ): Promise<void> {
+    const { parent, state, boundary, policy, preview } = selection;
+    const { seq, mode, binding } = preview;
     const child = this.conversations.create(parent.workspace, {
-      dataClass:
-        state?.policy.dataClass === "restricted"
-          ? "restricted"
-          : state?.policy.dataClass === "private" ||
-              parent.dataClass === "private"
-            ? "private"
-            : parent.dataClass,
+      dataClass: policy.dataClass,
       strategy: state ? state.settings.strategy : this.config.defaults.mode,
       checks: state ? state!.settings.checks : Object.keys(this.config.checks),
     });
+    let leaseError: unknown;
+    const heartbeat = setInterval(() => {
+      try {
+        this.conversations.save(child);
+      } catch (error) {
+        leaseError = error;
+      }
+    }, 3000);
+    heartbeat.unref();
+    const allocatedSeedIds: string[] = [];
     try {
       child.name =
         name?.trim().slice(0, 100) ||
@@ -3424,7 +3523,7 @@ export class Application extends EventEmitter {
       child.kind = state ? state.settings.kind : "auto";
       child.model = state ? state.settings.model : undefined;
       child.reviewer = state ? state.settings.reviewer : undefined;
-      child.localOnly = (state?.policy.localOnly ?? false) || parent.localOnly;
+      child.localOnly = policy.localOnly;
       child.includeUntracked = state?.settings.includeUntracked ?? false;
       child.context = state
         ? structuredClone(state.context)
@@ -3432,7 +3531,7 @@ export class Application extends EventEmitter {
       child.context ??= emptyConversationContext();
       const childContext = child.context;
       {
-        const current = normalizeConversationContext(parent.context);
+        const current = policy.excluded;
         childContext.excludedSourceIds = [
           ...new Set([
             ...(childContext.excludedSourceIds ?? []),
@@ -3451,6 +3550,12 @@ export class Application extends EventEmitter {
             ...(current.excludedSourceUrls ?? []),
           ]),
         ];
+        childContext.redactedImageIds = [
+          ...new Set([
+            ...(childContext.redactedImageIds ?? []),
+            ...(current.redactedImageIds ?? []),
+          ]),
+        ];
         const levels: DataClass[] = ["public", "private", "restricted"];
         if (levels.indexOf(parent.dataClass) > levels.indexOf(child.dataClass))
           child.dataClass = parent.dataClass;
@@ -3459,11 +3564,75 @@ export class Application extends EventEmitter {
           ? structuredClone(state.images).filter(
               (image) =>
                 !childContext.excludedSourceIds?.includes(image.id) &&
-                !childContext.excludedSourceHashes?.includes(image.sha256),
+                !childContext.excludedSourceHashes?.includes(image.sha256) &&
+                !childContext.redactedImageIds?.includes(image.id),
             )
           : [];
       }
       childContext.instructions = [];
+      childContext.originalRunIds = [];
+      childContext.imageIds = child.images?.map((image) => image.id) ?? [];
+      const excludedIds = new Set(childContext.excludedSourceIds ?? []);
+      const excludedHashes = new Set([
+        ...(childContext.excludedSourceHashes ?? []),
+        ...(childContext.redactedImageIds ?? []).map((imageId) =>
+          imageId.replace(/^img-/, ""),
+        ),
+      ]);
+      const excludedUrls = new Set(childContext.excludedSourceUrls ?? []);
+      for (const item of state?.artifacts ?? []) {
+        const artifact = item.artifact;
+        if (excludedIds.has(artifact.id)) {
+          excludedHashes.add(artifact.sha256);
+          for (const field of ["rawSha256", "selectedSha256"] as const)
+            if (typeof artifact.metadata[field] === "string")
+              excludedHashes.add(artifact.metadata[field]);
+        }
+        if (
+          excludedHashes.has(artifact.sha256) ||
+          excludedHashes.has(String(artifact.metadata.rawSha256 ?? "")) ||
+          excludedUrls.has(String(artifact.metadata.url ?? "")) ||
+          excludedUrls.has(String(artifact.metadata.requestedUrl ?? ""))
+        )
+          excludedIds.add(artifact.id);
+      }
+      for (const input of state?.preparedInputs ?? [])
+        if (excludedIds.has(input.id)) {
+          excludedHashes.add(input.rawSha256);
+          excludedHashes.add(input.selectedSha256);
+        }
+      childContext.excludedSourceHashes = [...excludedHashes];
+      child.images = child.images?.filter(
+        (image) => !excludedHashes.has(image.sha256),
+      );
+      childContext.imageIds = child.images?.map((image) => image.id) ?? [];
+      childContext.sourceIds = childContext.sourceIds.filter(
+        (sourceId) => !excludedIds.has(sourceId),
+      );
+      if (childContext.researchCheckpoint)
+        for (const decision of childContext.researchCheckpoint.decisions)
+          decision.sourceIds = decision.sourceIds.filter(
+            (sourceId) => !excludedIds.has(sourceId),
+          );
+      childContext.workingState.artifacts =
+        childContext.workingState.artifacts.filter(
+          (artifactId) => !excludedIds.has(artifactId),
+        );
+      childContext.workingState.hashes = Object.fromEntries(
+        Object.entries(childContext.workingState.hashes).filter(
+          ([, hash]) => !excludedHashes.has(hash),
+        ),
+      );
+      for (const entry of childContext.workingState.history) {
+        entry.artifacts = entry.artifacts.filter(
+          (artifactId) => !excludedIds.has(artifactId),
+        );
+        entry.hashes = Object.fromEntries(
+          Object.entries(entry.hashes).filter(
+            ([, hash]) => !excludedHashes.has(hash),
+          ),
+        );
+      }
       child.queue = [];
       child.draft = "";
       child.access = "read-only";
@@ -3489,7 +3658,7 @@ export class Application extends EventEmitter {
             text: message.text,
           });
           const source = this.store.boundary(parent.id, message.seq);
-          if (source) {
+          if (source && mode === "state") {
             this.store.linkBoundary(child.id, copied, source.id);
           }
         }
@@ -3512,7 +3681,7 @@ export class Application extends EventEmitter {
           policyFloor: canonical({
             dataClass: child.dataClass,
             localOnly: child.localOnly,
-            excluded: child.context,
+            excluded: safetyContext(child.context),
           }),
         });
       });
@@ -3531,7 +3700,7 @@ export class Application extends EventEmitter {
             mode: state.settings.strategy,
             dataClass: child.dataClass,
             localOnly: child.localOnly,
-            workspace: treeSnapshot.origin ?? child.workspace,
+            workspace: treeSnapshot.origin,
             model: state.settings.model,
             reviewer: state.settings.reviewer,
             state: "created",
@@ -3551,7 +3720,7 @@ export class Application extends EventEmitter {
             repairAttempts: 0,
             mustKeep: [],
             forkCheckpointId: boundary!.id,
-            images: structuredClone(state.images),
+            images: structuredClone(child.images),
             preparedInputs: structuredClone(state.preparedInputs),
             constraints: structuredClone(state.context.constraints),
             compactions: [],
@@ -3559,6 +3728,7 @@ export class Application extends EventEmitter {
             createdAt: Date.now(),
             updatedAt: Date.now(),
           };
+          allocatedSeedIds.push(seed.id);
           this.store.create(seed);
           this.store.db
             .prepare("INSERT INTO conversation_runs VALUES (?,?)")
@@ -3567,15 +3737,25 @@ export class Application extends EventEmitter {
             this.paths,
             this.store.runDir(seed.id),
             treeSnapshot,
+            this.config,
+            deadline,
+          );
+          await sanitizeWorkCopy(
+            this.store.runDir(seed.id),
+            [...excludedHashes],
+            this.config.limits.maxWorkspaceBytes,
           );
           return seed.id;
         };
         child.workRunId = await makeSeed(state.coding, "coding");
         child.documentRunId = await makeSeed(state.document, "writing");
+        let chatSeedId: string | undefined;
         if (
           !child.workRunId &&
           !child.documentRunId &&
-          (state.artifacts.length || state.images.length)
+          (state.artifacts.length ||
+            state.images.length ||
+            state.preparedInputs.length)
         )
           await (async () => {
             const seed: Run = {
@@ -3600,17 +3780,19 @@ export class Application extends EventEmitter {
               createdAt: Date.now(),
               updatedAt: Date.now(),
               forkCheckpointId: boundary!.id,
-              images: structuredClone(state.images),
+              images: structuredClone(child.images),
               preparedInputs: structuredClone(state.preparedInputs),
               compactions: [],
             };
+            allocatedSeedIds.push(seed.id);
             this.store.create(seed);
             this.store.db
               .prepare("INSERT INTO conversation_runs VALUES (?,?)")
               .run(child.id, seed.id);
+            chatSeedId = seed.id;
           })();
         const artifactSeed =
-          child.workRunId ?? child.documentRunId ?? child.latestRunId;
+          child.workRunId ?? child.documentRunId ?? chatSeedId;
         if (artifactSeed)
           for (const item of state.artifacts)
             this.store.db
@@ -3621,17 +3803,27 @@ export class Application extends EventEmitter {
         child.appliedRunId = undefined;
         this.conversations.save(child);
       }
+      if (leaseError) throw leaseError;
+      this.controller!.signal.throwIfAborted();
+      if (Date.now() > deadline)
+        throw new AgentError(
+          "FORK_TIMEOUT",
+          "分岐の復元が時間上限を超えました。",
+        );
+      if (
+        this.closed ||
+        this.forkSelection(seq, mode).preview.binding !== binding
+      )
+        throw new AgentError("STALE_VIEW", "分岐の確認内容が変わりました。");
       this.session = this.conversations.acquire(child.id);
       this.conversations.release(parent.id);
       ++this.generation;
-      this.busy = false;
-      this.publish("session");
+      this.accessOverride = undefined;
     } catch (error) {
-      const runIds = this.conversations.runs(child.id);
+      const runIds = [
+        ...new Set([...allocatedSeedIds, ...this.conversations.runs(child.id)]),
+      ];
       const runDirs = runIds.map((runId) => join(this.paths.runs, runId));
-      this.busy = false;
-      this.conversations.release(parent.id);
-      this.conversations.release(child.id);
       this.store.transaction(() => {
         this.store.db
           .prepare("DELETE FROM message_boundaries WHERE session_id=?")
@@ -3664,7 +3856,10 @@ export class Application extends EventEmitter {
         ),
       );
       throw error;
+    } finally {
+      clearInterval(heartbeat);
     }
+    this.publish("session");
   }
   async search(request: SearchRequest): Promise<SearchPage> {
     this.idle();

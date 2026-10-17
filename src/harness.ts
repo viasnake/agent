@@ -12,6 +12,8 @@ import { Router } from "./routing.js";
 import { runFailureState } from "./run-state.js";
 import { Sandbox } from "./sandbox.js";
 import { Store } from "./storage.js";
+import { lineagePolicy, safetyContext } from "./branching.js";
+import { normalizeConversationContext } from "./context.js";
 import { TaskExecutor } from "./task-executor.js";
 import {
   AgentError,
@@ -118,6 +120,33 @@ export class Harness {
     this.planner = new Planner(config, store, this.router, this.executor);
   }
   async create(options: NewRun): Promise<Run> {
+    const floor = options.conversationId
+      ? lineagePolicy(this.store, options.conversationId)
+      : undefined;
+    if (floor) {
+      const levels: DataClass[] = ["public", "private", "restricted"];
+      if (
+        levels.indexOf(options.dataClass ?? this.config.defaults.dataClass) <
+          levels.indexOf(floor.dataClass) ||
+        (floor.localOnly && !options.localOnly)
+      )
+        throw new AgentError(
+          "DISCLOSURE_DENIED",
+          "Branch input cannot lower its inherited disclosure policy",
+        );
+      const context = normalizeConversationContext(options.contextState);
+      const safety = safetyContext(context, floor.excluded);
+      options = {
+        ...options,
+        contextState: {
+          ...context,
+          excludedSourceIds: safety.excludedSourceIds,
+          excludedSourceHashes: safety.excludedSourceHashes,
+          excludedSourceUrls: safety.excludedSourceUrls,
+          redactedImageIds: safety.redactedImageIds,
+        },
+      };
+    }
     if (!options.objective.trim())
       throw new AgentError("INPUT", "An objective is required");
     if (Buffer.byteLength(options.objective) > this.config.limits.maxInputBytes)
@@ -365,6 +394,12 @@ export class Harness {
           : undefined;
         if (
           !lineage ||
+          sourceRun.conversationId !== options.conversationId ||
+          !this.store.db
+            .prepare(
+              "SELECT 1 FROM conversation_runs WHERE session_id=? AND run_id=?",
+            )
+            .get(options.conversationId!, sourceRun.id) ||
           lineage.child_session_id !== options.conversationId ||
           lineage.checkpoint_id !== sourceRun.forkCheckpointId
         )
