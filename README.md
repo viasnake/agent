@@ -1,3 +1,18 @@
+## 履歴の削除と保持
+
+履歴削除は自動では実行されません。`remove`、`remove-session`、`prune` は既定で
+preview を表示し、削除には `--write` が必要です。削除対象は inactive な会話と
+terminal run のメタデータ、およびその run 専用ディレクトリだけです。会話・run の
+JSON、本文、出典、fork lineage、boundary などに残る UUID 参照も保守的に検査し、
+外部から参照される単位は削除せず、選択削除では全選択を拒否します。
+
+削除はメタデータを一つの SQLite transaction で先に削除し、物理ディレクトリの削除
+に失敗した場合は bounded な pending cleanup job として返します。再試行は
+`cleanup-deletions --write <job-id>` のように明示した job ID に限られます。共有
+画像・準備済み文書・checkpoint blob、SQLite の残存ページ、外部バックアップは
+この slice の対象外であり、暗号学的消去も保証しません。pending job は backup の
+論理的な証拠として保存されますが、自動実行や import はされません。
+
 # Local Agent
 
 コード変更・調査・文書作成を続けて依頼できる、個人用の対話型ターミナル AI Agent です。コードは作業コピーで変更・検査し、差分を確認してから元のリポジトリへ適用します。

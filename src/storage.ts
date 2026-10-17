@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { chmodSync, existsSync, lstatSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Paths } from "./config.js";
 import {
@@ -12,6 +12,10 @@ import {
   type RunState,
 } from "./types.js";
 import { atomicWrite, canonical, id, sha256 } from "./util.js";
+import {
+  confirmHistoryDeletion,
+  previewHistoryDeletion,
+} from "./history-deletion.js";
 
 interface RunRow {
   payload: string;
@@ -63,7 +67,7 @@ export class Store {
     const version = this.db.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
-    if (version.user_version > 3)
+    if (version.user_version > 4)
       throw new AgentError(
         "SCHEMA_VERSION",
         "Database was created by a newer agent",
@@ -96,7 +100,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS requests_connection_time ON requests(quota_scope, at);
       CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);
     `);
-    if (version.user_version > 0 && version.user_version < 3) {
+    if (version.user_version > 0 && version.user_version < 4) {
       const backup = `${paths.database}.v${version.user_version}-${id()}.bak`;
       this.db.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
       chmodSync(backup, 0o600);
@@ -143,7 +147,10 @@ export class Store {
         checkpoint_id TEXT, policy_floor TEXT NOT NULL, created_at INTEGER NOT NULL
       ) STRICT;
       CREATE INDEX IF NOT EXISTS boundaries_session_seq ON boundaries(session_id, message_seq);
-      PRAGMA user_version=3;
+      CREATE TABLE IF NOT EXISTS deletion_queue (
+        id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, payload TEXT NOT NULL
+      ) STRICT;
+      PRAGMA user_version=4;
     `),
     );
   }
@@ -852,11 +859,22 @@ export class Store {
     });
     const heartbeat = setInterval(() => this.heartbeat(run), 1000);
     try {
-      await rm(this.runDir(runId), { recursive: true, force: true });
-      this.transaction(() => {
-        this.assertLease(runId, run.generation);
-        this.db.prepare("DELETE FROM runs WHERE id=?").run(runId);
+      await Promise.resolve();
+      const preview = previewHistoryDeletion(
+        this,
+        undefined,
+        { kind: "selection", conversationIds: [], runIds: [runId] },
+        { lease: { runId, generation: run.generation } },
+      );
+      const result = await confirmHistoryDeletion(this, undefined, preview, {
+        lease: { runId, generation: run.generation },
+        beforeCommit: () => clearInterval(heartbeat),
       });
+      if (result.pendingCleanup.length)
+        throw new AgentError(
+          "DELETE_CLEANUP",
+          "Metadata was removed but run files remain pending cleanup",
+        );
     } finally {
       clearInterval(heartbeat);
       this.release(run);

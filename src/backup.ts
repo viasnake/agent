@@ -40,6 +40,7 @@ const tables = [
   "message_boundaries",
   "boundary_artifacts",
   "fork_lineages",
+  "deletion_queue",
 ] as const;
 const digest = /^[a-f0-9]{64}$/;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -96,6 +97,7 @@ export const backupExclusions = [
   "稼働中プロセス・モデル内部セッション・未保存の作業コピー・依存環境",
   "参照されていない添付・チェックポイントのキャッシュ",
   "自動復元・自動再開（復元用の実行環境ではありません）",
+  "削除済み履歴の物理 cleanup 待ちの remnants（自動実行しません）",
 ];
 
 function fail(message: string): never {
@@ -237,6 +239,10 @@ function safeArchivePath(path: string): boolean {
 
 function snapshotMetadata(db: DatabaseSync, deadline: number) {
   const hash = createHash("sha256");
+  const version = Number(
+    (db.prepare("PRAGMA user_version").get() as { user_version: number })
+      .user_version,
+  );
   const references = new Map<string, BlobReference>();
   let rows = 0,
     bytes = 0,
@@ -286,6 +292,14 @@ function snapshotMetadata(db: DatabaseSync, deadline: number) {
     for (const child of Object.values(item)) inputs(child, depth + 1);
   };
   for (const table of tables) {
+    if (
+      table === "deletion_queue" &&
+      (version < 4 ||
+        !db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+          .get(table))
+    )
+      continue;
     hash.update(table);
     for (const raw of db
       .prepare(`SELECT * FROM ${table} ORDER BY rowid`)
@@ -765,8 +779,14 @@ export function verifyBackup(
 
 function assertDatabase(database: DatabaseSync): void {
   const version = database.prepare("PRAGMA user_version").get()!.user_version;
+  const hasDeletionQueue = database
+    .prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='deletion_queue'",
+    )
+    .get();
   if (
-    version !== 3 ||
+    (version !== 3 && version !== 4) ||
+    (version === 4 && !hasDeletionQueue) ||
     Object.values(database.prepare("PRAGMA quick_check").get()!)[0] !== "ok" ||
     database.prepare("PRAGMA foreign_key_check").get()
   )

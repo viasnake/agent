@@ -632,7 +632,7 @@ test("v2 storage migrates without fabricating boundaries; retained artifacts blo
             user_version: number;
           }
         ).user_version,
-        3,
+        4,
       );
       assert.equal(
         (

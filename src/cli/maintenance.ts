@@ -5,6 +5,15 @@ import {
   previewBackup,
   verifyBackup,
 } from "../backup.js";
+import {
+  confirmHistoryDeletion,
+  pendingDeletions,
+  previewHistoryDeletion,
+  retryDeletionCleanup,
+} from "../history-deletion.js";
+
+const deletionWarning =
+  "メタデータを先に削除する bounded cleanup です。共有 image/document/checkpoint cache は残り、SQLite の残存ページや外部 backup に内容が残る場合があります。物理 cleanup は pending になり得ますが自動実行せず、暗号学的消去も保証しません。";
 export function registerMaintenanceCommands(cli: CliContext): void {
   const { program, print, context, signal } = cli;
   program
@@ -89,37 +98,110 @@ export function registerMaintenanceCommands(cli: CliContext): void {
     });
   program
     .command("remove <run-id>")
+    .description("Preview deletion of a terminal run and its owned history")
+    .option("--write", "explicitly confirm the deletion")
+    .action((runId: string, options) =>
+      context(async (config, _p, store) => {
+        const preview = previewHistoryDeletion(store, config, {
+          kind: "selection",
+          conversationIds: [],
+          runIds: [runId],
+        });
+        if (!options.write) {
+          print({
+            ...preview,
+            written: false,
+            warning: `${deletionWarning} --write で明示削除します。`,
+          });
+          return;
+        }
+        const result = await confirmHistoryDeletion(store, config, preview);
+        print({
+          written: true,
+          ...result,
+          warning: deletionWarning,
+        });
+      }),
+    );
+  program
+    .command("remove-session <session-ids...>")
     .description(
-      "Delete a terminal run and its sessions, sources, artifacts and working copy",
+      "Preview deletion of inactive conversations and their terminal runs",
     )
-    .action((runId: string) =>
-      context(async (_config, _p, store) => {
-        await store.remove(runId);
-        print({ removed: runId });
+    .option("--write", "explicitly confirm the deletion")
+    .action((sessionIds: string[], options) =>
+      context(async (config, _p, store) => {
+        const preview = previewHistoryDeletion(store, config, {
+          kind: "selection",
+          conversationIds: sessionIds,
+          runIds: [],
+        });
+        if (!options.write) {
+          print({
+            ...preview,
+            written: false,
+            warning: `${deletionWarning} --write で明示削除します。`,
+          });
+          return;
+        }
+        const result = await confirmHistoryDeletion(store, config, preview);
+        print({
+          written: true,
+          ...result,
+          warning: `${deletionWarning} cleanup-deletions --write <job-id> で明示retryします。`,
+        });
       }),
     );
   program
     .command("prune")
-    .description(
-      "Remove terminal runs older than retentionDays; credentials are retained",
-    )
+    .description("Preview retention deletion older than retentionDays")
     .option("--dry-run", "list matching runs without deleting them")
+    .option("--write", "explicitly confirm the deletion")
     .action((options) =>
       context(async (config, _p, store) => {
+        if (options.dryRun && options.write)
+          throw new Error("--dry-run and --write cannot be combined");
         const cutoff = Date.now() - config.retentionDays * 86400000;
-        const selected = store
-          .list(null)
-          .filter(
-            (run) =>
-              ["succeeded", "failed", "cancelled"].includes(run.state) &&
-              run.updatedAt < cutoff,
-          );
-        if (!options.dryRun)
-          for (const run of selected) await store.remove(run.id);
+        const preview = previewHistoryDeletion(store, config, {
+          kind: "retention",
+          cutoff,
+        });
+        if (!options.write) {
+          print({
+            ...preview,
+            dryRun: !!options.dryRun,
+            written: false,
+            retentionDays: config.retentionDays,
+            warning: `${deletionWarning} --write で明示削除します。`,
+          });
+          return;
+        }
+        const result = await confirmHistoryDeletion(store, config, preview);
         print({
-          dryRun: !!options.dryRun,
+          written: true,
           retentionDays: config.retentionDays,
-          runs: selected.map((r) => r.id),
+          ...result,
+          warning: `自動retentionではありません。${deletionWarning}`,
+        });
+      }),
+    );
+  program
+    .command("cleanup-deletions [job-ids...]")
+    .description(
+      "List pending deletion cleanup jobs or explicitly retry selected jobs",
+    )
+    .option("--write", "retry only the listed cleanup job IDs")
+    .action((jobIds: string[], options) =>
+      context(async (_config, _p, store) => {
+        if (options.write && !jobIds.length)
+          throw new Error("--write requires at least one cleanup job ID");
+        const jobs = options.write
+          ? await retryDeletionCleanup(store, jobIds)
+          : pendingDeletions(store);
+        print({
+          written: !!options.write,
+          jobs,
+          warning: `${deletionWarning} pending job 以外は対象外です。`,
         });
       }),
     );
