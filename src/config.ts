@@ -118,6 +118,15 @@ export const configSchema = z.strictObject({
       runtimePaths: z.array(z.string().startsWith("/")).default([]),
       commandTimeoutSeconds: z.number().int().min(1).max(3600).default(120),
       maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(64000),
+      profiles: z
+        .record(
+          name,
+          z.strictObject({
+            description: z.string().min(1).max(500),
+            command: z.string().min(1).max(8000),
+          }),
+        )
+        .optional(),
     })
     .prefault({}),
   checks: z

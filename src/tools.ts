@@ -1,7 +1,7 @@
 import { lstat, readFile, rm, mkdtemp, realpath } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { z } from "zod";
-import type { Config } from "./config.js";
+import { configHash, type Config } from "./config.js";
 import { Store } from "./storage.js";
 import { Sandbox } from "./sandbox.js";
 import {
@@ -35,6 +35,11 @@ import {
 } from "./collaboration.js";
 import { taskReportInstruction } from "./collaboration-prompts.js";
 import { codeInfoSchema, inspectCode } from "./code-info.js";
+import {
+  canUseProfiles,
+  developmentDirectory,
+  measureDevelopmentDirectory,
+} from "./development-runtime.js";
 import { reviewWriting, writingOptionsSchema } from "./writing-quality.js";
 import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
 import { id } from "./util.js";
@@ -129,7 +134,10 @@ export class TaskTools {
             const uncertain =
               dispatched &&
               !rejected &&
-              (signal.aborted || name === "shell" || name.startsWith("mcp_"));
+              (signal.aborted ||
+                name === "shell" ||
+                name === "run_profile" ||
+                name.startsWith("mcp_"));
             this.store.operation(
               this.run,
               operation,
@@ -182,6 +190,80 @@ export class TaskTools {
             );
     }
     return target;
+  }
+  private async executeShell(
+    command: string,
+    signal: AbortSignal,
+    prepareRuntime = false,
+  ) {
+    const usesRuntime =
+      Object.keys(this.config.execution.profiles ?? {}).length > 0 &&
+      canUseProfiles(this.run, this.task);
+    if (usesRuntime && configHash(this.config) !== this.run.configHash)
+      throw new AgentError(
+        "PROFILE_CONFIG",
+        "Execution settings changed; create a new run with the reviewed configuration",
+      );
+    const runtime = usesRuntime
+      ? {
+          path: await developmentDirectory(
+            this.store.runDir(this.run.id),
+            this.run,
+            this.task,
+          ),
+          readOnly: !prepareRuntime,
+        }
+      : undefined;
+    if (runtime)
+      await measureDevelopmentDirectory(
+        runtime.path,
+        this.config.limits.maxWorkspaceBytes,
+      );
+    let scratch: string | undefined;
+    try {
+      if (this.task.role === "reviewer") {
+        scratch = await mkdtemp(
+          join(this.store.runDir(this.run.id), "review-check-"),
+        );
+        await copyWorkspace(
+          this.root,
+          scratch,
+          this.config.limits.maxWorkspaceBytes,
+        );
+      }
+      signal.throwIfAborted();
+      this.store.assertLease(this.run.id, this.run.generation);
+      if (this.store.cancelRequested(this.run.id))
+        throw new AgentError(
+          "CANCELLED",
+          "Cancellation requested before shell execution",
+        );
+      const result = await this.sandbox.execute(
+        scratch ?? this.root,
+        command,
+        signal,
+        scratch ? false : !this.task.write,
+        runtime,
+      );
+      return {
+        ...result,
+        ...(runtime
+          ? {
+              runtime: {
+                path: "/runtime",
+                scope: "task-local",
+                readOnly: runtime.readOnly,
+                ...(await measureDevelopmentDirectory(
+                  runtime.path,
+                  this.config.limits.maxWorkspaceBytes,
+                )),
+              },
+            }
+          : {}),
+      };
+    } finally {
+      if (scratch) await rm(scratch, { recursive: true, force: true });
+    }
   }
   all(): ToolSpec[] {
     const tools: ToolSpec[] = [
@@ -393,32 +475,43 @@ export class TaskTools {
           "shell",
           "Run a shell command in a network-isolated Linux sandbox. No host home, original Git directory, credentials, or host environment is available. Reviewers receive a disposable writable copy; lead access is read-only.",
           z.strictObject({ command: z.string().min(1).max(8000) }),
-          async (args, signal) => {
-            if (this.task.role === "reviewer") {
-              const scratch = await mkdtemp(
-                join(this.store.runDir(this.run.id), "review-check-"),
-              );
-              try {
-                await copyWorkspace(
-                  this.root,
-                  scratch,
-                  this.config.limits.maxWorkspaceBytes,
-                );
-                return JSON.stringify(
-                  await this.sandbox.execute(scratch, args.command, signal),
-                );
-              } finally {
-                await rm(scratch, { recursive: true, force: true });
-              }
-            }
-            return JSON.stringify(
-              await this.sandbox.execute(
-                this.root,
-                args.command,
+          async (args, signal) =>
+            JSON.stringify(await this.executeShell(args.command, signal)),
+        ),
+      );
+    const profiles = structuredClone(this.config.execution.profiles ?? {});
+    if (
+      this.config.execution.backend !== "disabled" &&
+      Object.keys(profiles).length &&
+      canUseProfiles(this.run, this.task)
+    )
+      tools.push(
+        this.wrap(
+          "run_profile",
+          "Run a configured dependency/build command offline in the sandbox. Only this tool writes task-local /runtime, which shell mounts read-only. Profiles: " +
+            Object.entries(profiles)
+              .map(([name, profile]) => `${name}: ${profile.description}`)
+              .join("; "),
+          z.strictObject({ profile: z.enum(Object.keys(profiles)) }),
+          async (args, signal) =>
+            JSON.stringify({
+              profile: args.profile,
+              commandSha256: sha256(profiles[args.profile]!.command),
+              ...(await this.executeShell(
+                profiles[args.profile]!.command,
                 signal,
-                !this.task.write,
-              ),
-            );
+                true,
+              )),
+            }),
+          async () => {
+            if (
+              !canUseProfiles(this.run, this.task) ||
+              configHash(this.config) !== this.run.configHash
+            )
+              throw new AgentError(
+                "PROFILE_CONFIG",
+                "Profile authorization or configuration changed",
+              );
           },
         ),
       );

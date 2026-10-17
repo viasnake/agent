@@ -230,6 +230,8 @@ export class SettingsDialog {
       "mcp.schemaSha256": "ツールスキーマの SHA-256",
       "mcp.readOnly":
         "false は毎回の対話承認が必須。変更効果を削除してから true に戻す",
+      "execution.profiles":
+        "事前に確認した依存導入・ビルドコマンド。ネットワークなし、タスク専用 /runtime を使用",
       "mcp.effect":
         "change/publish/delete/dangerous。未指定の変更ツールは危険操作扱い",
     };

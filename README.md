@@ -118,6 +118,30 @@ Git 添付の差分は保存された raw bytes を比較し、Git attributes・
 
 検査の `protectedPaths` に既存テストや設定を登録すると、それらの変更を不合格にします。Shell はネットワークを使えません。必要な実行環境・依存は事前に用意し、Bubblewrap では `execution.runtimePaths` で読み取り専用に公開し、Podman ではダイジェスト固定の `execution.image` に含めます。
 
+### オフラインの依存導入・ビルド
+
+`execution.profiles` を設定すると、coding の通常 Worker と独立 Reviewer は `run_profile` で登録済みコマンドを選べます。モデルはプロファイルのコマンドを変更できません。読み取り専用の依頼、委任先、統合担当では利用できず、設定変更後は新しい Run が必要です。未指定なら従来の設定形式・ハッシュを保ちます。
+
+```yaml
+execution:
+  profiles:
+    dependencies:
+      description: ロック済み依存を事前配置したキャッシュから導入
+      command: >-
+        mkdir -p /runtime/app &&
+        cp /workspace/package.json /workspace/package-lock.json /runtime/app/ &&
+        cd /runtime/app &&
+        npm ci --offline --ignore-scripts --no-audit --no-fund --cache /opt/npm-cache
+```
+
+これは設定例です。Node/npm と完全なオフラインキャッシュを事前に用意し、`/opt/npm-cache` を固定イメージに含めるか、Bubblewrap の読み取り専用 `runtimePaths` で公開してください。不足時にネットワークを開いたりホストへ導入したりはしません。読み取り専用キャッシュへの書込みが必要なツールでは、プロファイル内でキャッシュを `/runtime` へコピーしてから使用してください。ワークスペース・`file:` 依存や native addon を含むプロジェクトは、パスと事前ビルドを含め個別のコマンド設定が必要です。
+
+`/runtime` は成果物とは別のタスク専用領域です。`run_profile` だけが書き込め、同じ担当の後続 `shell` は読み取り専用で再利用します。例えば `node /runtime/app/node_modules/typescript/bin/tsc` のように配置先を明示します。依存を通常の `/workspace/node_modules` として自動公開したり、PATH を書き換えたりはしません。ソースを別ビルドディレクトリに複製する必要がある場合も、プロファイルで明示してください。成果物は `/workspace` に戻して通常の差分検査・適用を行います。既存の作業コピーにおける秘密ファイル・リンク・`node_modules` 等の拒否は維持します。
+
+Reviewer は別の runtime と使い捨ての作業コピーを使います。固定検査、別担当、別 Run、分岐、バックアップには runtime を引き継ぎません。資料除外の条件が変わった場合も新しい領域に切り替え、古い領域を再公開しません。古い領域は即時消去せず Run の履歴削除時に回収されます。依存やロックの変更に対する自動再導入・自動実行はありません。
+
+実行時間と出力の上限は通常の Shell と同じです。runtime は実行前後に最大20,000項目・10秒、`limits.maxWorkspaceBytes` 以下か走査し、リンクをホストから辿りません。この検査はディスクのリアルタイム quota ではなく、超過した領域は再利用を拒否します。Bubblewrap に Podman と同じ CPU・メモリ・ディスク制限があるとは扱いません。長時間プロセス管理もこの機能には含みません。
+
 失敗時は `/status` と `/artifacts` で理由を確認します。待機・クラッシュした作業は `/resume`、結果未確定の操作は実際の結果を確認して `/reconcile` で照合します。中断・失敗で終了した作業の続きは、新しい依頼として入力してください。停止・失敗・再起動後の待機入力は自動実行せず `/queue` に残ります。
 
 適用はファイル単位で、全ファイル一括の原子性はありません。途中で失敗した場合は照合が必要です。バイナリ変更、symlink、hardlink、submodule は扱いません。

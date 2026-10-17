@@ -4,3 +4,8 @@ export interface SandboxInvocation {
   env: Record<string, string>;
   cleanup?: () => Promise<void>;
 }
+
+export interface SandboxRuntime {
+  path: string;
+  readOnly: boolean;
+}
