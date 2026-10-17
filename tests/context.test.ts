@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { configSchema } from "../src/config.js";
 import {
   archiveContext,
+  assertCompactionIntegrity,
   compactContext,
   contextBudget,
   normalizeConversationContext,
@@ -60,6 +61,61 @@ function providerResponse(
     headers: { "content-type": "text/event-stream" },
   });
 }
+
+test("compaction rejects missing conditions, invented summaries and altered tool/image evidence", () => {
+  const original = {
+    systemPrompt: "Do not send files externally.",
+    messages: [
+      ...providerContext("The previous request prohibited external sharing.")
+        .messages,
+      {
+        role: "tool",
+        tool_call_id: "image",
+        content: [
+          { type: "text", text: "private image evidence" },
+          { type: "image", data: "verified-base64", mimeType: "image/png" },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "failed",
+        isError: true,
+        content: "permission denied",
+      },
+      { role: "tool", tool_call_id: "latest", content: "latest evidence" },
+    ] as Array<Record<string, unknown>>,
+  };
+  assert.doesNotThrow(() =>
+    assertCompactionIntegrity(original, structuredClone(original)),
+  );
+  for (const mutate of [
+    (value: typeof original) => {
+      value.systemPrompt = "External sharing is allowed.";
+    },
+    (value: typeof original) => {
+      value.messages.shift();
+    },
+    (value: typeof original) => {
+      value.messages[2]!.content = "The user approved external sharing.";
+    },
+    (value: typeof original) => {
+      value.messages[2]!.tool_call_id = "unrelated-call";
+    },
+    (value: typeof original) => {
+      (value.messages[5]!.content as Array<Record<string, unknown>>)[1]!.data =
+        "other-image";
+    },
+    (value: typeof original) => {
+      value.messages[6]!.content = "passed";
+    },
+  ]) {
+    const candidate = structuredClone(original);
+    mutate(candidate);
+    assert.throws(() => assertCompactionIntegrity(original, candidate), {
+      code: "CONTEXT_INTEGRITY",
+    });
+  }
+});
 
 test("context archives are private, hash-idempotent, and compact only older tool results", async () => {
   const f = await fixture(new ScriptedRuntime(async () => "unused"));

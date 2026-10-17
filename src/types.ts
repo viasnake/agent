@@ -41,6 +41,7 @@ export interface Task {
   assignment?: DelegationRequest;
   delegationRounds?: number;
   modelChangeCount?: number;
+  contextReviewCount?: number;
   attemptReportIds?: string[];
   contextArchiveIds?: string[];
   reworkLinks?: Array<{
@@ -50,6 +51,22 @@ export interface Task {
     status?: "pending" | "resolved";
     resolvedByReportIds?: string[];
   }>;
+}
+export interface ContextIssue {
+  id: string;
+  taskId: string;
+  at: number;
+  kind: "missing_condition" | "contradiction" | "repeated_exploration";
+  origin: "host" | "model";
+  detail: string;
+  evidence: string;
+  sourceIds: string[];
+  archiveIds: string[];
+  operationIds: string[];
+  acknowledged?: {
+    at: number;
+    note: string;
+  };
 }
 export interface TaskResult {
   outcome: "completed" | "needs_replan" | "blocked" | "failed";
@@ -231,6 +248,8 @@ export interface Run {
   lastFailureFingerprint?: string;
   modelChanges?: ModelChange[];
   forkCheckpointId?: string;
+  contextIssues?: ContextIssue[];
+  contextReviewCursor?: string;
 }
 export interface Artifact {
   id: string;

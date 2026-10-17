@@ -37,6 +37,7 @@ import { runRuntime } from "./runtime/contract.js";
 import { loadStoredImage } from "./images.js";
 import { assertConnection } from "./policy.js";
 import { compactContext, contextBudget } from "./context.js";
+import { assertContextReady } from "./context-review.js";
 import {
   independentReviewGuidelines,
   japaneseWritingGuidelines,
@@ -283,6 +284,7 @@ export class TaskExecutor {
     mcp: McpTools,
     extra = "",
   ): Promise<string> {
+    assertContextReady(run);
     const model = this.config.models[task.model!];
     if (!model) throw new AgentError("NO_MODEL", `Unknown model ${task.model}`);
     if (run.images?.length && model.images !== true)
@@ -334,6 +336,8 @@ export class TaskExecutor {
         chatTools.add(name);
     if (hasSources) chatTools.add("read_source");
     if (hasArchives) chatTools.add("read_context");
+    if (run.inputs.length || run.preparedInputs?.length || hasSources)
+      chatTools.add("report_context_issue");
     if (
       run.access === "read-only" &&
       !newCollaboration &&
@@ -372,6 +376,7 @@ export class TaskExecutor {
                       ...(newCollaboration
                         ? ["read_task_report"]
                         : ["read_research_checkpoint"]),
+                      "report_context_issue",
                       ...(run.kind === "writing" || run.kind === "research"
                         ? ["check_writing"]
                         : []),
@@ -491,6 +496,7 @@ export class TaskExecutor {
           tools,
           signal,
           transformContext: async (context, transformSignal) => {
+            assertContextReady(run);
             const compacted = await compactContext(
               this.store.paths,
               run,
@@ -540,6 +546,7 @@ export class TaskExecutor {
             this.store.save(run, "session_created", { taskId: task.id });
           },
           beforeRequest: (bytes, imageCount = 0, estimatedImageTokens = 0) => {
+            assertContextReady(run);
             const detail = {
               taskId: task.id,
               model: task.model,
@@ -602,6 +609,7 @@ export class TaskExecutor {
         },
         task.sessionFormat,
       );
+      assertContextReady(run);
     } finally {
       await dispatcher.close();
     }

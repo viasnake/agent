@@ -48,6 +48,11 @@ import {
 import { reviewWriting, writingOptionsSchema } from "./writing-quality.js";
 import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
 import { id } from "./util.js";
+import {
+  assertContextReady,
+  inspectCompletedRead,
+  recordContextIssue,
+} from "./context-review.js";
 
 const pathSchema = z.string().min(1).max(1000);
 export class TaskTools {
@@ -113,6 +118,7 @@ export class TaskTools {
         const action = this.queue.then(async () => {
           signal.throwIfAborted();
           this.store.assertLease(this.run.id, this.run.generation);
+          assertContextReady(this.run);
           const parsed = schema.safeParse(args);
           if (!parsed.success)
             throw new AgentError(
@@ -151,6 +157,8 @@ export class TaskTools {
             );
             if (!options.keepDispatched)
               this.store.operation(this.run, operation, "completed", log.id);
+            if (!options.keepDispatched)
+              await inspectCompletedRead(this.store, this.run, this.task);
             return result;
           } catch (error) {
             // A cancelled external call or killed shell may have completed its side effect.
@@ -441,6 +449,40 @@ export class TaskTools {
           ),
       ),
     ];
+    const canExplore =
+      this.run.inputs.length > 0 ||
+      this.run.preparedInputs?.length ||
+      authorizedSources(this.store, this.run, this.task).length > 0;
+    if (canExplore && this.task.role !== "lead")
+      tools.push(
+        this.wrap(
+          "report_context_issue",
+          "Report a missing condition, contradiction, or repeated exploration with literal untrusted evidence. This pauses the run for explicit human review.",
+          z.strictObject({
+            kind: z.enum([
+              "missing_condition",
+              "contradiction",
+              "repeated_exploration",
+            ]),
+            detail: z.string().min(1).max(4000),
+            evidence: z.string().min(1).max(2000),
+            sourceIds: z.array(z.string()).max(8).default([]),
+            archiveIds: z.array(z.string()).max(8).default([]),
+            operationIds: z.array(z.string()).max(8).default([]),
+          }),
+          async (args) =>
+            JSON.stringify({
+              status: "needs_user_review",
+              issueId: recordContextIssue(
+                this.store,
+                this.run,
+                this.task,
+                args,
+                "model",
+              ).id,
+            }),
+        ),
+      );
     if (this.task.write && this.task.role !== "reviewer")
       tools.push(
         this.wrap(
@@ -1109,6 +1151,7 @@ export class TaskTools {
           "read_source",
           "read_context",
           "read_task_report",
+          "report_context_issue",
           ...(this.task.purpose === "synthesis" &&
           this.run.contextState?.researchCheckpoint
             ? ["read_research_checkpoint"]
@@ -1146,6 +1189,7 @@ export class TaskTools {
           ...(isStructuredCollaboration(this.run, this.task)
             ? ["read_task_report"]
             : []),
+          "report_context_issue",
         ].includes(tool.name),
       );
     return tools;

@@ -15,6 +15,7 @@ import { Sandbox } from "./sandbox.js";
 import { Store } from "./storage.js";
 import { lineagePolicy, safetyContext } from "./branching.js";
 import { normalizeConversationContext } from "./context.js";
+import { assertContextReady } from "./context-review.js";
 import { TaskExecutor } from "./task-executor.js";
 import { isCollaborative } from "./collaboration.js";
 import { recordModelChangeResolution as recordTaskModelChangeResolution } from "./model-change.js";
@@ -852,6 +853,7 @@ export class Harness {
       if (failure?.status === "rejected") throw failure.reason;
     };
     try {
+      assertContextReady(run);
       if (this.store.cancelRequested(run.id)) controller.abort();
       controller.signal.throwIfAborted();
       if (!run.prepared)

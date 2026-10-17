@@ -209,9 +209,9 @@ function compactCandidate(
   context: unknown,
   archiveId: string,
   targetBytes: number,
-): { value: unknown; compacted: boolean; protectedValue: unknown } {
+): { value: unknown; compacted: boolean } {
   if (!context || typeof context !== "object")
-    return { value: context, compacted: false, protectedValue: context };
+    return { value: context, compacted: false };
   const value = structuredClone(context);
   const messages =
     value &&
@@ -219,7 +219,7 @@ function compactCandidate(
     Array.isArray((value as Record<string, unknown>).messages)
       ? ((value as Record<string, unknown>).messages as unknown[])
       : undefined;
-  if (!messages) return { value, compacted: false, protectedValue: context };
+  if (!messages) return { value, compacted: false };
   const lastTool = messages.reduce(
     (last, item, index) =>
       item &&
@@ -256,51 +256,62 @@ function compactCandidate(
     }
     if (estimateContextBytes(value) <= targetBytes) break;
   }
-  const protectedValue = structuredClone(context);
-  if (Array.isArray((protectedValue as Record<string, unknown>).messages))
-    (protectedValue as Record<string, unknown>).messages = messages.filter(
-      (item, index) =>
-        !(
-          item &&
-          typeof item === "object" &&
-          isToolResult(item as Record<string, unknown>) &&
-          index !== lastTool &&
-          !isErrorResult(item as Record<string, unknown>)
-        ),
-    );
-  return { value, compacted, protectedValue };
+  return { value, compacted };
 }
 
-function protectedProjection(context: unknown): unknown {
-  if (!context || typeof context !== "object") return context;
-  const value = structuredClone(context);
+export function assertCompactionIntegrity(
+  original: unknown,
+  candidate: unknown,
+): void {
+  const reject = (): never => {
+    throw new AgentError(
+      "CONTEXT_INTEGRITY",
+      "Compaction changed protected context or introduced an unsupported summary; the candidate was not adopted",
+    );
+  };
+  const value = structuredClone(candidate);
   const messages =
-    value &&
-    typeof value === "object" &&
-    Array.isArray((value as Record<string, unknown>).messages)
-      ? ((value as Record<string, unknown>).messages as unknown[])
+    original &&
+    typeof original === "object" &&
+    Array.isArray((original as Record<string, unknown>).messages)
+      ? ((original as Record<string, unknown>).messages as unknown[])
       : undefined;
-  if (!messages) return value;
-  const lastTool = messages.reduce(
-    (last, item, index) =>
-      item &&
-      typeof item === "object" &&
-      isToolResult(item as Record<string, unknown>)
-        ? index
-        : last,
-    -1,
-  );
-  (value as Record<string, unknown>).messages = messages.filter(
-    (item, index) =>
-      !(
+  if (messages) {
+    const after =
+      value && typeof value === "object"
+        ? (value as Record<string, unknown>).messages
+        : undefined;
+    if (!Array.isArray(after) || after.length !== messages.length) reject();
+    if (!Array.isArray(after)) return;
+    const archiveId = sha256(JSON.stringify(original));
+    const lastTool = messages.reduce(
+      (last, item, index) =>
         item &&
         typeof item === "object" &&
-        isToolResult(item as Record<string, unknown>) &&
-        index !== lastTool &&
-        !isErrorResult(item as Record<string, unknown>)
-      ),
-  );
-  return value;
+        isToolResult(item as Record<string, unknown>)
+          ? index
+          : last,
+      -1,
+    );
+    messages.forEach((item, index) => {
+      if (!item || typeof item !== "object" || index === lastTool) return;
+      const message = item as Record<string, unknown>;
+      if (!isToolResult(message) || isErrorResult(message)) return;
+      const alternatives = [
+        message,
+        compactMessage(message, archiveId, "excerpt"),
+        compactMessage(message, archiveId, "marker"),
+      ];
+      if (
+        !alternatives.some(
+          (alternative) => canonical(alternative) === canonical(after[index]),
+        )
+      )
+        reject();
+      after[index] = structuredClone(item);
+    });
+  }
+  if (canonical(original) !== canonical(value)) reject();
 }
 
 export async function archiveContext(
@@ -409,11 +420,8 @@ export async function compactContext(
       "Protected context exceeds the provider context budget; remove old tool-independent content or start a new conversation",
     );
   const afterBytes = estimateContextBytes(candidate.value);
-  if (
-    canonical(protectedProjection(context)) !==
-      canonical(protectedProjection(candidate.value)) ||
-    afterBytes > budget.usableBytes
-  )
+  assertCompactionIntegrity(context, candidate.value);
+  if (afterBytes > budget.usableBytes)
     throw new AgentError(
       "CONTEXT_LIMIT",
       "Context remains above the provider context budget after compacting older tool results; no protected content was truncated",

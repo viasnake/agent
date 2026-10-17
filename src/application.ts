@@ -120,6 +120,12 @@ import {
   parseDocumentToken,
   prepareDocument,
 } from "./documents.js";
+import {
+  confirmContextReview as confirmBackendContextReview,
+  previewContextReview as previewBackendContextReview,
+  assertContextReady,
+  type ContextReviewPreview,
+} from "./context-review.js";
 import { readClipboardPng } from "./clipboard.js";
 import {
   readGitStatus,
@@ -165,6 +171,9 @@ export interface AppEvent {
 }
 export interface ApplicationModelChangePreview extends ModelChangePreview {
   sessionBinding: string;
+  appBinding: string;
+}
+export interface ApplicationContextReviewPreview extends ContextReviewPreview {
   appBinding: string;
 }
 export interface InputPreview {
@@ -1058,6 +1067,19 @@ export class Application extends EventEmitter {
     if (this.busy || this.closed) return;
     const next = this.session.queue.find((q) => q.mode === "next");
     if (!next) return;
+    const current = this.currentRun();
+    if (current) {
+      try {
+        assertContextReady(current);
+      } catch (error) {
+        if (
+          error instanceof AgentError &&
+          error.code === "CONTEXT_REVIEW_REQUIRED"
+        )
+          return;
+        throw error;
+      }
+    }
     this.busy = true;
     this.controller = new AbortController();
     const generation = this.generation;
@@ -2180,6 +2202,7 @@ export class Application extends EventEmitter {
         "TERMINAL_RUN",
         "完了・失敗・中断した作業は再実行しません。続きの依頼を入力してください。",
       );
+    assertContextReady(run);
     this.assertRunPolicyCurrent(run);
     this.busy = true;
     this.activeRunId = run.id;
@@ -2210,6 +2233,43 @@ export class Application extends EventEmitter {
       this.publish("changed");
     });
     await this.work;
+  }
+  previewContextReview(
+    runId = this.session.latestRunId,
+  ): ApplicationContextReviewPreview {
+    this.idle();
+    if (!runId || runId !== this.session.latestRunId)
+      throw new AgentError(
+        "CONTEXT_REVIEW",
+        "Review must target the current run",
+      );
+    const preview = previewBackendContextReview(this.store, runId);
+    return {
+      ...preview,
+      appBinding: sha256(
+        canonical({
+          binding: preview.binding,
+          sessionId: this.session.id,
+          generation: this.generation,
+          currentRunId: this.session.latestRunId,
+        }),
+      ),
+    };
+  }
+  confirmContextReview(
+    preview: ApplicationContextReviewPreview,
+    note: string,
+  ): Run {
+    this.idle();
+    const fresh = this.previewContextReview(preview.runId);
+    if (
+      fresh.binding !== preview.binding ||
+      fresh.appBinding !== preview.appBinding
+    )
+      throw new AgentError("CONTEXT_REVIEW_STALE", "Context review is stale");
+    const run = confirmBackendContextReview(this.store, preview, note);
+    this.publish("changed");
+    return run;
   }
   async diff(): Promise<{
     runId: string;
