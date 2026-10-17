@@ -48,6 +48,7 @@ import {
 import { Harness } from "./harness.js";
 import { Sandbox } from "./sandbox.js";
 import { Store } from "./storage.js";
+import type { ToolApprovalHandler } from "./tool-approval.js";
 import {
   AgentError,
   terminalStates,
@@ -315,6 +316,7 @@ export class Application extends EventEmitter {
   >();
   private readonly cachePreviews = new WeakMap<CacheCleanupPreview, string>();
   private accessOverride?: RequestAccess;
+  toolApproval?: ToolApprovalHandler;
   constructor(
     public config: Config,
     readonly paths: Paths,
@@ -1304,6 +1306,7 @@ export class Application extends EventEmitter {
             typeof detail.runId === "string" ? detail.runId : this.activeRunId,
           );
       },
+      this.toolApproval,
     );
     const contextRunId = this.session.contextRunId ?? this.session.latestRunId;
     const contextRun = contextRunId ? this.store.get(contextRunId) : undefined;
@@ -2173,6 +2176,7 @@ export class Application extends EventEmitter {
           )
             this.publish(type, detail, run.id);
         },
+        this.toolApproval,
       );
       await this.executePrepared(harness, run, signal);
     })().finally(() => {

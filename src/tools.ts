@@ -62,6 +62,11 @@ export class TaskTools {
     description: string,
     schema: S,
     execute: (args: z.output<S>, signal: AbortSignal) => Promise<string>,
+    beforeDispatch?: (
+      args: z.output<S>,
+      signal: AbortSignal,
+      operationId: string,
+    ) => Promise<void>,
   ): ToolSpec {
     return {
       name,
@@ -79,15 +84,26 @@ export class TaskTools {
                 .map((i) => `${i.path.join(".")}: ${i.message}`)
                 .join("; "),
             );
+          const data = structuredClone(parsed.data);
           const operation = this.store.prepare(
             this.run,
             this.task.id,
             name,
-            parsed.data,
+            data,
           );
-          this.store.operation(this.run, operation, "dispatched");
+          let dispatched = false;
           try {
-            const result = await execute(parsed.data, signal);
+            await beforeDispatch?.(data, signal, operation);
+            signal.throwIfAborted();
+            this.store.assertLease(this.run.id, this.run.generation);
+            if (this.store.cancelRequested(this.run.id))
+              throw new AgentError(
+                "CANCELLED",
+                "Cancellation requested before dispatch",
+              );
+            this.store.operation(this.run, operation, "dispatched");
+            dispatched = true;
+            const result = await execute(data, signal);
             signal.throwIfAborted();
             const log = await this.store.artifact(
               this.run,
@@ -111,6 +127,7 @@ export class TaskTools {
                 "SANDBOX",
               ].includes(error.code);
             const uncertain =
+              dispatched &&
               !rejected &&
               (signal.aborted || name === "shell" || name.startsWith("mcp_"));
             this.store.operation(

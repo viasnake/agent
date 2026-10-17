@@ -66,7 +66,8 @@ const mcp = z.strictObject({
     z.string().min(1),
     z.strictObject({
       schemaSha256: z.string().regex(/^[a-f0-9]{64}$/),
-      readOnly: z.literal(true),
+      readOnly: z.boolean(),
+      effect: z.enum(["change", "publish", "delete", "dangerous"]).optional(),
     }),
   ),
 });
@@ -311,6 +312,18 @@ export function validateConfig(input: unknown): Config {
       "Routing classifier must reference a Clef connection",
     );
   for (const [key, server] of Object.entries(config.mcp)) {
+    for (const permission of Object.values(server.tools)) {
+      if (permission.readOnly && permission.effect)
+        throw new AgentError(
+          "CONFIG",
+          `${key}: remove the mutation effect before declaring a tool read-only`,
+        );
+      if (!permission.readOnly && server.url && new URL(server.url).search)
+        throw new AgentError(
+          "CONFIG",
+          `${key}: mutation endpoints must not contain a URL query; use OAuth or bearerEnv for credentials`,
+        );
+    }
     if (
       server.transport === "stdio" &&
       (!server.command?.startsWith("/") || !server.commandSha256)

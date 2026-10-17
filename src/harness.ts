@@ -7,6 +7,7 @@ import {
   type Paths,
 } from "./config.js";
 import { McpTools } from "./mcp.js";
+import type { ToolApprovalHandler } from "./tool-approval.js";
 import { Planner } from "./planner.js";
 import { Router } from "./routing.js";
 import { runFailureState } from "./run-state.js";
@@ -109,6 +110,7 @@ export class Harness {
       type: string,
       detail: Record<string, unknown>,
     ) => void = () => {},
+    readonly approveTool?: ToolApprovalHandler,
   ) {
     this.sandbox = new Sandbox(config.execution);
     this.evaluator = new Evaluator(config, store, this.sandbox, notify);
@@ -830,6 +832,7 @@ export class Harness {
       this.sandbox,
       work,
       controller.signal,
+      this.approveTool,
     );
     const closeResources = async () => {
       const results = await Promise.allSettled([

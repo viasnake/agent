@@ -7,6 +7,8 @@ import {
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { SettingsDialog } from "./settings.js";
+import { confirmToolOperation } from "./tool-approval.js";
+import type { ToolApprovalRequest } from "../tool-approval.js";
 import { ResearchBrowser } from "./research-browser.js";
 import { SearchBrowser } from "./search-browser.js";
 import { ForkBrowser } from "./fork-browser.js";
@@ -313,6 +315,8 @@ export class TerminalApp {
       if (this.earlyExit) return;
       this.preferences = await loadPreferences(p);
       this.app = new Application(config, p, new Store(p), process.cwd());
+      this.app.toolApproval = (request, signal) =>
+        this.approveTool(request, signal);
       this.app.on("event", (event: AppEvent) => this.event(event));
       await this.app.initialize();
       if (this.earlyExit) {
@@ -649,11 +653,40 @@ export class TerminalApp {
     this.tui.setFocus(this.input);
     this.tui.requestRender();
   }
+  private async approveTool(
+    request: ToolApprovalRequest,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (
+      this.closing ||
+      this.busyDialog ||
+      this.tui.hasOverlay() ||
+      signal.aborted
+    ) {
+      this.notice =
+        "外部操作の確認画面を開けないため、この操作は実行しません。";
+      this.render();
+      return false;
+    }
+    this.busyDialog = true;
+    try {
+      return await confirmToolOperation(request, signal, {
+        show: (text, title, accept, signal) =>
+          this.show(text, title, accept, signal),
+        choose: (title, choices, signal) =>
+          this.choose(title, choices, false, signal),
+      });
+    } finally {
+      this.busyDialog = false;
+    }
+  }
   private async choose(
     title: string,
     choices: { value: string; label: string; description?: string }[],
     searchable = choices.length > 5,
+    signal?: AbortSignal,
   ): Promise<string | undefined> {
+    if (signal?.aborted) return undefined;
     if (this.tui.hasOverlay())
       throw new AgentError("DIALOG", "現在の画面を閉じてください。");
     return new Promise((resolve) => {
@@ -667,17 +700,24 @@ export class TerminalApp {
         searchable,
         () => this.terminal.rows,
       );
+      let settled = false;
+      const cancel = () => finish();
       const finish = (value?: string) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", cancel);
         this.closeDialog();
         resolve(value);
       };
       picker.onSelect = finish;
-      this.cancelDialog = () => finish();
+      this.cancelDialog = cancel;
       this.tui.showOverlay(new ResponsiveOverlay(picker), {
         width: "100%",
         margin: 1,
         anchor: "center",
       });
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
     });
   }
   private async editSettings(
@@ -757,24 +797,30 @@ export class TerminalApp {
     text: string,
     title = "詳細",
     accept = "",
+    signal?: AbortSignal,
   ): Promise<boolean> {
+    if (signal?.aborted) return false;
     if (this.tui.hasOverlay()) return false;
     return new Promise((resolve) => {
       this.reader = new Reader(this.tui, text, title, accept);
-      this.cancelDialog = () => {
+      let settled = false;
+      const cancel = () => finish(false);
+      const finish = (accepted: boolean) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", cancel);
         this.closeDialog();
-        resolve(false);
+        resolve(accepted);
       };
-      if (accept)
-        this.acceptReader = () => {
-          this.closeDialog();
-          resolve(true);
-        };
+      this.cancelDialog = cancel;
+      if (accept) this.acceptReader = () => finish(true);
       this.tui.showOverlay(new ResponsiveOverlay(this.reader, 104), {
         width: "100%",
         margin: 1,
         anchor: "center",
       });
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
     });
   }
   private async command(line: string): Promise<void> {

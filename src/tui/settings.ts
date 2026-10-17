@@ -228,7 +228,10 @@ export class SettingsDialog {
       "mcp.local": "ネットワーク隔離されたローカル実行",
       "mcp.tools": "ツールごとの承認済みスキーマ",
       "mcp.schemaSha256": "ツールスキーマの SHA-256",
-      "mcp.readOnly": "読み取り専用ツールのみ許可",
+      "mcp.readOnly":
+        "false は毎回の対話承認が必須。変更効果を削除してから true に戻す",
+      "mcp.effect":
+        "change/publish/delete/dangerous。未指定の変更ツールは危険操作扱い",
     };
     const pendingPaths = this.pending.map((change) => change.path.join("."));
     const pending = (path: string) =>
@@ -257,6 +260,13 @@ export class SettingsDialog {
           if (!("reasoning" in node)) visit(false, [...path, "reasoning"]);
           if (!("thinkingLevel" in node)) visit("", [...path, "thinkingLevel"]);
         }
+        if (
+          path[0] === "mcp" &&
+          path.length === 4 &&
+          path[2] === "tools" &&
+          !("effect" in node)
+        )
+          visit("", [...path, "effect"]);
         return;
       }
       const joined = path.join(".");
@@ -358,6 +368,10 @@ export class SettingsDialog {
       (keys.length === 3 &&
         keys[0] === "models" &&
         field === "thinkingLevel") ||
+      (keys.length === 5 &&
+        keys[0] === "mcp" &&
+        keys[2] === "tools" &&
+        field === "effect") ||
       keys.join(".") === "execution.image" ||
       keys.join(".") === "routing.classifier";
     const remove = !session && optional && text === "";
