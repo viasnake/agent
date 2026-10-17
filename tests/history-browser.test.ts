@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync } from "node:fs";
+import fsSync, { existsSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs/promises";
 import { join } from "node:path";
 import { stringify } from "yaml";
@@ -356,5 +357,84 @@ test("closing waits for in-flight physical cleanup and never starts queued infer
     t.mock.restoreAll();
     if (!closed) await f.app.close();
     await f.cleanup();
+  }
+});
+
+test("cache dialog requires exact selection and retries only one reviewed job", async () => {
+  const f = await historyFixture();
+  const digest = "a".repeat(64);
+  const relative = `images/${digest}.img`;
+  const blob = join(f.p.home, relative);
+  const old = new Date(Date.now() - 2 * 86_400_000);
+  try {
+    await fs.mkdir(join(f.p.home, "images"), { mode: 0o700 });
+    await fs.writeFile(blob, "old cache", { mode: 0o600 });
+    await fs.utimes(blob, old, old);
+    for (const cancelAt of ["picker", "preview", "confirmation"]) {
+      let selected = false;
+      await new HistoryBrowser(f.app, {
+        choose: async (_title, choices) => {
+          if (cancelAt === "picker") return undefined;
+          if (!selected) {
+            selected = true;
+            assert.ok(choices.some((choice) => choice.value === relative));
+            return relative;
+          }
+          assert.ok(choices.some((choice) => choice.value === "preview"));
+          return "preview";
+        },
+        show: async (text) => {
+          assert.match(text, /全作業ディレクトリ/);
+          assert.match(text, /24時間未満/);
+          assert.match(text, /プロセス寿命中保持する pin/);
+          return cancelAt !== "preview";
+        },
+        confirm: async () => cancelAt !== "confirmation",
+        notice: () => assert.fail("Cancelled cache cleanup must not report"),
+      }).cacheCleanup();
+      assert.equal(existsSync(blob), true);
+    }
+
+    const preview = await f.app.previewCacheCleanup([relative]);
+    const unlink = fsSync.unlinkSync;
+    fsSync.unlinkSync = ((target: fsSync.PathLike) => {
+      if (String(target) === blob)
+        throw Object.assign(new Error("fixture unlink failure"), {
+          code: "EACCES",
+        });
+      unlink(target);
+    }) as typeof fsSync.unlinkSync;
+    syncBuiltinESMExports();
+    try {
+      const pending = await f.app.confirmCacheCleanup(preview);
+      assert.equal(pending.pending.length, 1);
+    } finally {
+      fsSync.unlinkSync = unlink;
+      syncBuiltinESMExports();
+    }
+    const job = (await f.app.pendingCacheCleanups())[0]!;
+    let notice = "";
+    await new HistoryBrowser(f.app, {
+      choose: async (_title, choices) => {
+        assert.ok(choices.some((choice) => choice.value === job.id));
+        return job.id;
+      },
+      show: async (text, title) => {
+        assert.match(title, /候補/);
+        assert.ok(text.includes(relative));
+        return true;
+      },
+      confirm: async () => true,
+      notice: (text) => {
+        notice = text;
+      },
+    }).cacheCleanup();
+    assert.match(notice, /削除が完了/);
+    assert.equal(existsSync(blob), false);
+    assert.equal((await f.app.pendingCacheCleanups()).length, 0);
+    assert.equal(f.runtime.requests.length, 0);
+  } finally {
+    syncBuiltinESMExports();
+    await f.close();
   }
 });

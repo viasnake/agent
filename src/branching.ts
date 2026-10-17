@@ -324,6 +324,7 @@ export async function verifyBoundaryState(
           throw new AgentError("FORK_CORRUPT", "Blob sizes disagree");
         continue;
       }
+      await pinSharedBlobs(paths, [`checkpoints/blobs/${entry.hash}`]);
       await readBoundedFile(
         await safePath(paths.checkpoints, `blobs/${entry.hash}`),
         config.limits.maxWorkspaceBytes,
@@ -333,7 +334,6 @@ export async function verifyBoundaryState(
           privateStorage: true,
         },
       );
-      await pinSharedBlobs(paths, [`checkpoints/blobs/${entry.hash}`]);
       seen.set(entry.hash, entry.bytes);
     }
   }
@@ -531,6 +531,7 @@ async function restoreTree(
   ] as const)
     for (const entry of files) {
       checkDeadline(deadline);
+      await pinSharedBlobs(paths, [`checkpoints/blobs/${entry.hash}`]);
       const content = await readBoundedFile(
         await safePath(paths.checkpoints, `blobs/${entry.hash}`),
         entry.bytes,

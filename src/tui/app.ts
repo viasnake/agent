@@ -912,6 +912,11 @@ export class TerminalApp {
         break;
       }
       case "cache-cleanup":
+        if (argument)
+          throw new AgentError(
+            "DELETE_REQUEST",
+            "/cache-cleanup は引数なしで候補を確認してください。",
+          );
         await new HistoryBrowser(app, {
           choose: this.choose.bind(this),
           show: this.show.bind(this),

@@ -290,9 +290,116 @@ export class HistoryBrowser {
   async cacheCleanup(): Promise<void> {
     const sessionId = this.app.session.id;
     this.current(sessionId);
-    const preview = await this.app.previewCacheCleanup();
+    const jobs = await this.app.pendingCacheCleanups();
+    let retryId: string | undefined;
+    if (jobs.length) {
+      let offset = 0;
+      while (!retryId) {
+        this.current(sessionId);
+        const page = jobs.slice(offset, offset + 30);
+        const choice = await this.dialogs.choose(
+          "共有キャッシュ · 新規選択または保留ジョブの再試行",
+          [
+            ...(offset === 0
+              ? [{ value: "new", label: "新しい候補を表示" }]
+              : []),
+            ...page.map((job) => ({
+              value: job.id,
+              label: `保留ジョブ ${job.id}`,
+              description: safeText(job.error ?? `${job.paths.length} 件`),
+            })),
+            ...(offset ? [{ value: "previous", label: "前の30件" }] : []),
+            ...(offset + 30 < jobs.length
+              ? [{ value: "next", label: "次の30件" }]
+              : []),
+          ],
+        );
+        this.current(sessionId);
+        if (!choice) return;
+        if (choice === "new") break;
+        if (choice === "next" && offset + 30 < jobs.length) {
+          offset += 30;
+          continue;
+        }
+        if (choice === "previous" && offset) {
+          offset -= 30;
+          continue;
+        }
+        if (page.some((job) => job.id === choice)) {
+          retryId = choice;
+          break;
+        }
+        throw new AgentError(
+          "STALE_VIEW",
+          "表示された保留ジョブから選び直してください。",
+        );
+      }
+    }
+    let preview;
+    if (retryId) preview = await this.app.previewCacheCleanupRetry(retryId);
+    else {
+      const initial = await this.app.previewCacheCleanup();
+      const selected = new Set<string>();
+      let offset = 0;
+      while (true) {
+        this.current(sessionId);
+        const page = initial.selected.slice(offset, offset + 30);
+        const choices = [
+          ...page.map((item) => ({
+            value: item.path,
+            label: `${selected.has(item.path) ? "[選択済] " : ""}${literal(item.path)} · ${item.bytes} bytes`,
+          })),
+          ...(selected.size
+            ? [
+                {
+                  value: "preview",
+                  label: `選択した ${selected.size} 件を確認`,
+                },
+              ]
+            : []),
+          ...(offset ? [{ value: "previous", label: "前の30件" }] : []),
+          ...(offset + 30 < initial.selected.length
+            ? [{ value: "next", label: "次の30件" }]
+            : []),
+        ];
+        if (!choices.length) {
+          await this.dialogs.show(
+            "削除可能な共有 cache はありません。保持理由を確認してください。",
+            "共有キャッシュ · 候補なし",
+            "",
+          );
+          return;
+        }
+        const choice = await this.dialogs.choose(
+          `共有 cache の選択 · ${initial.moreCandidates} 件は overflow として未選択`,
+          choices,
+        );
+        this.current(sessionId);
+        if (!choice) return;
+        if (choice === "preview" && selected.size) break;
+        if (choice === "next" && offset + 30 < initial.selected.length) {
+          offset += 30;
+          continue;
+        }
+        if (choice === "previous" && offset) {
+          offset -= 30;
+          continue;
+        }
+        if (!page.some((item) => item.path === choice))
+          throw new AgentError(
+            "STALE_VIEW",
+            "表示された共有 cache から選び直してください。",
+          );
+        if (selected.has(choice)) selected.delete(choice);
+        else if (selected.size < 500) selected.add(choice);
+      }
+      preview = await this.app.previewCacheCleanup([...selected]);
+    }
     const text = [
-      "## 共有キャッシュ削除候補（まだ削除していません）",
+      retryId
+        ? "## 共有キャッシュ保留ジョブ（まだ削除していません）"
+        : "## 共有キャッシュ削除候補（まだ削除していません）",
+      "対象: 全作業ディレクトリの共有キャッシュ",
       `対象: ${preview.selected.length} 件、超過候補: ${preview.moreCandidates} 件`,
       ...preview.selected.map(
         (item) => `${literal(item.path)} (${item.bytes} bytes)`,
@@ -300,8 +407,12 @@ export class HistoryBrowser {
       ...preview.retained.map(
         (item) => `保持: ${literal(item.path)}\n理由: ${safeText(item.reason)}`,
       ),
-      "24時間未満、参照中、稼働プロセスの pin は保持します。バックアップ・SQLite残存ページ・外部コピーの暗号学的消去は保証しません。",
+      "24時間未満、参照中、プロセス寿命中保持する pin は保護します。バックアップ・SQLite残存ページ・外部コピーの暗号学的消去は保証しません。",
     ].join("\n\n");
+    if (!preview.selected.length) {
+      await this.dialogs.show(text, "共有キャッシュ · 保持", "");
+      return;
+    }
     if (
       !(await this.dialogs.show(
         text,
@@ -313,7 +424,9 @@ export class HistoryBrowser {
     this.current(sessionId);
     if (
       !(await this.dialogs.confirm(
-        "表示された共有キャッシュを明示的に削除しますか？",
+        retryId
+          ? "表示された保留ジョブを一件だけ再試行しますか？"
+          : "表示された共有キャッシュを明示的に削除しますか？",
       ))
     )
       return;

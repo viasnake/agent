@@ -25,7 +25,7 @@ import {
   previewCacheCleanup,
   confirmCacheCleanup,
   pendingCacheCleanups,
-  retryCacheCleanup,
+  previewCacheCleanupJob,
   type CacheCleanupPreview,
 } from "./cache-cleanup.js";
 import {
@@ -3463,11 +3463,23 @@ export class Application extends EventEmitter {
   }
   async previewCacheCleanup(paths: string[] = []) {
     this.idle();
+    this.assertMaintenanceView(this.maintenanceBinding());
+    this.conversations.save(this.session);
     const binding = this.maintenanceBinding();
     const preview = await previewCacheCleanup(this.store, this.config, {
       kind: paths.length ? "selection" : "eligible",
       paths,
+      owner: {
+        sessionId: this.session.id,
+        owner: this.conversations.owner,
+        idleSaved: true,
+      },
     });
+    if (binding !== this.maintenanceBinding())
+      throw new AgentError(
+        "STALE_VIEW",
+        "会話・設定が変わりました。削除候補を選び直してください。",
+      );
     this.cachePreviews.set(preview, binding);
     return preview;
   }
@@ -3477,8 +3489,29 @@ export class Application extends EventEmitter {
     this.cachePreviews.delete(preview);
     this.assertMaintenanceView(binding);
     return this.historyOperation((signal) =>
-      confirmCacheCleanup(this.store, this.config, preview, signal),
+      confirmCacheCleanup(this.store, this.config, preview, signal, {
+        beforeCommit: () => this.assertMaintenanceView(binding),
+        owner: {
+          sessionId: this.session.id,
+          owner: this.conversations.owner,
+          idleSaved: true,
+        },
+      }),
     );
+  }
+  async previewCacheCleanupRetry(id: string) {
+    this.idle();
+    this.assertMaintenanceView(this.maintenanceBinding());
+    this.conversations.save(this.session);
+    const binding = this.maintenanceBinding();
+    const preview = await previewCacheCleanupJob(this.paths, id);
+    if (binding !== this.maintenanceBinding())
+      throw new AgentError(
+        "STALE_VIEW",
+        "会話・設定が変わりました。再試行対象を選び直してください。",
+      );
+    this.cachePreviews.set(preview, binding);
+    return preview;
   }
   async pendingCacheCleanups() {
     this.idle();
@@ -3486,9 +3519,8 @@ export class Application extends EventEmitter {
   }
   async retryCacheCleanup(id: string) {
     this.idle();
-    return this.historyOperation((signal) =>
-      retryCacheCleanup(this.store, this.config, id, signal),
-    );
+    const preview = await this.previewCacheCleanupRetry(id);
+    return this.confirmCacheCleanup(preview);
   }
   async doctor() {
     const directory = await mkdtemp(join(this.paths.home, "doctor-"));

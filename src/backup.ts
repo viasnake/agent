@@ -24,26 +24,9 @@ import { configHash, validateConfig, type Config } from "./config.js";
 import type { Store } from "./storage.js";
 import { AgentError } from "./types.js";
 import { canonical, sha256, within } from "./util.js";
+import { snapshotMetadata } from "./metadata-snapshot.js";
 
-const tables = [
-  "runs",
-  "events",
-  "operations",
-  "requests",
-  "artifacts",
-  "cooldowns",
-  "conversations",
-  "conversation_runs",
-  "messages",
-  "source_links",
-  "boundaries",
-  "message_boundaries",
-  "boundary_artifacts",
-  "fork_lineages",
-  "deletion_queue",
-] as const;
 const digest = /^[a-f0-9]{64}$/;
-const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const limitsSchema = z
   .strictObject({
     maxBytes: z
@@ -235,132 +218,6 @@ function safeArchivePath(path: string): boolean {
       path,
     )
   );
-}
-
-function snapshotMetadata(db: DatabaseSync, deadline: number) {
-  const hash = createHash("sha256");
-  const version = Number(
-    (db.prepare("PRAGMA user_version").get() as { user_version: number })
-      .user_version,
-  );
-  const references = new Map<string, BlobReference>();
-  let rows = 0,
-    bytes = 0,
-    conversations = 0,
-    runs = 0;
-  const add = (path: string, expectedHash: unknown, expectedBytes: unknown) => {
-    if (
-      typeof expectedHash !== "string" ||
-      !digest.test(expectedHash) ||
-      typeof expectedBytes !== "number" ||
-      !Number.isSafeInteger(expectedBytes) ||
-      expectedBytes < 0
-    )
-      fail("保存済み資料の参照が不正です。");
-    const previous = references.get(path);
-    if (
-      previous &&
-      (previous.sha256 !== expectedHash || previous.bytes !== expectedBytes)
-    )
-      fail("同じ資料の参照が矛盾しています。");
-    references.set(path, { path, sha256: expectedHash, bytes: expectedBytes });
-  };
-  const inputs = (value: unknown, depth = 0): void => {
-    if (depth > 100) fail("保存済みメタデータの入れ子が深すぎます。");
-    if (!value || typeof value !== "object") return;
-    if (Array.isArray(value)) {
-      for (const item of value) inputs(item, depth + 1);
-      return;
-    }
-    const item = value as Record<string, unknown>;
-    if (typeof item.id === "string" && /^img-[a-f0-9]{64}$/.test(item.id)) {
-      if (item.sha256 !== item.id.slice(4)) fail("画像参照が不正です。");
-      add(`images/${item.id.slice(4)}.img`, item.sha256, item.bytes);
-    }
-    if (typeof item.id === "string" && /^doc-[a-f0-9]{64}$/.test(item.id)) {
-      add(
-        `attachments/${String(item.rawSha256)}.raw`,
-        item.rawSha256,
-        item.rawBytes,
-      );
-      add(
-        `attachments/${item.id}.selected`,
-        item.selectedSha256,
-        item.selectedBytes,
-      );
-    }
-    for (const child of Object.values(item)) inputs(child, depth + 1);
-  };
-  for (const table of tables) {
-    if (
-      table === "deletion_queue" &&
-      (version < 4 ||
-        !db
-          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
-          .get(table))
-    )
-      continue;
-    hash.update(table);
-    for (const raw of db
-      .prepare(`SELECT * FROM ${table} ORDER BY rowid`)
-      .iterate()) {
-      deadlineCheck(deadline);
-      if (++rows > 100_000)
-        fail("保存済みメタデータが件数上限を超えています。");
-      const row = { ...raw };
-      if (table === "runs" || table === "conversations") delete row.heartbeat;
-      if (table === "conversations") {
-        delete row.updated_at;
-        conversations++;
-      }
-      if (table === "runs") runs++;
-      const encoded = canonical(row);
-      bytes += Buffer.byteLength(encoded);
-      if (bytes > 64_000_000)
-        fail("保存済みメタデータがサイズ上限を超えています。");
-      hash.update(encoded + "\n");
-      if (typeof row.payload !== "string") continue;
-      const value = JSON.parse(row.payload) as Record<string, unknown>;
-      if (table === "artifacts") {
-        if (
-          typeof value.runId !== "string" ||
-          !uuid.test(value.runId) ||
-          value.runId !== row.run_id ||
-          value.id !== row.id
-        )
-          fail("成果物の実行IDが不正です。");
-        add(
-          `runs/${value.runId}/artifacts/${String(value.sha256)}`,
-          value.sha256,
-          value.bytes,
-        );
-      }
-      if (
-        table === "runs" ||
-        table === "conversations" ||
-        table === "boundaries"
-      )
-        inputs(value);
-      if (table === "boundaries") {
-        if (sha256(row.payload) !== row.hash)
-          fail("保存境界の内容が検証値と一致しません。");
-        for (const kind of ["coding", "document"]) {
-          const tree = value[kind] as
-            { baseline?: unknown[]; work?: unknown[] } | undefined;
-          if (!tree) continue;
-          for (const item of [...(tree.baseline ?? []), ...(tree.work ?? [])]) {
-            const file = item as Record<string, unknown>;
-            add(
-              `checkpoints/blobs/${String(file.hash)}`,
-              file.hash,
-              file.bytes,
-            );
-          }
-        }
-      }
-    }
-  }
-  return { binding: hash.digest("hex"), references, conversations, runs };
 }
 
 function assertQuiescent(store: Store, owner?: BackupOwner): void {

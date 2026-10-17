@@ -15,7 +15,7 @@ import {
   confirmCacheCleanup,
   pendingCacheCleanups,
   previewCacheCleanup,
-  retryCacheCleanup,
+  previewCacheCleanupJob,
 } from "../cache-cleanup.js";
 
 const deletionWarning =
@@ -74,19 +74,23 @@ export function registerMaintenanceCommands(cli: CliContext): void {
         if (!options.write) {
           print({
             written: false,
-            preview: await previewCacheCleanup(store, config, {
-              kind: "selection",
-              paths:
-                (await pendingCacheCleanups(store.paths)).find(
-                  (job) => job.id === jobId,
-                )?.paths ?? [],
-            }),
+            preview: await previewCacheCleanupJob(store.paths, jobId),
           });
           return;
         }
+        const preview = await previewCacheCleanupJob(store.paths, jobId);
+        const result = await confirmCacheCleanup(
+          store,
+          config,
+          preview,
+          signal,
+        );
         print({
           written: true,
-          ...(await retryCacheCleanup(store, config, jobId, signal)),
+          ...result,
+          cleanupComplete: result.pending.length === 0,
+          warning:
+            "共有キャッシュの pending が残る場合、物理削除は完了していません。暗号学的消去は保証しません。",
         });
       }),
     );
