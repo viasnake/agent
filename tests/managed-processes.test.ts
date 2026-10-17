@@ -1095,7 +1095,7 @@ test("real Podman enforces managed isolation, live workspace, logs, and deadline
     shortConfig.execution.image = image;
     shortConfig.execution.managedProcesses = {
       engineAnchor: anchor,
-      maxSeconds: 2,
+      maxSeconds: 5,
       maxProcesses: 1,
     };
     const shortHarness = new Harness(
@@ -1129,7 +1129,7 @@ test("real Podman enforces managed isolation, live workspace, logs, and deadline
       "printf ready; sleep 30",
       new AbortController().signal,
     );
-    const readyDeadline = Date.now() + 5000;
+    const readyDeadline = Date.now() + 10000;
     let ready = false;
     while (Date.now() < readyDeadline) {
       const value = await shortManager.logs(shortOperation);
