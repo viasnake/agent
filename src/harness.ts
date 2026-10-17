@@ -359,6 +359,20 @@ export class Harness {
       ? (this.store.assertIdle(sourceRunId), this.store.get(sourceRunId))
       : undefined;
     if (sourceRun) {
+      if (sourceRun.forkCheckpointId) {
+        const lineage = options.conversationId
+          ? this.store.lineage(options.conversationId)
+          : undefined;
+        if (
+          !lineage ||
+          lineage.child_session_id !== options.conversationId ||
+          lineage.checkpoint_id !== sourceRun.forkCheckpointId
+        )
+          throw new AgentError(
+            "SOURCE",
+            "Branch checkpoint must remain owned by its child conversation",
+          );
+      }
       if (
         ["public", "private", "restricted"].indexOf(run.dataClass) <
           ["public", "private", "restricted"].indexOf(sourceRun.dataClass) ||
@@ -505,7 +519,7 @@ export class Harness {
         this.store.inheritSources(
           linkedRun.id,
           owned.id,
-          true,
+          !linkedRun.forkCheckpointId,
           !!options.contextState?.redactedImageIds?.length,
           [...excludedIds],
           [...excludedHashes],

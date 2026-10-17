@@ -27,6 +27,10 @@ test("captures user and assistant boundaries and forks without runtime work", as
     const requests = runtime.requests.length;
     await app.forkConversation(selected.seq, "state", preview.binding);
     assert.notEqual(app.session.id, parentId);
+    const seedIds = [app.session.workRunId, app.session.documentRunId].filter(
+      (value): value is string => !!value,
+    );
+    assert.ok(seedIds.every((runId) => f.store.get(runId).forkCheckpointId));
     assert.equal(runtime.requests.length, requests);
     assert.deepEqual(
       app.conversations
@@ -38,6 +42,9 @@ test("captures user and assistant boundaries and forks without runtime work", as
     const nestedPreview = await app.previewFork(nested.seq, "history");
     await app.forkConversation(nested.seq, "history", nestedPreview.binding);
     assert.equal(runtime.requests.length, requests);
+    assert.equal(app.session.workRunId, undefined);
+    assert.equal(app.session.documentRunId, undefined);
+    assert.equal(app.session.context?.sourceIds.length, 0);
   } finally {
     await app.close();
     await f.cleanup();

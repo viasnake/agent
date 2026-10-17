@@ -1448,7 +1448,6 @@ export class Application extends EventEmitter {
             .some(
               (artifact) =>
                 artifact.kind === "source" &&
-                artifact.runId === sourceRunId &&
                 contextState.sourceIds.includes(artifact.id),
             ),
         ),
@@ -1479,6 +1478,10 @@ export class Application extends EventEmitter {
       ...(access === "change" && (kind === "writing" || kind === "research")
         ? { documentRunId: run.id }
         : {}),
+      ...(kind === "coding" && run.workspace ? { workRunId: run.id } : {}),
+      ...(kind === "writing" || kind === "research"
+        ? { documentRunId: run.id }
+        : {}),
     };
     let userBoundary;
     try {
@@ -1488,6 +1491,8 @@ export class Application extends EventEmitter {
         this.store,
         captureSession,
         0,
+        undefined,
+        { visibleRunIds: [run.id] },
       );
     } catch (error) {
       userBoundary = saveUnavailableBoundary(
@@ -1885,6 +1890,8 @@ export class Application extends EventEmitter {
         this.store,
         this.session,
         0,
+        undefined,
+        { visibleRunIds: [result.id] },
       );
     } catch (error) {
       assistantBoundary = saveUnavailableBoundary(
@@ -3328,8 +3335,20 @@ export class Application extends EventEmitter {
       )
       .get(this.session.id, seq) as { count: number; bytes: number };
     assertPrefixBounds(stats.count, stats.bytes);
-    const state = boundary ? stateForBoundary(boundary) : undefined;
+    const state =
+      mode === "state" && boundary ? stateForBoundary(boundary) : undefined;
     const hash = boundary?.hash ?? sha256(canonical({ this: "history", seq }));
+    const prefixDigest = sha256(
+      canonical(
+        this.conversations.messages(this.session.id, seq + 1).map((item) => ({
+          seq: item.seq,
+          role: item.role,
+          text: item.text,
+          runId: item.run_id,
+          at: item.at,
+        })),
+      ),
+    );
     const binding = forkHash(
       this.session.id,
       seq,
@@ -3338,7 +3357,7 @@ export class Application extends EventEmitter {
       this.generation,
       this.session.workspace,
       configHash(this.config),
-      canonical(this.session.context),
+      canonical({ context: this.session.context, prefixDigest }),
     );
     return {
       sessionId: this.session.id,
@@ -3352,9 +3371,7 @@ export class Application extends EventEmitter {
       },
       stateAvailable: !!boundary?.state_available,
       warnings: [
-        ...(mode === "history"
-          ? ["モデル・ツールの provider archive は元の会話にのみ残ります。"]
-          : []),
+        "モデル・ツールの provider archive は元の会話にのみ残ります。",
         ...(!boundary
           ? ["この履歴には保存状態がありません。履歴のみ分岐できます。"]
           : []),
@@ -3372,9 +3389,14 @@ export class Application extends EventEmitter {
     name?: string,
   ): Promise<void> {
     this.idle();
+    const parentId = this.session.id,
+      parentGeneration = this.generation;
     const preview = await this.previewFork(seq, mode);
+    if (parentId !== this.session.id || parentGeneration !== this.generation)
+      throw new AgentError("STALE_VIEW", "会話が切り替わりました。");
     if (preview.binding !== binding)
       throw new AgentError("STALE_VIEW", "分岐の確認内容が古くなっています。");
+    this.busy = true;
     const parent = this.session;
     const boundary = this.store.boundary(parent.id, seq);
     if (mode === "state" && (!boundary || !boundary.state_available))
@@ -3382,8 +3404,8 @@ export class Application extends EventEmitter {
         "FORK_STATE",
         "選択点には復元可能な保存状態がありません。",
       );
-    const state = boundary ? stateForBoundary(boundary) : undefined;
-    const hasState = !!boundary?.state_available;
+    const state =
+      mode === "state" && boundary ? stateForBoundary(boundary) : undefined;
     const child = this.conversations.create(parent.workspace, {
       dataClass:
         state?.policy.dataClass === "restricted"
@@ -3392,27 +3414,24 @@ export class Application extends EventEmitter {
               parent.dataClass === "private"
             ? "private"
             : parent.dataClass,
-      strategy: hasState ? state!.settings.strategy : this.config.defaults.mode,
-      checks: hasState
-        ? state!.settings.checks
-        : Object.keys(this.config.checks),
+      strategy: state ? state.settings.strategy : this.config.defaults.mode,
+      checks: state ? state!.settings.checks : Object.keys(this.config.checks),
     });
     try {
       child.name =
         name?.trim().slice(0, 100) ||
         `${(state?.settings.name ?? parent.name).slice(0, 80)} 分岐`;
-      child.kind = hasState ? state!.settings.kind : "auto";
-      child.model = hasState ? state!.settings.model : undefined;
-      child.reviewer = hasState ? state!.settings.reviewer : undefined;
+      child.kind = state ? state.settings.kind : "auto";
+      child.model = state ? state.settings.model : undefined;
+      child.reviewer = state ? state.settings.reviewer : undefined;
       child.localOnly = (state?.policy.localOnly ?? false) || parent.localOnly;
-      child.includeUntracked =
-        state?.settings.includeUntracked ?? parent.includeUntracked;
-      child.context = hasState
-        ? structuredClone(state!.context)
+      child.includeUntracked = state?.settings.includeUntracked ?? false;
+      child.context = state
+        ? structuredClone(state.context)
         : emptyConversationContext();
       child.context ??= emptyConversationContext();
       const childContext = child.context;
-      if (state) {
+      {
         const current = normalizeConversationContext(parent.context);
         childContext.excludedSourceIds = [
           ...new Set([
@@ -3436,7 +3455,7 @@ export class Application extends EventEmitter {
         if (levels.indexOf(parent.dataClass) > levels.indexOf(child.dataClass))
           child.dataClass = parent.dataClass;
         child.localOnly ||= parent.localOnly;
-        child.images = hasState
+        child.images = state
           ? structuredClone(state.images).filter(
               (image) =>
                 !childContext.excludedSourceIds?.includes(image.id) &&
@@ -3471,24 +3490,7 @@ export class Application extends EventEmitter {
           });
           const source = this.store.boundary(parent.id, message.seq);
           if (source) {
-            const copiedBoundary = {
-              ...source,
-              id: id(),
-              session_id: child.id,
-              message_seq: copied,
-            };
-            const artifacts = stateForBoundary(source).artifacts.map(
-              ({ artifact }) => artifact.id,
-            );
-            this.store.saveBoundary({
-              id: copiedBoundary.id,
-              sessionId: child.id,
-              messageSeq: copied,
-              hash: source.hash,
-              payload: source.payload,
-              stateAvailable: !!source.state_available,
-              artifactIds: artifacts,
-            });
+            this.store.linkBoundary(child.id, copied, source.id);
           }
         }
         childContext.instructions = copiedInstructions;
@@ -3517,26 +3519,26 @@ export class Application extends EventEmitter {
       if (state && mode === "state") {
         const makeSeed = async (
           treeSnapshot: BoundaryState["coding"],
-          sourceRunId: string | undefined,
           kind: "coding" | "writing",
         ) => {
           if (!treeSnapshot) return undefined;
-          const source = sourceRunId ? this.store.get(sourceRunId) : undefined;
-          if (!source)
-            throw new AgentError("FORK_CORRUPT", "Seed source run is missing");
           const seed: Run = {
-            ...structuredClone(source),
             id: id(),
             conversationId: child.id,
             parentRunId: undefined,
             objective: forkObjective,
             kind,
+            mode: state.settings.strategy,
+            dataClass: child.dataClass,
+            localOnly: child.localOnly,
+            workspace: treeSnapshot.origin ?? child.workspace,
+            model: state.settings.model,
+            reviewer: state.settings.reviewer,
             state: "created",
             prepared: true,
+            configHash: configHash(this.config),
             tasks: [],
             inputs: [],
-            requests: undefined,
-            operations: undefined,
             previousSessions: undefined,
             contextState: undefined,
             context: undefined,
@@ -3544,6 +3546,7 @@ export class Application extends EventEmitter {
             reason: undefined,
             lastFailureFingerprint: undefined,
             elapsedMs: 0,
+            generation: 0,
             planAttempts: 0,
             repairAttempts: 0,
             mustKeep: [],
@@ -3552,9 +3555,10 @@ export class Application extends EventEmitter {
             preparedInputs: structuredClone(state.preparedInputs),
             constraints: structuredClone(state.context.constraints),
             compactions: [],
+            checks: [...state.settings.checks],
             createdAt: Date.now(),
             updatedAt: Date.now(),
-          } as Run;
+          };
           this.store.create(seed);
           this.store.db
             .prepare("INSERT INTO conversation_runs VALUES (?,?)")
@@ -3564,33 +3568,69 @@ export class Application extends EventEmitter {
             this.store.runDir(seed.id),
             treeSnapshot,
           );
+          return seed.id;
+        };
+        child.workRunId = await makeSeed(state.coding, "coding");
+        child.documentRunId = await makeSeed(state.document, "writing");
+        if (
+          !child.workRunId &&
+          !child.documentRunId &&
+          (state.artifacts.length || state.images.length)
+        )
+          await (async () => {
+            const seed: Run = {
+              id: id(),
+              conversationId: child.id,
+              objective: forkObjective,
+              kind: "chat",
+              mode: "single",
+              dataClass: child.dataClass,
+              localOnly: child.localOnly,
+              state: "created",
+              prepared: true,
+              configHash: configHash(this.config),
+              tasks: [],
+              inputs: [],
+              checks: [],
+              mustKeep: [],
+              planAttempts: 0,
+              repairAttempts: 0,
+              elapsedMs: 0,
+              generation: 0,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              forkCheckpointId: boundary!.id,
+              images: structuredClone(state.images),
+              preparedInputs: structuredClone(state.preparedInputs),
+              compactions: [],
+            };
+            this.store.create(seed);
+            this.store.db
+              .prepare("INSERT INTO conversation_runs VALUES (?,?)")
+              .run(child.id, seed.id);
+          })();
+        const artifactSeed =
+          child.workRunId ?? child.documentRunId ?? child.latestRunId;
+        if (artifactSeed)
           for (const item of state.artifacts)
             this.store.db
               .prepare("INSERT OR IGNORE INTO source_links VALUES (?,?)")
-              .run(seed.id, item.artifact.id);
-          return seed.id;
-        };
-        child.workRunId = await makeSeed(
-          state.coding,
-          state.codingRunId,
-          "coding",
-        );
-        child.documentRunId = await makeSeed(
-          state.document,
-          state.documentRunId,
-          "writing",
-        );
+              .run(artifactSeed, item.artifact.id);
         child.contextRunId = undefined;
         child.latestRunId = undefined;
         child.appliedRunId = undefined;
         this.conversations.save(child);
       }
-      this.conversations.release(parent.id);
       this.session = this.conversations.acquire(child.id);
+      this.conversations.release(parent.id);
       ++this.generation;
+      this.busy = false;
       this.publish("session");
     } catch (error) {
       const runIds = this.conversations.runs(child.id);
+      const runDirs = runIds.map((runId) => join(this.paths.runs, runId));
+      this.busy = false;
+      this.conversations.release(parent.id);
       this.conversations.release(child.id);
       this.store.transaction(() => {
         this.store.db
@@ -3619,11 +3659,8 @@ export class Application extends EventEmitter {
           .run(child.id);
       });
       await Promise.all(
-        runIds.map((runId) =>
-          rm(this.store.runDir(runId), {
-            recursive: true,
-            force: true,
-          }),
+        runDirs.map((directory) =>
+          rm(directory, { recursive: true, force: true }),
         ),
       );
       throw error;

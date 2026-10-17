@@ -170,6 +170,15 @@ export class Store {
         .prepare("INSERT INTO boundary_artifacts VALUES (?,?)")
         .run(record.id, artifactId);
   }
+  linkBoundary(
+    sessionId: string,
+    messageSeq: number,
+    boundaryId: string,
+  ): void {
+    this.db
+      .prepare("INSERT INTO message_boundaries VALUES (?,?,?)")
+      .run(sessionId, messageSeq, boundaryId);
+  }
   boundary(sessionId: string, messageSeq: number) {
     return this.db
       .prepare(
@@ -207,7 +216,7 @@ export class Store {
   boundaries(sessionId: string, before = Number.MAX_SAFE_INTEGER, limit = 30) {
     return this.db
       .prepare(
-        "SELECT b.id,b.session_id,b.message_seq,b.hash,b.payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND b.message_seq<? ORDER BY b.message_seq DESC LIMIT ?",
+        "SELECT b.id,b.session_id,mb.message_seq,b.hash,b.payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND mb.message_seq<? ORDER BY mb.message_seq DESC LIMIT ?",
       )
       .all(sessionId, before, limit) as Array<{
       id: string;

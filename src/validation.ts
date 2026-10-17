@@ -28,6 +28,11 @@ export class Evaluator {
     ) => void = () => {},
   ) {}
   async validate(run: Run, signal: AbortSignal): Promise<CheckResult[]> {
+    if (run.forkCheckpointId)
+      throw new AgentError(
+        "FORK_SEED",
+        "保存状態復元シードは検証に使用できません。",
+      );
     if (run.access === "read-only") return [];
     const directory = this.store.runDir(run.id),
       work = join(directory, "work");

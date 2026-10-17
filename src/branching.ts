@@ -2,7 +2,10 @@ import { chmod, mkdir, lstat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Paths, Config } from "./config.js";
 import type { Conversation } from "./conversations.js";
-import { normalizeConversationContext } from "./context.js";
+import {
+  emptyConversationContext,
+  normalizeConversationContext,
+} from "./context.js";
 import { loadPreparedInput } from "./documents.js";
 import {
   loadStoredImage,
@@ -74,9 +77,13 @@ interface TreeSnapshot {
   origin?: string;
   head?: string;
   includeUntracked: boolean;
+  extraPaths?: string[];
   baseline: SnapshotFile[];
   work: SnapshotFile[];
   redactedPaths: string[];
+}
+export interface BoundaryCaptureOptions {
+  visibleRunIds?: string[];
 }
 export interface BoundaryState {
   version: 1;
@@ -145,27 +152,39 @@ async function tree(
   paths: Paths,
   run: Run,
   config: Config,
+  deadline: number,
 ): Promise<TreeSnapshot> {
   const directory = join(paths.runs, run.id);
-  const snapshot = await readSnapshot(directory);
+  const snapshot = JSON.parse(
+    (
+      await readBoundedFile(
+        join(directory, "snapshot.json"),
+        maxMetadataBytes,
+        { privateStorage: true },
+      )
+    ).toString("utf8"),
+  ) as Awaited<ReturnType<typeof readSnapshot>>;
   const result: TreeSnapshot = {
     origin: snapshot.origin,
     head: snapshot.head,
     includeUntracked: snapshot.includeUntracked,
+    extraPaths: snapshot.extraPaths,
     baseline: [],
     work: [],
     redactedPaths: snapshot.redactedPaths ?? [],
   };
   await privateDirectory(paths.checkpoints);
   await privateDirectory(join(paths.checkpoints, "blobs"));
-  const total = { value: 0 };
   const capture = async (root: string, listed?: Record<string, FileEntry>) => {
+    const total = { value: 0 };
     const files =
       listed ?? (await inventory(root, config.limits.maxWorkspaceBytes));
     if (Object.keys(files).length > maxFiles)
       throw new AgentError("FORK_SIZE", "Saved workspace has too many files");
     const output: SnapshotFile[] = [];
     for (const [path, entry] of Object.entries(files).sort()) {
+      if (Date.now() > deadline)
+        throw new AgentError("FORK_TIMEOUT", "Checkpoint capture timed out");
       if (secretPath(path))
         throw new AgentError(
           "FORK_CONTENT",
@@ -176,7 +195,7 @@ async function tree(
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
         throw new AgentError("FORK_CONTENT", "Unsafe saved workspace file");
       total.value += entry.bytes;
-      if (total.value > config.limits.maxWorkspaceBytes * 2)
+      if (total.value > config.limits.maxWorkspaceBytes)
         throw new AgentError("FORK_SIZE", "Saved workspace exceeds its limit");
       const content = await readBoundedFile(target, entry.bytes, {
         expectedBytes: entry.bytes,
@@ -207,6 +226,29 @@ async function restoreTree(
   target: string,
   tree: TreeSnapshot,
 ): Promise<void> {
+  const validate = (entry: SnapshotFile) => {
+    if (
+      !entry.path ||
+      entry.path.startsWith("/") ||
+      entry.path.includes("\0") ||
+      entry.path.split("/").some((part) => part === ".." || part === ".") ||
+      secretPath(entry.path) ||
+      !/^[a-f0-9]{64}$/.test(entry.hash) ||
+      !Number.isSafeInteger(entry.bytes) ||
+      entry.bytes < 0 ||
+      entry.bytes > 32 * 1024 * 1024 ||
+      !Number.isInteger(entry.mode) ||
+      entry.mode < 0 ||
+      entry.mode > 0o777
+    )
+      throw new AgentError("FORK_CORRUPT", "Saved workspace entry is invalid");
+  };
+  if (
+    tree.baseline.length > 10_000 ||
+    tree.work.length > 10_000 ||
+    tree.baseline.length + tree.work.length > 20_000
+  )
+    throw new AgentError("FORK_SIZE", "Saved workspace has too many files");
   await mkdir(join(target, "baseline"), { recursive: true, mode: 0o700 });
   await mkdir(join(target, "work"), { recursive: true, mode: 0o700 });
   for (const [name, files] of [
@@ -214,6 +256,7 @@ async function restoreTree(
     ["work", tree.work],
   ] as const)
     for (const entry of files) {
+      validate(entry);
       const content = await readBoundedFile(
         join(paths.checkpoints, "blobs", entry.hash),
         entry.bytes,
@@ -236,6 +279,7 @@ async function restoreTree(
       origin: tree.origin,
       head: tree.head,
       includeUntracked: tree.includeUntracked,
+      extraPaths: tree.extraPaths,
       files: Object.fromEntries(
         tree.baseline.map((entry) => [
           entry.path,
@@ -258,6 +302,7 @@ export async function captureBoundary(
   session: Conversation,
   messageSeq: number,
   unavailableReason?: string,
+  options: BoundaryCaptureOptions = {},
 ): Promise<BoundaryRecord> {
   const context = normalizeConversationContext(session.context);
   const state: BoundaryState = {
@@ -286,11 +331,39 @@ export async function captureBoundary(
     ...(unavailableReason ? { unavailableReason } : {}),
   };
   if (!unavailableReason) {
-    const runIds = [session.workRunId, session.documentRunId].filter(
-      (value): value is string => !!value,
-    );
-    const runs = [...new Set(runIds)].map((runId) => store.get(runId));
+    const visibleRunIds = [
+      ...(options.visibleRunIds ?? []),
+      session.workRunId,
+      session.documentRunId,
+    ].filter((value): value is string => !!value);
+    const runIds = [...new Set(visibleRunIds)];
+    const linkedRunIds = [
+      ...new Set([
+        ...store.db
+          .prepare("SELECT run_id FROM conversation_runs WHERE session_id=?")
+          .all(session.id)
+          .map((row) => (row as { run_id: string }).run_id),
+        ...runIds,
+      ]),
+    ];
+    const runs = [...new Set(linkedRunIds)].map((runId) => store.get(runId));
+    const deadline = Date.now() + 30_000;
+    for (const run of runs) {
+      store.assertIdle(run.id);
+      if (
+        store
+          .operations(run.id)
+          .some((operation) =>
+            ["prepared", "dispatched", "unknown"].includes(operation.status),
+          )
+      )
+        throw new AgentError(
+          "UNKNOWN_OPERATION",
+          "Boundary capture requires an idle, reconciled run",
+        );
+    }
     let artifactBytes = 0;
+    const capturedArtifactIds = new Set<string>();
     for (const run of runs) {
       const levels: DataClass[] = ["public", "private", "restricted"];
       if (
@@ -298,7 +371,8 @@ export async function captureBoundary(
       )
         state.policy.dataClass = run.dataClass;
       state.policy.localOnly ||= run.localOnly;
-      state.images.push(...structuredClone(run.images ?? []));
+      if (runIds.includes(run.id))
+        state.images.push(...structuredClone(run.images ?? []));
       for (const image of run.images ?? []) {
         if (
           levels.indexOf(image.dataClass) >
@@ -307,9 +381,11 @@ export async function captureBoundary(
           state.policy.dataClass = image.dataClass;
         state.policy.localOnly ||= image.localOnly;
       }
-      if (run.preparedInputs)
+      if (runIds.includes(run.id) && run.preparedInputs)
         state.preparedInputs.push(...structuredClone(run.preparedInputs));
       for (const artifact of store.artifacts(run.id)) {
+        if (capturedArtifactIds.has(artifact.id)) continue;
+        capturedArtifactIds.add(artifact.id);
         if (state.artifacts.length >= maxArtifactReferences)
           throw new AgentError("FORK_SIZE", "Too many captured artifacts");
         artifactBytes += artifact.bytes;
@@ -327,17 +403,18 @@ export async function captureBoundary(
             privateStorage: true,
           },
         );
+        const producer = store.get(artifact.runId);
         const saved = store.db
           .prepare(
             "SELECT seq FROM events WHERE run_id=? AND type='artifact_saved' AND json_extract(detail,'$.artifactId')=? ORDER BY seq LIMIT 1",
           )
-          .get(run.id, artifact.id) as { seq: number } | undefined;
+          .get(artifact.runId, artifact.id) as { seq: number } | undefined;
         state.artifacts.push({
           artifact: structuredClone(artifact),
           producer: {
-            id: run.id,
-            state: run.state,
-            parentRunId: run.parentRunId,
+            id: producer.id,
+            state: producer.state,
+            parentRunId: producer.parentRunId,
           },
           saveSeq: saved?.seq ?? 0,
         });
@@ -347,17 +424,28 @@ export async function captureBoundary(
         )
           state.policy.dataClass = artifact.dataClass;
       }
-      if (run.kind === "coding") {
-        state.coding = await tree(paths, run, config);
+      if (runIds.includes(run.id) && run.kind === "coding") {
+        state.coding = await tree(paths, run, config, deadline);
         if (state.coding.origin && state.coding.origin !== session.workspace)
           throw new AgentError("FORK_SCOPE", "Coding snapshot origin changed");
         state.codingRunId = run.id;
       }
-      if (run.kind === "writing" || run.kind === "research") {
-        state.document = await tree(paths, run, config);
+      if (
+        runIds.includes(run.id) &&
+        (run.kind === "writing" || run.kind === "research")
+      ) {
+        state.document = await tree(paths, run, config, deadline);
         state.documentRunId = run.id;
       }
     }
+    state.images = [
+      ...new Map(state.images.map((image) => [image.id, image])).values(),
+    ];
+    state.preparedInputs = [
+      ...new Map(
+        state.preparedInputs.map((input) => [input.id, input]),
+      ).values(),
+    ];
     for (const reference of state.preparedInputs)
       await loadPreparedInput(paths, reference);
     if (
@@ -426,7 +514,7 @@ export function saveUnavailableBoundary(
       checks: [...session.checks],
       access: session.access,
     },
-    context: normalizeConversationContext(session.context),
+    context: emptyConversationContext(),
     images: [],
     preparedInputs: [],
     artifacts: [],
