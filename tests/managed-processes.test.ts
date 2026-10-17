@@ -357,6 +357,7 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
     const name = `local-agent-process-${operation}`;
     let exists = false;
     let started = false;
+    let inspectedExitCode = 0;
     let anchorToken = config.execution.managedProcesses!.engineAnchor.token;
     let jobToken = "";
     let rmArgs: string[] | undefined;
@@ -385,7 +386,10 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
               "local-agent.process-operation": operation,
             },
           },
-          State: { Status: started ? "running" : "created", ExitCode: 0 },
+          State: {
+            Status: started ? "running" : "created",
+            ExitCode: inspectedExitCode,
+          },
         };
         if (target && exists)
           return {
@@ -496,6 +500,16 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
       truncated: false,
     });
     assert.deepEqual(logsArgs, ["logs", "--tail=200", processId]);
+    inspectedExitCode = -1;
+    assert.deepEqual(await manager.logs(operation), {
+      processId: operation,
+      output: "managed log\n",
+      truncated: false,
+    });
+    await assert.rejects(() => manager.status(operation), {
+      code: "PROCESS_ENGINE",
+    });
+    inspectedExitCode = 0;
     assert.deepEqual(await readFile(recordPath), descriptorBeforeQueries);
     await writeFile(recordPath, beforeRead);
     assert.equal(

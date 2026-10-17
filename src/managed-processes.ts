@@ -169,8 +169,8 @@ function validInspectEntry(entry: unknown): entry is InspectEntry {
       exitCode !== undefined &&
       (typeof exitCode !== "number" ||
         !Number.isInteger(exitCode) ||
-        exitCode < 0 ||
-        exitCode > 255)
+        exitCode < -2147483648 ||
+        exitCode > 2147483647)
     )
       return false;
   }
