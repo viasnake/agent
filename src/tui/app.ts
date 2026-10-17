@@ -11,6 +11,7 @@ import { ResearchBrowser } from "./research-browser.js";
 import { SearchBrowser } from "./search-browser.js";
 import { ForkBrowser } from "./fork-browser.js";
 import { ModelChangeBrowser } from "./model-change-browser.js";
+import { BackupBrowser } from "./backup-browser.js";
 import {
   SettingsEditor,
   type SettingsField,
@@ -873,6 +874,17 @@ export class TerminalApp {
             this.notice = text;
           },
         }).fork(argument || undefined);
+        break;
+      }
+      case "backup": {
+        await new BackupBrowser(app, {
+          prompt: this.prompt.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).save(argument || undefined);
         break;
       }
       case "search": {

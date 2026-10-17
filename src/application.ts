@@ -6,6 +6,12 @@ import lockfile from "proper-lockfile";
 import { createTwoFilesPatch } from "diff";
 import { applyRun } from "./artifacts.js";
 import {
+  createBackup,
+  previewBackup,
+  type BackupManifest,
+  type BackupPreview,
+} from "./backup.js";
+import {
   configHash,
   loadConfig,
   validateConfig,
@@ -276,6 +282,7 @@ export class Application extends EventEmitter {
   private heartbeat?: NodeJS.Timeout;
   private closed = false;
   private readonly previews = new WeakMap<InputPreview, InputSnapshot>();
+  private readonly backupPreviews = new WeakMap<BackupPreview, string>();
   private accessOverride?: RequestAccess;
   constructor(
     public config: Config,
@@ -3288,6 +3295,44 @@ export class Application extends EventEmitter {
       });
     } finally {
       await release();
+    }
+  }
+  private backupBinding(): string {
+    return sha256(
+      canonical({ session: this.session, generation: this.generation }),
+    );
+  }
+  previewHistoryBackup(destination: string): BackupPreview {
+    this.idle();
+    this.conversations.save(this.session);
+    const preview = previewBackup(this.store, this.config, destination, {
+      owner: { sessionId: this.session.id, owner: this.conversations.owner },
+    });
+    this.backupPreviews.set(preview, this.backupBinding());
+    return preview;
+  }
+  async confirmHistoryBackup(preview: BackupPreview): Promise<BackupManifest> {
+    this.idle();
+    const binding = this.backupPreviews.get(preview);
+    const guard = () => {
+      if (this.closed || binding !== this.backupBinding())
+        throw new AgentError(
+          "STALE_VIEW",
+          "会話が変わりました。/backup から選び直してください。",
+        );
+    };
+    guard();
+    this.backupPreviews.delete(preview);
+    this.busy = true;
+    this.publish("changed");
+    try {
+      return await createBackup(this.store, this.config, preview, {
+        owner: { sessionId: this.session.id, owner: this.conversations.owner },
+        beforeCapture: guard,
+      });
+    } finally {
+      this.busy = false;
+      this.publish("changed");
     }
   }
   async doctor() {
