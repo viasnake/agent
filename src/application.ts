@@ -716,6 +716,7 @@ export class Application extends EventEmitter {
       dataClass: snapshot.dataClass,
       localOnly: snapshot.localOnly,
       access: snapshot.access,
+      workspace: this.session.workspace,
       images,
       inputs: snapshot.attachments
         .filter((attachment) => !attachment.mimeType)
@@ -723,6 +724,7 @@ export class Application extends EventEmitter {
     } as Run;
     const workerNeedsTools =
       kind !== "chat" ||
+      !!this.session.workspace ||
       snapshot.attachments.some((attachment) => !attachment.mimeType);
     const candidates = {
       lead: modelCandidates(this.config, run, "lead", true),
@@ -1868,10 +1870,20 @@ export class Application extends EventEmitter {
     this.session.compacted = false;
     this.session.handoffDigest = undefined;
     this.session.handoff = undefined;
+    const synthesis = result.tasks.find((task) => task.purpose === "synthesis");
+    if (
+      result.state === "succeeded" &&
+      result.mode !== "single" &&
+      result.tasks.some((task) => task.resultFormat === "structured") &&
+      (!synthesis || synthesis.result?.outcome !== "completed")
+    )
+      throw new AgentError(
+        "INVALID_RESULT",
+        "A structured collaboration must persist its synthesis as the assistant response",
+      );
     const summary =
       result.state === "succeeded"
-        ? (result.tasks.find((task) => task.purpose === "synthesis")?.result
-            ?.summary ??
+        ? (synthesis?.result?.summary ??
           result.tasks
             .map((t) => t.result?.summary)
             .filter(Boolean)

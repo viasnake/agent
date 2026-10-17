@@ -215,8 +215,10 @@ test("an invented artifact never produces a successful run", async () => {
   }
 });
 test("separate reviewer sees evidence but has no file writer tool", async () => {
+  let workers = 0;
   const runtime = new ScriptedRuntime(async (request) => {
     if (request.role === "worker") {
+      if (workers++ > 0) return completed();
       await call(request, "write_file", {
         path: "answer.md",
         content: "review me",
@@ -250,7 +252,7 @@ test("separate reviewer sees evidence but has no file writer tool", async () => 
     assert.equal((await f.harness.execute(run.id)).state, "succeeded");
     assert.deepEqual(
       runtime.requests.map((r) => r.model),
-      ["worker", "reviewer"],
+      ["worker", "reviewer", "worker"],
     );
   } finally {
     await f.cleanup();

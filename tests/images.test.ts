@@ -705,7 +705,7 @@ test("preview lists only authorized image recipients and preserves restricted di
     await app.initialize();
     const imageOnly = await app.previewInput("Inspect @evidence.png");
     assert.ok(
-      imageOnly.destinations.some((line) => line.startsWith("workerNoTools")),
+      imageOnly.destinations.every((line) => !line.startsWith("workerNoTools")),
     );
     assert.ok(
       imageOnly.destinations.some((line) => line.startsWith("workerWithTools")),
@@ -933,7 +933,7 @@ test("reviewer changes invalidate an image preview and text-only reviewers are r
 test("Pi continuation sends prior image history only once", async (t) => {
   const f = await fixture(new ScriptedRuntime(async () => "unused"));
   f.config.models.worker!.images = true;
-  f.config.models.worker!.tools = false;
+  f.config.models.worker!.tools = true;
   const [png] = await fixtures();
   await writeFile(join(f.root, "first.png"), png!);
   const payloads: Record<string, unknown>[] = [];

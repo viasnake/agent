@@ -58,7 +58,7 @@ test("comparison schedules rotate every variant without omitting or repeating a 
 
 test("comparison retains exact mechanical evidence and does not invent semantic scores", async () => {
   const runtime = new ScriptedRuntime(async (request) => {
-    if (request.role === "worker") {
+    if (request.tools.some((tool) => tool.name === "write_file")) {
       await call(request, "write_file", {
         path: "answer.md",
         content:
@@ -85,15 +85,15 @@ test("comparison retains exact mechanical evidence and does not invent semantic 
     );
     assert.deepEqual(
       report.rows.map((row) => row.requests),
-      [1, 2],
+      [1, 3],
     );
     assert.deepEqual(
       report.rows.map((row) => row.inputTokens),
-      [20, 40],
+      [20, 60],
     );
     assert.deepEqual(
       report.rows.map((row) => row.outputTokens),
-      [10, 20],
+      [10, 30],
     );
     assert.equal(report.rows[0]!.baselineHash, report.rows[1]!.baselineHash);
     assert.ok(

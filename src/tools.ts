@@ -29,9 +29,10 @@ import { decodeResponse } from "./research.js";
 import {
   authorizedSources,
   authorizedTaskReportIds,
-  isCollaborative,
+  isStructuredCollaboration,
   requireAuthorizedSource,
 } from "./collaboration.js";
+import { taskReportInstruction } from "./collaboration-prompts.js";
 import { reviewWriting, writingOptionsSchema } from "./writing-quality.js";
 import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
 import { id } from "./util.js";
@@ -400,6 +401,14 @@ export class TaskTools {
               { local: false, allowedData: this.config.web.allowedData },
               "web fetch",
             );
+            if (
+              this.task.delegatedBy &&
+              (this.task.assignment?.sourceIds.length ?? 0) >= 50
+            )
+              throw new AgentError(
+                "SOURCE_LIMIT",
+                "A delegated task cannot be assigned more than 50 sources",
+              );
             const requested = new URL(args.url);
             if (
               (this.run.contextState?.excludedSourceUrls ?? []).includes(
@@ -613,7 +622,7 @@ export class TaskTools {
     if (
       (this.run.kind === "research" ||
         this.run.contextState?.researchCheckpoint) &&
-      (!isCollaborative(this.run) ||
+      (!isStructuredCollaboration(this.run, this.task) ||
         (this.task.resultFormat === "structured" &&
           this.task.purpose === "synthesis"))
     )
@@ -628,7 +637,7 @@ export class TaskTools {
       );
     if (
       this.run.kind === "research" &&
-      !(isCollaborative(this.run) && this.task.resultFormat === "structured")
+      !isStructuredCollaboration(this.run, this.task)
     ) {
       tools.push(
         this.wrap(
@@ -765,11 +774,11 @@ export class TaskTools {
           },
         ),
       );
-    if (isCollaborative(this.run))
+    if (isStructuredCollaboration(this.run, this.task))
       tools.push(
         this.wrap(
           "read_task_report",
-          "Read a bounded excerpt from an authorized immutable task-attempt report.",
+          taskReportInstruction,
           z.strictObject({
             reportId: z.string().uuid(),
             start: z.number().int().min(0).default(0),
@@ -817,7 +826,7 @@ export class TaskTools {
         ),
       );
     if (
-      isCollaborative(this.run) ||
+      isStructuredCollaboration(this.run, this.task) ||
       !!(
         this.run.compactions?.length ||
         this.run.contextState?.compactions?.length
@@ -834,7 +843,7 @@ export class TaskTools {
           }),
           async (args) => {
             if (
-              isCollaborative(this.run) &&
+              isStructuredCollaboration(this.run, this.task) &&
               !(this.task.contextArchiveIds ?? []).includes(args.archiveId)
             )
               throw new AgentError(
@@ -890,14 +899,18 @@ export class TaskTools {
             ? [
                 "fetch_source",
                 "search_web",
-                ...(isCollaborative(this.run) ? [] : ["research_checkpoint"]),
+                ...(!isStructuredCollaboration(this.run, this.task)
+                  ? ["research_checkpoint"]
+                  : []),
               ]
             : []),
           "read_research_checkpoint",
           ...(this.run.kind === "writing" || this.run.kind === "research"
             ? ["check_writing"]
             : []),
-          ...(isCollaborative(this.run) ? ["read_task_report"] : []),
+          ...(isStructuredCollaboration(this.run, this.task)
+            ? ["read_task_report"]
+            : []),
         ].includes(tool.name),
       );
     return tools;

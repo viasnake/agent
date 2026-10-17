@@ -920,7 +920,22 @@ export class Harness {
               error.code,
             )
           ) {
-            await this.repair(run, error.message, work);
+            const failedTask = run.tasks.find(
+                (task) => task.state === "failed",
+              ),
+              feedback = failedTask
+                ? [
+                    error.message,
+                    `Failed task: ${failedTask.id}`,
+                    ...(failedTask.result?.unresolved ?? []).map(
+                      (finding) => `Unresolved finding: ${finding}`,
+                    ),
+                    ...(failedTask.attemptReportIds ?? []).map(
+                      (reportId) => `Attempt report: ${reportId}`,
+                    ),
+                  ].join("\n")
+                : error.message;
+            await this.repair(run, feedback, work);
             continue;
           }
           throw error;
@@ -1088,9 +1103,15 @@ export class Harness {
       run.lastFailureFingerprint = fingerprint;
       target.reworkLinks ??= [];
       target.reworkLinks.push({
-        priorReportIds: [...(target.attemptReportIds ?? [])],
+        priorReportIds: [
+          ...new Set([
+            ...(target.attemptReportIds ?? []),
+            ...(failed.attemptReportIds ?? []),
+          ]),
+        ],
         reason: feedback.slice(0, 4000),
         repairAttempt: run.repairAttempts,
+        status: "pending",
       });
       const invalidated = new Set([target.id]);
       let changed = true;
@@ -1099,7 +1120,6 @@ export class Harness {
         for (const task of run.tasks)
           if (
             !invalidated.has(task.id) &&
-            (task.role === "reviewer" || task.purpose === "synthesis") &&
             task.dependsOn.some((dependency) => invalidated.has(dependency))
           ) {
             invalidated.add(task.id);
@@ -1150,7 +1170,8 @@ export class Harness {
     writer.reworkLinks.push({
       priorReportIds: [...(writer.attemptReportIds ?? [])],
       reason: feedback.slice(0, 4000),
-      repairAttempt: run.repairAttempts + 1,
+      repairAttempt: run.repairAttempts,
+      status: "pending",
     });
     const invalidated = new Set([writer.id]);
     let changed = true;

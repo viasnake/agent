@@ -599,10 +599,10 @@ test("assisted workflow validates a lead plan and integrates sequential workers 
     });
     const result = await f.harness.execute(run.id);
     assert.equal(result.state, "succeeded", result.reason);
-    assert.equal(result.tasks.length, 3);
+    assert.equal(result.tasks.length, 4);
     assert.deepEqual(
       runtime.requests.map((r) => r.role),
-      ["lead", "worker", "worker", "reviewer"],
+      ["lead", "worker", "worker", "reviewer", "worker"],
     );
   } finally {
     await f.cleanup();
@@ -613,18 +613,23 @@ test("independent review failure triggers a bounded repair and re-review", async
     reviews = 0;
   const runtime = new ScriptedRuntime(async (request) => {
     if (request.role === "worker") {
-      if (drafts++ === 0)
-        await call(request, "write_file", {
-          path: "answer.md",
-          content: "wrong",
-          expectedSha256: null,
-        });
-      else
-        await call(request, "edit_file", {
-          path: "answer.md",
-          oldText: "wrong",
-          newText: "correct",
-        });
+      const invocation = JSON.parse(request.objective) as {
+        dependencies: unknown[];
+      };
+      if (!invocation.dependencies.length) {
+        if (drafts++ === 0)
+          await call(request, "write_file", {
+            path: "answer.md",
+            content: "wrong",
+            expectedSha256: null,
+          });
+        else
+          await call(request, "edit_file", {
+            path: "answer.md",
+            oldText: "wrong",
+            newText: "correct",
+          });
+      }
       return completed(["answer.md"]);
     }
     if (reviews++ === 0)

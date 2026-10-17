@@ -45,6 +45,8 @@ export interface Task {
     priorReportIds: string[];
     reason: string;
     repairAttempt: number;
+    status?: "pending" | "resolved";
+    resolvedByReportIds?: string[];
   }>;
 }
 export interface TaskResult {

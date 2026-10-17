@@ -389,14 +389,20 @@ export class Store {
     this.transaction(() => {
       this.assertLease(run.id, run.generation);
       commit?.();
-      run.updatedAt = Date.now();
-      this.db
-        .prepare(
-          "UPDATE runs SET state=?,payload=? WHERE id=? AND generation=?",
-        )
-        .run(run.state, JSON.stringify(run), run.id, run.generation);
-      this.event(run.id, event, detail);
+      this.saveInTransaction(run, event, detail);
     });
+  }
+  saveInTransaction(
+    run: Run,
+    event = "run_updated",
+    detail: Record<string, unknown> = {},
+  ): void {
+    this.assertLease(run.id, run.generation);
+    run.updatedAt = Date.now();
+    this.db
+      .prepare("UPDATE runs SET state=?,payload=? WHERE id=? AND generation=?")
+      .run(run.state, JSON.stringify(run), run.id, run.generation);
+    this.event(run.id, event, detail);
   }
   transition(run: Run, state: RunState, reason?: string): void {
     if (terminalStates.includes(run.state) && run.state !== state)
@@ -729,6 +735,7 @@ export class Store {
     kind: Artifact["kind"],
     content: string | Buffer,
     metadata: Record<string, unknown> = {},
+    commit?: (artifact: Artifact) => void,
   ): Promise<Artifact> {
     this.assertLease(run.id, run.generation);
     const artifact: Artifact = {
@@ -756,6 +763,7 @@ export class Store {
         kind,
         sha256: artifact.sha256,
       });
+      commit?.(artifact);
     });
     return artifact;
   }

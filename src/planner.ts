@@ -31,21 +31,22 @@ export class Planner {
       run,
       run.mode === "reviewed" || run.mode === "assisted" ? 3 : 1,
     );
-    const collaborative = isCollaborative(run),
-      toolsRequired =
-        !!run.workspace ||
-        run.inputs.length > 0 ||
-        (run.preparedInputs?.length ?? 0) > 0 ||
-        (run.access === "change" && run.kind !== "chat") ||
-        (run.kind === "research" &&
-          !run.localOnly &&
-          run.dataClass !== "restricted") ||
-        !!run.contextState?.researchCheckpoint ||
-        this.store
-          .artifacts(run.id)
-          .some((artifact) => artifact.kind === "source") ||
-        !!run.compactions?.length ||
-        !!run.contextState?.compactions?.length;
+    const collaborative = isCollaborative(run);
+    let toolsRequired =
+      !!run.workspace ||
+      run.inputs.length > 0 ||
+      (run.preparedInputs?.length ?? 0) > 0 ||
+      (run.access === "change" && run.kind !== "chat") ||
+      (run.kind === "research" &&
+        !run.localOnly &&
+        run.dataClass !== "restricted") ||
+      !!run.contextState?.researchCheckpoint ||
+      this.store
+        .artifacts(run.id)
+        .some((artifact) => artifact.kind === "source") ||
+      !!run.compactions?.length ||
+      !!run.contextState?.compactions?.length;
+    if (run.kind !== "chat") toolsRequired = true;
     let plannedTasks: Task[] = [];
 
     if (run.mode === "single") {
@@ -137,7 +138,7 @@ export class Planner {
       const lead = await this.router.select(
           run,
           "lead",
-          false,
+          true,
           signal,
           run.model,
         ),
@@ -227,7 +228,7 @@ export class Planner {
         task.model = await this.router.select(
           run,
           "reviewer",
-          toolsRequired,
+          true,
           signal,
           task.model,
           producerModels,
@@ -248,6 +249,7 @@ export class Planner {
         signal,
       );
     }
+    this.assertReviewerIndependence(plannedTasks);
 
     if (collaborative)
       for (const task of plannedTasks) {
@@ -279,8 +281,15 @@ export class Planner {
     requests: Task[],
     signal: AbortSignal,
   ): Promise<void> {
-    const next = structuredClone(run),
+    const stagedTasks = structuredClone(run.tasks),
       admissions: Array<{ parentId: string; childIds: string[] }> = [];
+    const requestedChildren = requests
+      .filter((task) => task.result?.outcome === "needs_replan")
+      .reduce(
+        (count, task) => count + (task.result?.delegations?.length ?? 0),
+        0,
+      );
+    this.assertDelegationBudget(run, requestedChildren);
     let childCount = 0;
     for (const parent of requests) {
       if (parent.result?.outcome !== "needs_replan") continue;
@@ -301,16 +310,33 @@ export class Planner {
       const priorDependencies = [...parent.dependsOn],
         pendingChildren: Task[] = [];
       for (const request of delegations) {
+        if (request.sourceIds.length > 50)
+          throw new AgentError(
+            "SOURCE_LIMIT",
+            "A delegated task cannot be assigned more than 50 sources",
+          );
         for (const sourceId of request.sourceIds)
           requireAuthorizedSource(this.store, run, parent, sourceId);
+        const reviewerModels = run.tasks
+            .filter(
+              (task) =>
+                task.role === "reviewer" &&
+                this.ancestors(run.tasks, task).has(parent.id),
+            )
+            .map((task) => this.config.models[task.model!]?.id)
+            .filter((modelId): modelId is string => !!modelId),
+          excludedAliases = Object.entries(this.config.models)
+            .filter(([, model]) => reviewerModels.includes(model.id))
+            .map(([alias]) => alias);
         const childModel = await this.router.select(
           run,
           "worker",
           this.taskNeedsTools(run, request.sourceIds.length > 0),
           signal,
           request.model,
+          excludedAliases,
         );
-        const childId = this.uniqueTaskId(next.tasks, pendingChildren);
+        const childId = this.uniqueTaskId(stagedTasks, pendingChildren);
         pendingChildren.push({
           id: childId,
           role: "worker",
@@ -328,8 +354,8 @@ export class Planner {
         });
       }
       signal.throwIfAborted();
-      const nextParent = next.tasks.find((task) => task.id === parent.id)!;
-      next.tasks.push(...pendingChildren);
+      const nextParent = stagedTasks.find((task) => task.id === parent.id)!;
+      stagedTasks.push(...pendingChildren);
       nextParent.dependsOn = [
         ...new Set([
           ...priorDependencies,
@@ -347,22 +373,35 @@ export class Planner {
       });
     }
     signal.throwIfAborted();
-    if (next.tasks.length > this.config.limits.maxTasks)
+    if (!admissions.length) return;
+    if (stagedTasks.length > this.config.limits.maxTasks)
       throw new AgentError("TASK_LIMIT", "Delegation exceeds maxTasks");
+    this.assertDelegationBudget(run, childCount, stagedTasks);
+    this.assertReviewerIndependence(stagedTasks);
+    this.store.assertLease(run.id, run.generation);
+    this.store.save(run, "delegations_admitted", { admissions }, () => {
+      run.tasks = stagedTasks;
+    });
+  }
+
+  private assertDelegationBudget(
+    run: Run,
+    childCount: number,
+    tasks = run.tasks,
+  ): void {
+    if (tasks.length + childCount > this.config.limits.maxTasks)
+      throw new AgentError("TASK_LIMIT", "Delegation exceeds maxTasks");
+    const unfinished = tasks.filter(
+      (task) => task.state !== "succeeded",
+    ).length;
     if (
-      this.store.usage(run.id).requests +
-        run.tasks.filter((task) => task.state === "pending").length +
-        childCount >
+      this.store.usage(run.id).requests + unfinished + childCount >
       this.config.limits.maxRequests
     )
       throw new AgentError(
         "BUDGET",
         "Insufficient request budget for the delegated tasks",
       );
-    if (!admissions.length) return;
-    this.store.assertLease(run.id, run.generation);
-    this.store.save(next, "delegations_admitted", { admissions });
-    Object.assign(run, next);
   }
 
   private async addSynthesis(
@@ -419,6 +458,25 @@ export class Planner {
     return ids;
   }
 
+  private assertReviewerIndependence(tasks: Task[]): void {
+    for (const reviewer of tasks.filter((task) => task.role === "reviewer")) {
+      const reviewerModel = this.config.models[reviewer.model!]?.id;
+      if (!reviewerModel) continue;
+      for (const taskId of this.ancestors(tasks, reviewer)) {
+        const producer = tasks.find((task) => task.id === taskId);
+        if (
+          producer?.role !== "reviewer" &&
+          producer?.model &&
+          this.config.models[producer.model]?.id === reviewerModel
+        )
+          throw new AgentError(
+            "INVALID_PLAN",
+            "A reviewer must use a model distinct from every producer",
+          );
+      }
+    }
+  }
+
   private uniqueTaskId(
     tasks: Task[],
     additional: Task[],
@@ -453,7 +511,8 @@ export class Planner {
       (run.kind === "research" &&
         !run.localOnly &&
         run.dataClass !== "restricted") ||
-      !!run.contextState?.researchCheckpoint
+      !!run.contextState?.researchCheckpoint ||
+      run.kind !== "chat"
     );
   }
 }
