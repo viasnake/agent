@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync } from "node:fs";
+import fsSync, {
+  existsSync,
+  type BufferEncodingOption,
+  type EncodingOption,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import {
   mkdir,
   readFile,
@@ -16,6 +21,15 @@ import { stringify } from "yaml";
 import sharp from "sharp";
 import { Application } from "../src/application.js";
 import { createBackup, previewBackup, verifyBackup } from "../src/backup.js";
+import {
+  extractBackupFile,
+  previewBackupExtract,
+  readBackup,
+} from "../src/backup-reader.js";
+import {
+  BackupReaderBrowser,
+  backupReadText,
+} from "../src/tui/backup-reader-browser.js";
 import { captureBoundary, persistBoundary } from "../src/branching.js";
 import { Conversations } from "../src/conversations.js";
 import { storePreparedText } from "../src/documents.js";
@@ -475,6 +489,338 @@ test("backup CLI previews by default and verifies an explicit offline save witho
       true,
     );
     assert.equal(existsSync(unusedHome), false);
+  } finally {
+    await f.close();
+  }
+});
+
+test("archive reader pages exact Japanese messages and resolves original source bytes without replay or import", async () => {
+  const f = await backupFixture();
+  try {
+    const message =
+      "あ".repeat(15_999) + "😀" + "根拠:9007199254740993\n".repeat(1200);
+    const seq = f.app.conversations.message(f.app.session, "user", message);
+    for (let i = 0; i < 30; i++) {
+      const session = f.app.conversations.create(f.app.workspace, {
+        dataClass: "private",
+        checks: [],
+      });
+      f.app.conversations.release(session.id);
+    }
+    const linked = await f.harness.create({
+      objective: "linked source",
+      kind: "research",
+      workspace: f.app.workspace,
+    });
+    f.store.db
+      .prepare("INSERT INTO source_links(run_id,artifact_id) VALUES (?,?)")
+      .run(linked.id, f.source.id);
+    f.store.db
+      .prepare("INSERT INTO operations VALUES (?,?,?,?,?,?,?,?)")
+      .run(
+        "archive-unknown",
+        linked.id,
+        linked.generation,
+        "worker",
+        "process_start",
+        "hash",
+        "unknown",
+        null,
+      );
+    const manifest = await f.app.confirmHistoryBackup(
+      f.app.previewHistoryBackup(f.target),
+    );
+    const metadata = await readFile(join(f.target, "metadata.sqlite"));
+    const sessionBefore = JSON.stringify(f.app.session);
+    const index = readBackup(f.target);
+    assert.equal(index.items.length, 30);
+    assert.equal(index.nextOffset, 30);
+    assert.equal(
+      readBackup(f.target, { kind: "conversations", offset: 30 }).items.length,
+      2,
+    );
+    const messages = readBackup(f.target, {
+      kind: "conversation",
+      id: f.app.session.id,
+    });
+    assert.equal(messages.detail!.dataClass, "restricted");
+    assert.equal(messages.detail!.localOnly, true);
+    assert.equal(
+      messages.items.find((item) => item.seq === seq)!.textLength,
+      message.length,
+    );
+    let offset = 0,
+      recovered = "";
+    while (true) {
+      const page = readBackup(f.target, {
+        kind: "message",
+        id: f.app.session.id,
+        seq,
+        offset,
+      });
+      assert.ok(page.text!.length <= 16_000);
+      assert.ok(!/^[\uDC00-\uDFFF]/.test(page.text!));
+      assert.ok(!/[\uD800-\uDBFF]$/.test(page.text!));
+      recovered += page.text;
+      if (page.nextOffset === undefined) break;
+      assert.ok(page.nextOffset > offset);
+      offset = page.nextOffset;
+    }
+    assert.equal(recovered, message);
+    const artifacts = readBackup(f.target, { kind: "run", id: linked.id });
+    assert.equal(
+      artifacts.items[0]!.path,
+      `files/runs/${f.run.id}/artifacts/${f.source.sha256}`,
+    );
+    assert.equal(
+      readBackup(f.target, {
+        kind: "file",
+        path: String(artifacts.items[0]!.path),
+      }).text,
+      "保存済みの出典",
+    );
+    assert.equal(
+      readBackup(f.target, {
+        kind: "file",
+        path: `files/attachments/${f.document.reference.id}.selected`,
+      }).text,
+      "value\n9007199254740993\n",
+    );
+    assert.equal(
+      readBackup(f.target, {
+        kind: "file",
+        path: `files/images/${f.image.sha256}.img`,
+      }).detail!.encoding,
+      "binary",
+    );
+    assert.match(
+      readBackup(f.target, { kind: "file", path: "configuration.yaml" }).text!,
+      /connections/,
+    );
+    assert.equal(
+      readBackup(f.target, { kind: "files" }).items.length,
+      manifest.files.length,
+    );
+    assert.equal(readBackup(f.target, { kind: "runs" }).items.length, 2);
+    assert.throws(() =>
+      readBackup(f.target, { kind: "file", path: "../config.yaml" }),
+    );
+    const otherId = String(
+      index.items.find((item) => item.id !== f.app.session.id)!.id,
+    );
+    assert.throws(() =>
+      readBackup(f.target, { kind: "message", id: otherId, seq }),
+    );
+    assert.equal(f.store.operations(linked.id)[0]!.status, "unknown");
+    assert.equal(JSON.stringify(f.app.session), sessionBefore);
+    assert.deepEqual(
+      await readFile(join(f.target, "metadata.sqlite")),
+      metadata,
+    );
+    assert.equal(existsSync(join(f.target, "metadata.sqlite-wal")), false);
+    assert.equal(f.runtime.requests.length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("archive extraction is preview-first, byte-exact, private, and rejects stale, corrupt, protected or existing targets", async () => {
+  const f = await backupFixture();
+  try {
+    await f.app.confirmHistoryBackup(f.app.previewHistoryBackup(f.target));
+    const path = `files/images/${f.image.sha256}.img`;
+    const original = await readFile(join(f.target, path));
+    const roots = [f.p.home, f.app.workspace];
+    const output = join(f.root, "recovered.png");
+    const preview = previewBackupExtract(f.target, path, output, roots);
+    assert.equal(existsSync(output), false);
+    extractBackupFile(preview, roots);
+    assert.deepEqual(await readFile(output), original);
+    assert.equal((await lstat(output)).mode & 0o777, 0o600);
+    assert.throws(() => extractBackupFile(preview, roots));
+    for (const target of [
+      join(f.p.home, "new-file"),
+      join(f.app.workspace, "new-file"),
+      join(f.target, "new-file"),
+    ])
+      assert.throws(() => previewBackupExtract(f.target, path, target, roots));
+    const alias = join(f.root, "workspace-alias");
+    await symlink(f.app.workspace, alias);
+    assert.throws(() =>
+      previewBackupExtract(f.target, path, join(alias, "new-file"), roots),
+    );
+    const stale = previewBackupExtract(
+      f.target,
+      path,
+      join(f.root, "stale.png"),
+      roots,
+    );
+    const manifestPath = join(f.target, "backup.json");
+    const before = await readFile(manifestPath);
+    const changed = JSON.parse(before.toString());
+    changed.createdAt++;
+    await writeFile(manifestPath, JSON.stringify(changed));
+    assert.throws(() => extractBackupFile(stale, roots), {
+      code: "STALE_VIEW",
+    });
+    assert.equal(existsSync(stale.destination), false);
+    await writeFile(manifestPath, before);
+    await writeFile(join(f.target, path), Buffer.from("corrupt"));
+    assert.throws(() => readBackup(f.target));
+    assert.throws(() => extractBackupFile(stale, roots));
+    assert.equal(existsSync(stale.destination), false);
+    assert.deepEqual(await readFile(output), original);
+    assert.equal(f.runtime.requests.length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("archive queries use the captured verified database even if its original path changes", async () => {
+  const f = await backupFixture();
+  const originalMkdtemp = fsSync.mkdtempSync;
+  try {
+    await f.app.confirmHistoryBackup(f.app.previewHistoryBackup(f.target));
+    let replaced = false;
+    fsSync.mkdtempSync = ((
+      prefix,
+      options?: EncodingOption | BufferEncodingOption,
+    ) => {
+      if (String(prefix).includes("local-agent-backup-read-") && !replaced) {
+        replaced = true;
+        fsSync.writeFileSync(
+          join(f.target, "metadata.sqlite"),
+          "not a database",
+        );
+      }
+      return options === "buffer" ||
+        (typeof options === "object" &&
+          options !== null &&
+          options.encoding === "buffer")
+        ? originalMkdtemp(prefix, options as BufferEncodingOption)
+        : originalMkdtemp(prefix, options as EncodingOption);
+    }) as typeof fsSync.mkdtempSync;
+    syncBuiltinESMExports();
+    assert.equal(readBackup(f.target).items.length, 2);
+    assert.equal(replaced, true);
+    assert.throws(() => readBackup(f.target));
+  } finally {
+    fsSync.mkdtempSync = originalMkdtemp;
+    syncBuiltinESMExports();
+    await f.close();
+  }
+});
+
+test("archive CLI reads and explicitly extracts without initializing a home", async () => {
+  const f = await backupFixture();
+  try {
+    await f.app.confirmHistoryBackup(f.app.previewHistoryBackup(f.target));
+    await f.closeApp();
+    const unusedHome = join(f.root, "unused-home");
+    const cli = resolve(".test-dist/src/cli.js");
+    const run = (...args: string[]) => {
+      const result = spawnSync(
+        process.execPath,
+        [cli, "--home", unusedHome, "--json", ...args],
+        { encoding: "utf8", timeout: 30_000 },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout);
+    };
+    assert.equal(run("backup-read", f.target).items.length, 2);
+    assert.equal(
+      run("backup-read", f.target, "--conversation", f.app.session.id).items[0]
+        .preview,
+      "境界の本文",
+    );
+    const path = `files/runs/${f.run.id}/artifacts/${f.source.sha256}`;
+    assert.equal(
+      run("backup-read", f.target, "--file", path).text,
+      "保存済みの出典",
+    );
+    const destination = join(f.root, "recovered-source.txt");
+    assert.equal(
+      run("backup-extract", f.target, path, destination).written,
+      false,
+    );
+    assert.equal(existsSync(destination), false);
+    assert.equal(
+      run("backup-extract", f.target, path, destination, "--write").written,
+      true,
+    );
+    assert.equal(await readFile(destination, "utf8"), "保存済みの出典");
+    assert.equal(existsSync(unusedHome), false);
+  } finally {
+    await f.close();
+  }
+});
+
+test("archive TUI reads and confirms extraction without importing; cancellation and stale sessions never write", async () => {
+  const f = await backupFixture();
+  try {
+    assert.ok(commands.some((command) => command.name === "backup-open"));
+    await f.app.confirmHistoryBackup(f.app.previewHistoryBackup(f.target));
+    const before = JSON.stringify(f.app.session);
+    for (const stage of [
+      "prompt",
+      "preview",
+      "confirmation",
+      "stale",
+      "save",
+    ]) {
+      const destination = join(f.root, `${stage}.txt`);
+      const choices: (string | undefined)[] = [
+        "runs",
+        "item:0",
+        "item:0",
+        "extract",
+        "back",
+        "back",
+        "back",
+        undefined,
+      ];
+      let saved = false;
+      const originalId = f.app.session.id;
+      const browser = new BackupReaderBrowser(f.app, {
+        prompt: async () => (stage === "prompt" ? undefined : destination),
+        choose: async (_title, items) => {
+          assert.ok(choices.length > 0, "Unexpected navigation loop");
+          const selected = choices.shift();
+          if (selected)
+            assert.ok(items.some((item) => item.value === selected));
+          return selected;
+        },
+        show: async (_text, title) =>
+          !(stage === "preview" && title === "書出範囲の確認"),
+        confirm: async () => {
+          if (stage === "stale") f.app.session.id = "changed";
+          return stage !== "confirmation";
+        },
+        notice: () => {
+          saved = true;
+        },
+      });
+      try {
+        if (stage === "stale")
+          await assert.rejects(browser.open(f.target), { code: "STALE_VIEW" });
+        else await browser.open(f.target);
+      } finally {
+        f.app.session.id = originalId;
+      }
+      assert.equal(existsSync(destination), stage === "save");
+      assert.equal(saved, stage === "save");
+      if (saved)
+        assert.equal(await readFile(destination, "utf8"), "保存済みの出典");
+    }
+    const page = readBackup(f.target, {
+      kind: "file",
+      path: "configuration.yaml",
+    });
+    const text = backupReadText({ ...page, text: "```\n# unsafe\u001b[31m" });
+    assert.ok(text.includes("````"));
+    assert.ok(!text.includes("\u001b"));
+    assert.equal(JSON.stringify(f.app.session), before);
+    assert.equal(f.runtime.requests.length, 0);
   } finally {
     await f.close();
   }

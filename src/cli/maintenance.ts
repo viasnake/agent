@@ -10,7 +10,15 @@ import {
   createBackup,
   previewBackup,
   verifyBackup,
+  type BackupLimits,
 } from "../backup.js";
+import {
+  backupReadWarning,
+  extractBackupFile,
+  previewBackupExtract,
+  readBackup,
+  type BackupSelection,
+} from "../backup-reader.js";
 import {
   confirmHistoryDeletion,
   pendingDeletions,
@@ -26,8 +34,119 @@ import {
 
 const deletionWarning =
   "メタデータを先に削除する限定的な処理です。共有画像・文書・checkpoint は残り、SQLite の残存ページや外部バックアップにも内容が残る場合があります。物理削除は保留になることがあり、自動再試行や暗号学的消去は行いません。";
+function readLimits(options: {
+  maxBytes?: number;
+  maxFiles?: number;
+  timeoutSeconds?: number;
+}): BackupLimits {
+  return {
+    maxBytes: options.maxBytes,
+    maxFiles: options.maxFiles,
+    timeoutMs:
+      options.timeoutSeconds === undefined
+        ? undefined
+        : options.timeoutSeconds * 1000,
+  };
+}
 export function registerMaintenanceCommands(cli: CliContext): void {
   const { program, print, context, signal } = cli;
+  program
+    .command("backup-read <directory>")
+    .description(
+      "Read verified archived history offline without importing or resuming it",
+    )
+    .option(
+      "--section <kind>",
+      "conversations, runs, or files",
+      "conversations",
+    )
+    .option("--conversation <id>", "list saved messages in one conversation")
+    .option("--message <number>", "read a message in --conversation", Number)
+    .option("--run <id>", "list saved artifacts and linked sources")
+    .option(
+      "--file <path>",
+      "read a manifest path as UTF-8, or show binary metadata",
+    )
+    .option(
+      "--offset <number>",
+      "row offset, or UTF-16 offset for text pages",
+      Number,
+      0,
+    )
+    .option("--max-bytes <number>", "total archive size limit", Number)
+    .option("--max-files <number>", "archive file limit", Number)
+    .option("--timeout-seconds <number>", "verification time budget", Number)
+    .action((directory: string, options) => {
+      const selected = [options.conversation, options.run, options.file].filter(
+        (value) => value !== undefined,
+      );
+      if (
+        selected.length > 1 ||
+        (options.message !== undefined && !options.conversation) ||
+        (selected.length && options.section !== "conversations")
+      )
+        throw new Error(
+          "表示対象は一つだけ指定してください。--message には --conversation が必要です。",
+        );
+      let selection: BackupSelection;
+      if (options.conversation)
+        selection =
+          options.message === undefined
+            ? { kind: "conversation", id: options.conversation }
+            : {
+                kind: "message",
+                id: options.conversation,
+                seq: options.message,
+              };
+      else if (options.run) selection = { kind: "run", id: options.run };
+      else if (options.file) selection = { kind: "file", path: options.file };
+      else {
+        if (!["conversations", "runs", "files"].includes(options.section))
+          throw new Error(
+            "--section は conversations / runs / files から選んでください。",
+          );
+        selection = { kind: options.section };
+      }
+      print(
+        readBackup(
+          directory,
+          { ...selection, offset: options.offset },
+          readLimits(options),
+        ),
+      );
+    });
+  program
+    .command("backup-extract <directory> <archive-path> <destination>")
+    .description(
+      "Preview export of one verified archived file; --write creates a private new file",
+    )
+    .option(
+      "--write",
+      "explicitly save the selected bytes without overwriting or importing",
+    )
+    .option("--max-bytes <number>", "total archive size limit", Number)
+    .option("--max-files <number>", "archive file limit", Number)
+    .option("--timeout-seconds <number>", "verification time budget", Number)
+    .action((directory: string, path: string, destination: string, options) => {
+      const protectedRoots = [
+        agentPaths(program.opts().home).home,
+        process.cwd(),
+      ];
+      const limits = readLimits(options);
+      const preview = previewBackupExtract(
+        directory,
+        path,
+        destination,
+        protectedRoots,
+        limits,
+      );
+      if (options.write) extractBackupFile(preview, protectedRoots, limits);
+      print({
+        ...preview,
+        written: !!options.write,
+        warning: backupReadWarning,
+      });
+    });
   program
     .command("diagnostics [file]")
     .description(

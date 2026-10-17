@@ -8,6 +8,7 @@ import {
   fsyncSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readSync,
   realpathSync,
@@ -16,6 +17,7 @@ import {
   type Stats,
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import lockfile from "proper-lockfile";
 import { parse } from "yaml";
@@ -565,10 +567,11 @@ export async function createBackup(
   }
 }
 
-export function verifyBackup(
+function inspectBackup<T>(
   path: string,
-  options?: BackupLimits,
-): BackupManifest {
+  options: BackupLimits | undefined,
+  visit: (root: string, manifest: BackupManifest, database: DatabaseSync) => T,
+): T {
   const limits = limitsSchema.parse(options),
     deadline = Date.now() + limits.timeoutMs;
   const root = realpathSync(path);
@@ -604,34 +607,44 @@ export function verifyBackup(
       fail("バックアップの必須ファイルがありません。");
   const config = validateConfig(
     parse(
-      readSafe(root, join(root, "configuration.yaml"), 4_000_000).toString(),
+      readBackupEntry(
+        root,
+        manifest,
+        "configuration.yaml",
+        4_000_000,
+      ).toString(),
       { maxAliasCount: 0 },
     ),
   );
   if (configHash(config) !== manifest.configHash)
     fail("設定の検証値が一致しません。");
-  const database = new DatabaseSync(join(root, "metadata.sqlite"), {
-    readOnly: true,
-  });
-  try {
-    assertDatabase(database);
-    for (const reference of snapshotMetadata(
-      database,
-      deadline,
-    ).references.values()) {
-      const entry = entries.get(archivePath(reference.path));
-      if (
-        !entry ||
-        entry.bytes !== reference.bytes ||
-        entry.sha256 !== reference.sha256
-      )
-        fail("保存済み資料の参照先が不足・不一致です。");
-    }
-  } finally {
-    database.close();
-  }
-  deadlineCheck(deadline);
-  return manifest;
+  return withDatabaseCopy(
+    readBackupEntry(root, manifest, "metadata.sqlite"),
+    (database) => {
+      assertDatabase(database);
+      for (const reference of snapshotMetadata(
+        database,
+        deadline,
+      ).references.values()) {
+        const entry = entries.get(archivePath(reference.path));
+        if (
+          !entry ||
+          entry.bytes !== reference.bytes ||
+          entry.sha256 !== reference.sha256
+        )
+          fail("保存済み資料の参照先が不足・不一致です。");
+      }
+      deadlineCheck(deadline);
+      return visit(root, manifest, database);
+    },
+  );
+}
+
+export function verifyBackup(
+  path: string,
+  options?: BackupLimits,
+): BackupManifest {
+  return inspectBackup(path, options, (_root, manifest) => manifest);
 }
 
 function assertDatabase(database: DatabaseSync): void {
@@ -648,4 +661,46 @@ function assertDatabase(database: DatabaseSync): void {
     database.prepare("PRAGMA foreign_key_check").get()
   )
     fail("保存データベースの整合性を確認できません。");
+}
+
+export function readBackupEntry(
+  root: string,
+  manifest: BackupManifest,
+  path: string,
+  maxBytes = 64_000_000,
+): Buffer {
+  const entry = manifest.files.find((file) => file.path === path);
+  if (!entry || !safeArchivePath(path)) fail("保存ファイルがありません。");
+  const data = readSafe(root, join(root, path), maxBytes);
+  if (data.length !== entry.bytes || sha256(data) !== entry.sha256)
+    fail("保存ファイルが検証後に変化しました。");
+  return data;
+}
+
+export function withVerifiedBackup<T>(
+  path: string,
+  visit: (root: string, manifest: BackupManifest, database: DatabaseSync) => T,
+  limits?: BackupLimits,
+): T {
+  return inspectBackup(path, limits, visit);
+}
+
+function withDatabaseCopy<T>(
+  data: Buffer,
+  visit: (database: DatabaseSync) => T,
+): T {
+  const temporary = mkdtempSync(join(tmpdir(), "local-agent-backup-read-"));
+  try {
+    const copy = join(temporary, "metadata.sqlite");
+    writeFileSync(copy, data, { mode: 0o600, flag: "wx" });
+    const database = new DatabaseSync(copy, { readOnly: true });
+    try {
+      database.exec("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON");
+      return visit(database);
+    } finally {
+      database.close();
+    }
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
 }

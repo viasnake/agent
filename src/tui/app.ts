@@ -14,6 +14,7 @@ import { SearchBrowser } from "./search-browser.js";
 import { ForkBrowser } from "./fork-browser.js";
 import { ModelChangeBrowser } from "./model-change-browser.js";
 import { BackupBrowser } from "./backup-browser.js";
+import { BackupReaderBrowser } from "./backup-reader-browser.js";
 import { DiagnosticsBrowser } from "./diagnostics-browser.js";
 import { HistoryBrowser } from "./history-browser.js";
 import {
@@ -944,6 +945,18 @@ export class TerminalApp {
             this.notice = text;
           },
         }).save(argument || undefined);
+        break;
+      }
+      case "backup-open": {
+        await new BackupReaderBrowser(app, {
+          prompt: this.prompt.bind(this),
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).open(argument || undefined);
         break;
       }
       case "delete":
