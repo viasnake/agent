@@ -150,6 +150,7 @@ export class SettingsDialog {
       maxApiUsd: "API総予算 (USD)",
       maxRequestUsd: "要求予算 (USD)",
       tools: "ツール使用",
+      images: "画像入力",
     };
     // Looked up as "<top>.<leaf>" first, then "<leaf>", so dynamic names like
     // connections.<name>.enabled resolve to "connections.enabled".
@@ -174,6 +175,8 @@ export class SettingsDialog {
       "models.roles": "担当できる役割 lead/worker/reviewer",
       "models.kinds": "対応する作業種別",
       "models.tools": "モデルのツール呼び出しを許可",
+      "models.images":
+        "画像対応モデルでのみ有効化。非対応モデルへの画像送信は停止します",
       "models.contextWindow": "コンテキスト長 (tokens)",
       "models.maxOutputTokens": "1 応答の最大出力 tokens",
       "models.priority": "自動選択の優先度（大きいほど優先）",
@@ -236,6 +239,8 @@ export class SettingsDialog {
                 : [];
         for (const key of optional)
           if (!(key in node)) visit("", [...path, key]);
+        if (path[0] === "models" && path.length === 2 && !("images" in node))
+          visit(false, [...path, "images"]);
         return;
       }
       const joined = path.join(".");
@@ -285,7 +290,8 @@ export class SettingsDialog {
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean)
-      : typeof before === "boolean"
+      : typeof before === "boolean" ||
+          (path[0] === "models" && field === "images")
         ? text === "true"
         : typeof before === "number"
           ? Number(text)
@@ -419,6 +425,7 @@ export class SettingsDialog {
         roles: ["lead", "worker", "reviewer"],
         kinds: ["coding", "research", "writing", "chat"],
         tools: false,
+        images: false,
         contextWindow: 32000,
         maxOutputTokens: 4096,
         priority: 0,

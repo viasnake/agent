@@ -66,7 +66,8 @@ export function modelCandidates(
         excludedNames.includes(name) ||
         !model.roles.includes(role) ||
         (run.kind !== "chat" && !model.kinds.includes(run.kind)) ||
-        (needsTools && !model.tools)
+        (needsTools && !model.tools) ||
+        (!!run.images?.length && model.images !== true)
       )
         return false;
       if (excludedNames.some((alias) => config.models[alias]?.id === model.id))
@@ -98,13 +99,17 @@ export function selectModel(
   if (requested && !candidates.includes(requested))
     throw new AgentError(
       "NO_MODEL",
-      `Requested model ${requested} is unavailable or disallowed for ${role}; check capabilities, credentials, privacy, and budget`,
+      run.images?.length
+        ? `Requested model ${requested} is unavailable or disallowed for image input; enable images only for a capable model in /settings and check privacy, credentials, and budget`
+        : `Requested model ${requested} is unavailable or disallowed for ${role}; check capabilities, credentials, privacy, and budget`,
     );
   const selected = requested ?? candidates[0];
   if (!selected)
     throw new AgentError(
       "NO_MODEL",
-      `No authorized ${role} model is available for ${run.kind}/${run.dataClass}${run.localOnly ? "/local-only" : ""}`,
+      run.images?.length
+        ? `No authorized image-capable ${role} model is available for ${run.kind}/${run.dataClass}${run.localOnly ? "/local-only" : ""}; enable images only for a capable model in /settings`
+        : `No authorized ${role} model is available for ${run.kind}/${run.dataClass}${run.localOnly ? "/local-only" : ""}`,
     );
   return selected;
 }
@@ -134,6 +139,11 @@ export function reserveModel(
     throw new AgentError(
       "CONTEXT_LIMIT",
       "Input may exceed the model context window; start a narrower task",
+    );
+  if (run.images?.length && model.images !== true)
+    throw new AgentError(
+      "NO_IMAGE_MODEL",
+      `Model ${modelName} is not configured for images; enable images only for a capable model in /settings`,
     );
   return store.reserve(
     run,

@@ -58,7 +58,7 @@ export async function connectionRuntime(
           id: model.id,
           name: alias,
           reasoning: false,
-          input: ["text"],
+          input: model.images === true ? ["text", "image"] : ["text"],
           contextWindow: model.contextWindow,
           maxTokens: model.maxOutputTokens,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

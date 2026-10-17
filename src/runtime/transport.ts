@@ -10,6 +10,13 @@ import { endpointFetch } from "../network.js";
 import { AgentError, type RuntimeRequest } from "../types.js";
 import { endpoint } from "./providers.js";
 import { StreamCompletion } from "./stream.js";
+import {
+  maxConversationImageBytes,
+  maxConversationImages,
+  maxImageBytes,
+  validateImage,
+} from "../images.js";
+import { sha256 } from "../util.js";
 export function normalizePayload(
   payload: unknown,
   connection: Connection,
@@ -103,8 +110,116 @@ export function guardModelStream(
             "MODEL_SWITCH",
             "Model changes inside a task are forbidden",
           );
-        const bytes = Buffer.byteLength(JSON.stringify(context));
-        const reservation = request.beforeRequest(bytes);
+        const imageData = new Map<string, { data: Buffer; mimeType: string }>();
+        let imageOccurrences = 0;
+        let occurrenceBytes = 0;
+        const visitImages = (value: unknown): void => {
+          if (!value || typeof value !== "object") return;
+          if (Array.isArray(value)) {
+            for (const item of value) visitImages(item);
+            return;
+          }
+          const record = value as Record<string, unknown>;
+          if (record.type === "image") {
+            if (
+              typeof record.data !== "string" ||
+              typeof record.mimeType !== "string"
+            )
+              throw new AgentError(
+                "IMAGE_INVALID",
+                "Invalid image in model history",
+              );
+            const encoded = record.data;
+            const maxEncodedBytes = Math.ceil(maxImageBytes / 3) * 4;
+            if (encoded.length > maxEncodedBytes)
+              throw new AgentError(
+                "IMAGE_INVALID",
+                "Invalid image in model history",
+              );
+            let padding = 0;
+            for (
+              let index = encoded.length - 1;
+              index >= 0 && padding <= 2 && encoded[index] === "=";
+              index--
+            )
+              padding++;
+            const body = encoded.slice(0, encoded.length - padding);
+            if (
+              encoded.length % 4 !== 0 ||
+              padding > 2 ||
+              /[^A-Za-z0-9+/]/.test(body)
+            )
+              throw new AgentError(
+                "IMAGE_INVALID",
+                "Invalid image in model history",
+              );
+            const decodedBytes = (encoded.length / 4) * 3 - padding;
+            if (!decodedBytes || decodedBytes > maxImageBytes)
+              throw new AgentError(
+                "IMAGE_SIZE",
+                "Image history exceeds the per-image size limit",
+              );
+            imageOccurrences++;
+            occurrenceBytes += decodedBytes;
+            if (
+              imageOccurrences > maxConversationImages ||
+              occurrenceBytes > maxConversationImageBytes
+            )
+              throw new AgentError(
+                "IMAGE_LIMIT",
+                "Image history exceeds the conversation image limits",
+              );
+            const digest = sha256(encoded);
+            const existing = imageData.get(digest);
+            if (existing && existing.mimeType !== record.mimeType)
+              throw new AgentError(
+                "IMAGE_FORMAT",
+                "Conflicting image MIME types",
+              );
+            if (!existing) {
+              const data = Buffer.from(encoded, "base64");
+              if (
+                data.length !== decodedBytes ||
+                data.toString("base64") !== encoded
+              )
+                throw new AgentError(
+                  "IMAGE_INVALID",
+                  "Invalid image in model history",
+                );
+              imageData.set(digest, { data, mimeType: record.mimeType });
+            }
+          }
+          for (const item of Object.values(record)) visitImages(item);
+        };
+        visitImages(context);
+        if (imageOccurrences && !model.input.includes("image"))
+          throw new AgentError(
+            "NO_IMAGE_MODEL",
+            `Model ${model.id} does not accept image content`,
+          );
+        for (const image of imageData.values())
+          await validateImage(image.data, image.mimeType);
+        const textContext = JSON.parse(JSON.stringify(context)) as unknown;
+        const removeImageData = (value: unknown): void => {
+          if (!value || typeof value !== "object") return;
+          if (Array.isArray(value)) {
+            for (const item of value) removeImageData(item);
+            return;
+          }
+          const record = value as Record<string, unknown>;
+          if (record.type === "image") record.data = "";
+          for (const item of Object.values(record)) removeImageData(item);
+        };
+        removeImageData(textContext);
+        const textBytes = Buffer.byteLength(JSON.stringify(textContext));
+        const imageCount = imageOccurrences;
+        const estimatedImageTokens = imageCount * 8192;
+        const bytes = textBytes + estimatedImageTokens * 3;
+        const reservation = request.beforeRequest(
+          bytes,
+          imageCount,
+          estimatedImageTokens,
+        );
         const signal = AbortSignal.any([
           request.signal,
           AbortSignal.timeout(timeoutSeconds * 1000),
@@ -204,7 +319,13 @@ export function guardModelStream(
           message: result,
         });
       } catch (error) {
-        lastFailure = error;
+        lastFailure =
+          error instanceof AgentError
+            ? error
+            : new AgentError(
+                "PROVIDER",
+                "Model request failed; inspect connection status",
+              );
         output.push({
           type: "error",
           reason: "error",
