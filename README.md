@@ -131,5 +131,12 @@ usage, configuration, and active session policy. Confirmation never probes a
 provider or resumes a run; a later explicit resume is required. Model-change
 and resolution records are host evidence and never assert semantic equivalence.
 
+Use `/model-change [task-id]` to select a waiting task and an eligible model,
+review affected tasks, destination and preserved budgets, and explicitly confirm.
+Cancellation leaves the selection unchanged. Confirmation keeps the run waiting;
+only a separate `/resume` starts execution. `/model` still configures the next
+request. `/tasks` shows delegation, immutable attempt reports, repair history and
+model-change evidence links without treating model reports as validation proof.
+
 独立した Firecracker agent environment の管理者セットアップ、CLI、制約は
 [docs/firecracker.md](docs/firecracker.md) を参照してください。

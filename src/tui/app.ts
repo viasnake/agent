@@ -10,6 +10,7 @@ import { SettingsDialog } from "./settings.js";
 import { ResearchBrowser } from "./research-browser.js";
 import { SearchBrowser } from "./search-browser.js";
 import { ForkBrowser } from "./fork-browser.js";
+import { ModelChangeBrowser } from "./model-change-browser.js";
 import {
   SettingsEditor,
   type SettingsField,
@@ -995,6 +996,16 @@ export class TerminalApp {
       case "model":
         await this.model();
         break;
+      case "model-change":
+        await new ModelChangeBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).change(argument || undefined);
+        break;
       case "tasks": {
         const run = app.currentRun();
         if (!run) {
@@ -1034,7 +1045,8 @@ export class TerminalApp {
                   `コンテキスト: ${view.context.bytes}/${view.context.limit} bytes · ${view.context.model} / ${view.context.taskId}`,
                 ]
               : []),
-            "\n/artifacts 検査の詳細 · /tools ツール結果",
+            "\n/artifacts 報告・検査の詳細 · /tools ツール結果",
+            "/model 次の依頼の設定 · /model-change 待機中の担当を切替（再開なし）",
           ].join("\n"),
         );
         break;
