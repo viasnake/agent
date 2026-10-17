@@ -9,6 +9,7 @@ import {
 import { SettingsDialog } from "./settings.js";
 import { ResearchBrowser } from "./research-browser.js";
 import { SearchBrowser } from "./search-browser.js";
+import { ForkBrowser } from "./fork-browser.js";
 import {
   SettingsEditor,
   type SettingsField,
@@ -438,7 +439,9 @@ export class TerminalApp {
           ? failureGuidance(run.reason, this.app.config, this.app.session)
           : this.app.interrupted()
             ? "前の作業は未完了です。/tasks で確認し /resume で明示再開できます。"
-            : "会話を開きました。待機入力は /queue で確認できます。";
+            : this.app.session.lineage && !run
+              ? "分岐した会話です。保存状態の復元は推論・検査成功ではありません。新しい依頼で続けてください。"
+              : "会話を開きました。待機入力は /queue で確認できます。";
       }
     } else if (event.type === "run_finished") {
       this.stream.clear();
@@ -858,6 +861,17 @@ export class TerminalApp {
           .find((s) => s.id !== app.session.id && (s.draft || s.latestRunId));
         if (recent) app.openSession(recent.id);
         else this.notice = "保存済みの会話はありません。";
+        break;
+      }
+      case "fork": {
+        await new ForkBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).fork(argument || undefined);
         break;
       }
       case "search": {

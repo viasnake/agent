@@ -3304,15 +3304,20 @@ export class Application extends EventEmitter {
     artifactId: string,
     runId = this.session.latestRunId,
   ): Promise<string> {
+    if (!runId)
+      throw new AgentError("ARTIFACT", "この会話の作業を選択してください。");
     if (
-      !runId ||
       !this.store.db
         .prepare(
           "SELECT 1 FROM conversation_runs WHERE session_id=? AND run_id=?",
         )
         .get(this.session.id, runId)
-    )
-      throw new AgentError("ARTIFACT", "この会話の作業を選択してください。");
+    ) {
+      const retained = this.conversationArtifacts().get(artifactId);
+      if (!retained || retained.run.id !== runId)
+        throw new AgentError("ARTIFACT", "この会話の作業を選択してください。");
+      return (await this.store.content(retained.artifact)).toString("utf8");
+    }
     const artifact = this.view(runId).artifacts.find(
       (a) => a.id === artifactId,
     );

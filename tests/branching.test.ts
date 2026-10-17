@@ -192,6 +192,13 @@ test("state fork freezes coding bytes, modes, sources and producer state; seeds 
       (await f.app.artifactHistory("report.md"))[0]!.run.state,
       "created",
     );
+    assert.equal(
+      await f.app.artifactText(f.document.id, f.run.id),
+      "historical document",
+    );
+    await assert.rejects(f.app.artifactText(future.id, f.run.id), {
+      code: "ARTIFACT",
+    });
     const signal = new AbortController().signal;
     await assert.rejects(f.harness.execute(seed.id, signal), {
       code: "FORK_SEED",
