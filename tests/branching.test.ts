@@ -334,7 +334,7 @@ test("corrupt checkpoints and stale message prefixes fail without releasing the 
       { code: "STALE_VIEW" },
     );
     assert.equal(f.app.session.id, f.parentId);
-    assert.equal(f.app.conversations.list(f.origin).length, 1);
+    assert.equal(f.app.conversations.list(f.app.session.workspace).length, 1);
     assert.equal(f.runtime.requests.length, 0);
   } finally {
     await f.app.close();
@@ -548,7 +548,7 @@ test("restore failure rolls back child rows and directories while retaining the 
     );
     assert.equal(f.app.session.id, f.parentId);
     assert.equal(f.app.busy, false);
-    assert.equal(f.app.conversations.list(f.origin).length, 1);
+    assert.equal(f.app.conversations.list(f.app.session.workspace).length, 1);
     assert.deepEqual(await readdir(f.p.runs), before);
     assert.equal(
       (
