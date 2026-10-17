@@ -110,7 +110,13 @@ export class SettingsDialog {
       this.pending[index]!.after = effective;
       this.pending[index]!.remove = remove;
     } else
-      this.pending.push({ session, path, before: original, after: effective });
+      this.pending.push({
+        session,
+        path,
+        before: original,
+        after: effective,
+        ...(remove ? { remove: true } : {}),
+      });
   }
   private fields(): SettingsField[] {
     const result: SettingsField[] = [
@@ -151,6 +157,8 @@ export class SettingsDialog {
       maxRequestUsd: "要求予算 (USD)",
       tools: "ツール使用",
       images: "画像入力",
+      reasoning: "推論対応",
+      thinkingLevel: "推論の深さ",
     };
     // Looked up as "<top>.<leaf>" first, then "<leaf>", so dynamic names like
     // connections.<name>.enabled resolve to "connections.enabled".
@@ -179,6 +187,10 @@ export class SettingsDialog {
         "画像対応モデルでのみ有効化。非対応モデルへの画像送信は停止します",
       "models.contextWindow": "コンテキスト長 (tokens)",
       "models.maxOutputTokens": "1 応答の最大出力 tokens",
+      "models.reasoning":
+        "互換・ローカル接続の推論対応宣言。reasoning_effort 対応を確認してから有効化",
+      "models.thinkingLevel":
+        "推論の深さ off/minimal/low/medium/high。未指定は従来動作。対応可否・費用は提供元依存",
       "models.priority": "自動選択の優先度（大きいほど優先）",
       "limits.maxRequests": "1 会話あたりの要求数の上限",
       "limits.maxApiUsd": "API 従量課金の総予算上限",
@@ -241,6 +253,10 @@ export class SettingsDialog {
           if (!(key in node)) visit("", [...path, key]);
         if (path[0] === "models" && path.length === 2 && !("images" in node))
           visit(false, [...path, "images"]);
+        if (path[0] === "models" && path.length === 2) {
+          if (!("reasoning" in node)) visit(false, [...path, "reasoning"]);
+          if (!("thinkingLevel" in node)) visit("", [...path, "thinkingLevel"]);
+        }
         return;
       }
       const joined = path.join(".");
@@ -291,7 +307,7 @@ export class SettingsDialog {
           .map((s) => s.trim())
           .filter(Boolean)
       : typeof before === "boolean" ||
-          (path[0] === "models" && field === "images")
+          (path[0] === "models" && ["images", "reasoning"].includes(field))
         ? text === "true"
         : typeof before === "number"
           ? Number(text)
@@ -339,6 +355,9 @@ export class SettingsDialog {
       (keys.length === 3 &&
         keys[0] === "connections" &&
         ["secretEnv", "accountEnv", "endpoint"].includes(field)) ||
+      (keys.length === 3 &&
+        keys[0] === "models" &&
+        field === "thinkingLevel") ||
       keys.join(".") === "execution.image" ||
       keys.join(".") === "routing.classifier";
     const remove = !session && optional && text === "";

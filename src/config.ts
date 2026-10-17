@@ -41,6 +41,8 @@ const model = z.strictObject({
   kinds: z.array(z.enum(["coding", "research", "writing", "chat"])).min(1),
   tools: z.boolean().default(false),
   images: z.boolean().optional(),
+  reasoning: z.boolean().optional(),
+  thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high"]).optional(),
   contextWindow: z.number().int().min(2048).max(2_000_000).default(32000),
   maxOutputTokens: z.number().int().min(256).max(128000).default(4096),
   priority: z.number().int().default(0),
@@ -263,6 +265,16 @@ export function validateConfig(input: unknown): Config {
         "CONFIG",
         `${key}: classifier cannot be used as an agent`,
       );
+    if (value.thinkingLevel && value.thinkingLevel !== "off") {
+      if (
+        value.reasoning === false ||
+        (!["chatgpt", "gemini"].includes(conn.type) && value.reasoning !== true)
+      )
+        throw new AgentError(
+          "CONFIG",
+          `${key}: reasoning capability must be enabled before selecting a thinking level`,
+        );
+    }
     if (conn.type === "sarashina" && value.maxOutputTokens > 8000)
       throw new AgentError(
         "CONFIG",

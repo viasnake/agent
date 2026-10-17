@@ -4,7 +4,14 @@ import { join } from "node:path";
 import test from "node:test";
 import { Harness } from "../src/harness.js";
 import { endpointFetch, publicAddress } from "../src/network.js";
-import { PiRuntime, isolatedLoader } from "../src/runtime/pi.js";
+import {
+  PiRuntime,
+  configuredThinkingLevel,
+  isolatedLoader,
+} from "../src/runtime/pi.js";
+import { connectionRuntime } from "../src/runtime/providers.js";
+import { validateConfig } from "../src/config.js";
+import type { RuntimeRequest } from "../src/types.js";
 import { normalizePayload } from "../src/runtime/transport.js";
 import { ScriptedRuntime, completed, fixture, testConfig } from "./helpers.js";
 
@@ -33,6 +40,166 @@ function response(
     { headers: { "content-type": "text/event-stream" } },
   );
 }
+
+test("model profiles isolate same-ID aliases and apply thinking on resumed SDK sessions", async (t) => {
+  const config = testConfig();
+  Object.assign(config.models.worker!, {
+    reasoning: true,
+    thinkingLevel: "high",
+    maxOutputTokens: 768,
+  });
+  Object.assign(config.models.reviewer!, {
+    id: config.models.worker!.id,
+    reasoning: true,
+    thinkingLevel: "low",
+    maxOutputTokens: 256,
+  });
+  validateConfig(config);
+  const f = await fixture(new ScriptedRuntime(async () => completed()), config);
+  const payloads: Record<string, unknown>[] = [];
+  const profiles: Record<string, unknown>[] = [];
+  let reservations = 0,
+    accounts = 0;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      payloads.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return response({ role: "assistant", content: "Profile fixture" });
+    },
+  );
+  const sessions = new Map<string, string>();
+  const request = (model: string): RuntimeRequest => ({
+    model,
+    role: model === "worker" ? "worker" : "reviewer",
+    objective: "Synthetic profile check",
+    system: "Fixture only",
+    sessionDir: join(f.root, "profile-sessions", model),
+    sessionFile: sessions.get(model),
+    tools: [],
+    signal: new AbortController().signal,
+    onSession: (file) => {
+      sessions.set(model, file);
+    },
+    beforeRequest: () => String(++reservations),
+    afterRequest: () => {
+      accounts++;
+    },
+    onEvent: (type, detail) => {
+      if (type === "model_profile") profiles.push(detail);
+    },
+  });
+  try {
+    const runtime = new PiRuntime(config, f.p);
+    await runtime.run(request("worker"));
+    await runtime.run(request("reviewer"));
+    const original = sessions.get("worker");
+    await runtime.run(request("worker"));
+    assert.equal(sessions.get("worker"), original);
+    config.models.worker!.thinkingLevel = "off";
+    await runtime.run(request("worker"));
+    assert.deepEqual(
+      payloads.map((p) => p.reasoning_effort),
+      ["high", "low", "high", undefined],
+    );
+    assert.deepEqual(
+      payloads.map((p) => p.max_tokens),
+      [768, 256, 768, 768],
+    );
+    assert.ok(payloads.every((p) => p.model === config.models.worker!.id));
+    assert.deepEqual(
+      profiles.map((p) => [p.model, p.thinkingLevel, p.maxOutputTokens]),
+      [
+        ["worker", "high", 768],
+        ["reviewer", "low", 256],
+        ["worker", "high", 768],
+        ["worker", "off", 768],
+      ],
+    );
+    assert.equal(reservations, 4);
+    assert.equal(accounts, 4);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("thinking profiles remain optional and unsupported explicit levels fail before requests", async (t) => {
+  const config = testConfig();
+  const original = JSON.stringify(config);
+  assert.equal(JSON.stringify(validateConfig(config)), original);
+  assert.equal("thinkingLevel" in config.models.worker!, false);
+  const f = await fixture(new ScriptedRuntime(async () => completed()), config);
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    requests++;
+    throw new Error("No network allowed");
+  });
+  try {
+    const provider = await connectionRuntime(config, f.p, "local", "worker");
+    const model = provider.getModel(
+      "agent-compatible",
+      config.models.worker!.id,
+    )!;
+    assert.equal(configuredThinkingLevel(model, config.models.worker!), "off");
+    assert.throws(
+      () =>
+        configuredThinkingLevel(model, {
+          ...config.models.worker!,
+          thinkingLevel: "high",
+        }),
+      /does not support/,
+    );
+    const native = {
+      ...model,
+      reasoning: true,
+      thinkingLevelMap: { high: null },
+    };
+    assert.throws(
+      () =>
+        configuredThinkingLevel(native, {
+          ...config.models.worker!,
+          thinkingLevel: "high",
+        }),
+      /does not support/,
+    );
+    assert.equal(
+      configuredThinkingLevel(native, {
+        ...config.models.worker!,
+        thinkingLevel: "low",
+      }),
+      "low",
+    );
+    config.models.worker!.thinkingLevel = "high";
+    assert.throws(() => validateConfig(config), /capability must be enabled/);
+    await assert.rejects(
+      () =>
+        new PiRuntime(config, f.p).run({
+          model: "worker",
+          role: "worker",
+          objective: "Never sent",
+          system: "Never sent",
+          sessionDir: join(f.root, "rejected-profile"),
+          tools: [],
+          signal: new AbortController().signal,
+          onSession: () => assert.fail("No session for unsupported capability"),
+          beforeRequest: () => {
+            requests++;
+            return "unexpected";
+          },
+          afterRequest: () => assert.fail(),
+          onEvent: () => assert.fail(),
+        }),
+      /does not support/,
+    );
+    assert.equal(requests, 0);
+    config.models.worker!.reasoning = true;
+    assert.doesNotThrow(() => validateConfig(config));
+    config.models.worker!.reasoning = false;
+    assert.throws(() => validateConfig(config), /capability must be enabled/);
+  } finally {
+    await f.cleanup();
+  }
+});
 test("pinned Pi SDK executes registered tools, persists a session and accounts for each turn", async (t) => {
   const f = await fixture(new ScriptedRuntime(async () => completed()));
   let calls = 0;

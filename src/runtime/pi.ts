@@ -5,7 +5,8 @@ import {
   SettingsManager,
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { join, dirname } from "node:path";
 import { Type } from "typebox";
 import type { Config, Paths } from "../config.js";
@@ -13,6 +14,23 @@ import { AgentError, type Runtime, type RuntimeRequest } from "../types.js";
 import { privateDirectory, sha256 } from "../util.js";
 import { connectionRuntime, providerId } from "./providers.js";
 import { guardModelStream } from "./transport.js";
+
+export function configuredThinkingLevel(
+  model: Model<Api>,
+  profile: Config["models"][string],
+) {
+  const level = profile.thinkingLevel ?? "off";
+  if (
+    (level !== "off" && profile.reasoning === false) ||
+    (profile.thinkingLevel !== undefined &&
+      !getSupportedThinkingLevels(model).includes(level))
+  )
+    throw new AgentError(
+      "MODEL_CAPABILITY",
+      "The selected model does not support the configured thinking level; change the profile explicitly",
+    );
+  return level;
+}
 export function isolatedLoader(system: string): ResourceLoader {
   return {
     getExtensions: () => ({
@@ -52,6 +70,7 @@ export class PiRuntime implements Runtime {
       this.config,
       this.paths,
       selected.connection,
+      request.model,
     );
     if (
       conn.type === "chatgpt" &&
@@ -73,6 +92,7 @@ export class PiRuntime implements Runtime {
       ...found,
       maxTokens: Math.min(found.maxTokens, selected.maxOutputTokens),
     };
+    const thinkingLevel = configuredThinkingLevel(model, selected);
     const checkFailure = guardModelStream(
       runtime,
       model,
@@ -138,7 +158,7 @@ export class PiRuntime implements Runtime {
       agentDir: join(this.paths.auth, selected.connection),
       modelRuntime: runtime,
       model,
-      thinkingLevel: "off",
+      thinkingLevel,
       sessionManager: manager,
       resourceLoader: isolatedLoader(system),
       settingsManager: SettingsManager.inMemory({
@@ -199,6 +219,19 @@ export class PiRuntime implements Runtime {
         });
     });
     try {
+      if (
+        selected.thinkingLevel !== undefined &&
+        session.thinkingLevel !== thinkingLevel
+      )
+        throw new AgentError(
+          "MODEL_CAPABILITY",
+          "The SDK changed the requested thinking level; inference was not started",
+        );
+      request.onEvent("model_profile", {
+        model: request.model,
+        thinkingLevel: session.thinkingLevel,
+        maxOutputTokens: model.maxTokens,
+      });
       await session.prompt(request.objective, {
         expandPromptTemplates: false,
         images: promptImages.length ? promptImages : undefined,
