@@ -59,6 +59,53 @@ test("simple conversation uses one model without planning, shell or document req
   }
 });
 
+test("collaborative chat stores only the synthesis response and retains intermediate reports", async () => {
+  let calls = 0;
+  const runtime = new ScriptedRuntime(async () =>
+    completed(
+      [],
+      ["producer claim", "review finding", "統合した最終回答"][calls++]!,
+    ),
+  );
+  const f = await fixture(runtime);
+  f.config.models.hiddenReviewer = {
+    ...f.config.models.reviewer!,
+    id: "reviewer-without-tools",
+    tools: false,
+    priority: 100,
+  };
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  try {
+    await app.initialize();
+    app.session.kind = "chat";
+    app.session.strategy = "reviewed";
+    await app.submit("この会話について返答してください");
+    await app.waitForIdle();
+    const run = app.currentRun()!;
+    assert.equal(run.state, "succeeded", run.reason);
+    assert.equal(runtime.requests[1]?.model, "reviewer");
+    assert.equal(
+      app.conversations.messages(app.session.id).at(-1)?.text,
+      "統合した最終回答",
+    );
+    assert.equal(run.tasks[0]?.result?.summary, "producer claim");
+    assert.equal(run.tasks[1]?.result?.summary, "review finding");
+    assert.equal(
+      run.tasks.filter((task) => task.attemptReportIds?.length).length,
+      3,
+    );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
 test("collaborative chat attachment previews expose every required role", async () => {
   const f = await fixture(new ScriptedRuntime(async () => "unused"));
   const app = new Application(

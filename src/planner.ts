@@ -32,21 +32,16 @@ export class Planner {
       run.mode === "reviewed" || run.mode === "assisted" ? 3 : 1,
     );
     const collaborative = isCollaborative(run);
-    let toolsRequired =
-      !!run.workspace ||
+    const toolsRequired =
+      run.kind !== "chat" ||
       run.inputs.length > 0 ||
       (run.preparedInputs?.length ?? 0) > 0 ||
-      (run.access === "change" && run.kind !== "chat") ||
-      (run.kind === "research" &&
-        !run.localOnly &&
-        run.dataClass !== "restricted") ||
       !!run.contextState?.researchCheckpoint ||
       this.store
         .artifacts(run.id)
         .some((artifact) => artifact.kind === "source") ||
       !!run.compactions?.length ||
       !!run.contextState?.compactions?.length;
-    if (run.kind !== "chat") toolsRequired = true;
     let plannedTasks: Task[] = [];
 
     if (run.mode === "single") {
@@ -89,7 +84,7 @@ export class Planner {
         reviewer = await this.router.select(
           run,
           "reviewer",
-          toolsRequired,
+          true,
           signal,
           run.reviewer,
           worker,
@@ -290,7 +285,6 @@ export class Planner {
         0,
       );
     this.assertDelegationBudget(run, requestedChildren);
-    let childCount = 0;
     for (const parent of requests) {
       if (parent.result?.outcome !== "needs_replan") continue;
       const delegations = parent.result.delegations;
@@ -366,7 +360,6 @@ export class Planner {
       nextParent.state = "pending";
       nextParent.result = undefined;
       nextParent.sessionFile = undefined;
-      childCount += pendingChildren.length;
       admissions.push({
         parentId: parent.id,
         childIds: pendingChildren.map((task) => task.id),
@@ -376,7 +369,7 @@ export class Planner {
     if (!admissions.length) return;
     if (stagedTasks.length > this.config.limits.maxTasks)
       throw new AgentError("TASK_LIMIT", "Delegation exceeds maxTasks");
-    this.assertDelegationBudget(run, childCount, stagedTasks);
+    this.assertDelegationBudget(run, 0, stagedTasks);
     this.assertReviewerIndependence(stagedTasks);
     this.store.assertLease(run.id, run.generation);
     this.store.save(run, "delegations_admitted", { admissions }, () => {

@@ -724,7 +724,6 @@ export class Application extends EventEmitter {
     } as Run;
     const workerNeedsTools =
       kind !== "chat" ||
-      !!this.session.workspace ||
       snapshot.attachments.some((attachment) => !attachment.mimeType);
     const candidates = {
       lead: modelCandidates(this.config, run, "lead", true),

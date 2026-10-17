@@ -11,6 +11,14 @@ import { TaskTools } from "../src/tools.js";
 import { Sandbox } from "../src/sandbox.js";
 import type { Run, Task } from "../src/types.js";
 import { join } from "node:path";
+import sharp from "sharp";
+import {
+  emptyConversationContext,
+  readContextArchive,
+} from "../src/context.js";
+import { saveImage } from "../src/images.js";
+import { sha256 } from "../src/util.js";
+import { Store } from "../src/storage.js";
 import { ScriptedRuntime, call, completed, fixture } from "./helpers.js";
 
 test("read-only plans permit independent review without a writer", () => {
@@ -343,6 +351,297 @@ test("task reports deny sibling access while preserving legacy checkpoint tools"
   }
 });
 
+test("delegated context, evidence, images and exploration archives remain task-scoped", async () => {
+  let assignedId = "",
+    unassignedId = "",
+    excludedId = "",
+    foreignId = "";
+  let runId = "",
+    parentArchive = "",
+    childArchive = "",
+    parentCalls = 0;
+  const runtime = new ScriptedRuntime(async (request) => {
+    if (request.role === "lead")
+      return JSON.stringify({
+        tasks: [
+          {
+            id: "parent",
+            objective: "inspect root",
+            role: "worker",
+            dependsOn: [],
+            write: false,
+          },
+        ],
+      });
+    const input = JSON.parse(request.objective) as { taskObjective: string };
+    const compact = async (secret: string) => {
+      const context = {
+        messages: [
+          { role: "user", content: request.objective },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{ id: "old", function: { name: "read_source" } }],
+          },
+          { role: "tool", tool_call_id: "old", content: secret.repeat(4000) },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{ id: "latest", function: { name: "read_source" } }],
+          },
+          { role: "tool", tool_call_id: "latest", content: "latest finding" },
+        ],
+      };
+      const result = await request.transformContext!(context, request.signal);
+      assert.ok(JSON.stringify(result).length < JSON.stringify(context).length);
+      return sha256(JSON.stringify(context));
+    };
+    if (input.taskObjective === "inspect root") {
+      assert.equal(request.images?.length, 1);
+      if (parentCalls++ === 0) {
+        parentArchive = await compact("PARENT-PRIVATE-EXPLORATION");
+        return JSON.stringify({
+          outcome: "needs_replan",
+          summary: "bounded question",
+          artifacts: [],
+          unresolved: [],
+          delegations: [
+            {
+              objective: "inspect assigned",
+              constraints: ["CHILD-LIMIT"],
+              sourceIds: [assignedId],
+              expectedResult: "one finding",
+              acceptance: ["cite the assigned evidence"],
+            },
+          ],
+        });
+      }
+      return completed([], "producer finding");
+    }
+    if (input.taskObjective === "inspect assigned") {
+      assert.equal(request.access, "read-only");
+      assert.deepEqual(request.images, []);
+      for (const secret of [
+        "ROOT-ONLY-CONTEXT",
+        "PARENT-PRIVATE-EXPLORATION",
+        unassignedId,
+        excludedId,
+        foreignId,
+      ])
+        assert.equal(request.objective.includes(secret), false, secret);
+      for (const required of [
+        "HOST-HARD",
+        "DURABLE-HARD",
+        "CHILD-LIMIT",
+        "PIN-PROHIBITION",
+        "KEEP-LITERAL",
+      ])
+        assert.ok(request.objective.includes(required), required);
+      for (const denied of [
+        "shell",
+        "write_file",
+        "edit_file",
+        "research_checkpoint",
+      ])
+        assert.equal(
+          request.tools.some((tool) => tool.name === denied),
+          false,
+          denied,
+        );
+      assert.match(
+        await call(request, "read_source", { id: assignedId }),
+        /assigned evidence/,
+      );
+      for (const deniedId of [unassignedId, excludedId, foreignId])
+        await assert.rejects(
+          () => call(request, "read_source", { id: deniedId }),
+          { code: "SOURCE" },
+        );
+      const parentReport = f.store
+        .get(runId)
+        .tasks.find((task) => task.id === "parent")!.attemptReportIds![0]!;
+      await assert.rejects(
+        () => call(request, "read_task_report", { reportId: parentReport }),
+        { code: "REPORT" },
+      );
+      await assert.rejects(
+        () => call(request, "read_context", { archiveId: parentArchive }),
+        { code: "CONTEXT_ARCHIVE" },
+      );
+      childArchive = await compact("CHILD-PRIVATE-EXPLORATION");
+      return completed([], "assigned child finding");
+    }
+    assert.equal(request.images?.length, 1);
+    for (const archiveId of [parentArchive, childArchive])
+      await assert.rejects(() => call(request, "read_context", { archiveId }), {
+        code: "CONTEXT_ARCHIVE",
+      });
+    const parentReport = f.store
+      .get(runId)
+      .tasks.find((task) => task.id === "parent")!.attemptReportIds![0]!;
+    assert.match(
+      await call(request, "read_task_report", { reportId: parentReport }),
+      /needs_replan/,
+    );
+    return completed([], "integrated authorized findings");
+  });
+  const f = await fixture(runtime);
+  try {
+    f.config.models.worker!.images = true;
+    f.config.models.worker!.contextWindow = 14_000;
+    f.config.models.worker!.maxOutputTokens = 1_000;
+    const image = await saveImage(
+      f.p,
+      "scope.png",
+      await sharp({
+        create: {
+          width: 2,
+          height: 1,
+          channels: 3,
+          background: "red",
+        },
+      })
+        .png()
+        .toBuffer(),
+      "private",
+      false,
+    );
+    const context = emptyConversationContext();
+    context.constraints = ["DURABLE-HARD"];
+    context.pins = [
+      {
+        id: "pin",
+        text: "PIN-PROHIBITION",
+        kind: "pin",
+        author: "user",
+        trusted: true,
+        updatedAt: Date.now(),
+      },
+    ];
+    const created = await f.harness.create({
+      kind: "research",
+      mode: "assisted",
+      access: "read-only",
+      objective: "scope check",
+      constraints: ["HOST-HARD"],
+      mustKeep: ["KEEP-LITERAL"],
+      context: "ROOT-ONLY-CONTEXT",
+      contextState: context,
+      images: [image],
+    });
+    runId = created.id;
+    const owner = f.store.claim(runId);
+    assignedId = (
+      await f.store.artifact(owner, "assigned", "source", "assigned evidence")
+    ).id;
+    unassignedId = (
+      await f.store.artifact(
+        owner,
+        "unassigned",
+        "source",
+        "unassigned evidence",
+      )
+    ).id;
+    excludedId = (
+      await f.store.artifact(owner, "excluded", "source", "excluded evidence")
+    ).id;
+    owner.contextState!.excludedSourceIds = [excludedId];
+    f.store.save(owner);
+    f.store.release(owner);
+    const other = await f.harness.create({
+      kind: "research",
+      objective: "foreign owner",
+    });
+    const foreignOwner = f.store.claim(other.id);
+    foreignId = (
+      await f.store.artifact(
+        foreignOwner,
+        "foreign",
+        "source",
+        "foreign evidence",
+      )
+    ).id;
+    f.store.release(foreignOwner);
+    const result = await f.harness.execute(runId);
+    assert.equal(result.state, "succeeded", result.reason);
+    assert.equal(runtime.requests.length, 5);
+    assert.equal(parentCalls, 2);
+    const childText = await readContextArchive(f.p, result, childArchive);
+    assert.match(childText, /CHILD-PRIVATE-EXPLORATION/);
+    assert.equal(childText.includes("ROOT-ONLY-CONTEXT"), false);
+    assert.equal(childText.includes("PARENT-PRIVATE-EXPLORATION"), false);
+    assert.deepEqual(
+      result.tasks.find((task) => task.purpose === "synthesis")
+        ?.contextArchiveIds,
+      [],
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("completed attempt report and terminal task state survive reopening together", async () => {
+  const f = await fixture(
+    new ScriptedRuntime(async () => {
+      throw new Error("Completed provider must not run again");
+    }),
+  );
+  try {
+    const created = await f.harness.create({
+      kind: "chat",
+      objective: "durable result",
+      access: "read-only",
+    });
+    const run = f.store.claim(created.id);
+    const task: Task = {
+      id: "work",
+      objective: run.objective,
+      role: "worker",
+      model: "worker",
+      dependsOn: [],
+      write: false,
+      state: "running",
+      attempts: 1,
+      resultFormat: "text",
+      result: {
+        outcome: "completed",
+        summary: "already answered",
+        artifacts: [],
+        unresolved: [],
+      },
+    };
+    run.tasks = [task];
+    f.store.save(run);
+    const reportId = await saveAttemptReport(
+      f.store,
+      run,
+      task,
+      task.id,
+      task.model!,
+      task.attempts,
+      { result: task.result },
+      { terminalState: "succeeded" },
+    );
+    f.store.release(run);
+    const reopened = new Store(f.p);
+    try {
+      assert.equal(reopened.get(run.id).tasks[0]?.state, "succeeded");
+      assert.deepEqual(reopened.get(run.id).tasks[0]?.attemptReportIds, [
+        reportId,
+      ]);
+      assert.ok(
+        reopened.artifacts(run.id).some((artifact) => artifact.id === reportId),
+      );
+    } finally {
+      reopened.close();
+    }
+    const result = await f.harness.execute(run.id);
+    assert.equal(result.state, "succeeded", result.reason);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("oversized attempt audits retain bounded evidence and truthful truncation metadata", async () => {
   const f = await fixture(new ScriptedRuntime(async () => completed()));
   try {
@@ -408,6 +707,8 @@ test("oversized attempt audits retain bounded evidence and truthful truncation m
 test("delegation stages two ready parents without rolling back live run metadata", async () => {
   const f = await fixture(new ScriptedRuntime(async () => completed()));
   try {
+    f.config.limits.maxTasks = 4;
+    f.config.limits.maxRequests = 4;
     const created = await f.harness.create({
         kind: "research",
         objective: "Inspect two independent areas",
@@ -909,6 +1210,9 @@ test("assisted delegation is admitted at a scheduler boundary with isolated chil
   });
   const f = await fixture(runtime);
   try {
+    f.config.limits.maxRepairs = 0;
+    f.config.limits.maxTasks = 3;
+    f.config.limits.maxRequests = 5;
     const run = await f.harness.create({
       kind: "research",
       objective: "Inspect the evidence",
