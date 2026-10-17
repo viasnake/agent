@@ -228,7 +228,7 @@ test("assisted read-only execution exposes only scoped tools and synthesizes one
   }
 });
 
-test("plain-text collaborative chat exposes only the bounded report tool", async () => {
+test("plain-text collaborative chat exposes only bounded reports and context issue reporting", async () => {
   const runtime = new ScriptedRuntime(async (request) => {
     if (request.role === "lead")
       return JSON.stringify({
@@ -242,10 +242,10 @@ test("plain-text collaborative chat exposes only the bounded report tool", async
           },
         ],
       });
-    assert.deepEqual(
-      request.tools.map((tool) => tool.name),
-      ["read_task_report"],
-    );
+    assert.deepEqual(request.tools.map((tool) => tool.name).sort(), [
+      "read_task_report",
+      "report_context_issue",
+    ]);
     return completed([], "Integrated answer");
   });
   const f = await fixture(runtime);

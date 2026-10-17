@@ -354,9 +354,7 @@ export class TaskExecutor {
     if (
       allTools.some(
         (tool) =>
-          chatTools.has(tool.name) &&
-          tool.name !== "read_task_report" &&
-          isContextExplorationTool(tool.name),
+          chatTools.has(tool.name) && isContextExplorationTool(tool.name),
       )
     )
       chatTools.add("report_context_issue");
