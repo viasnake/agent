@@ -694,7 +694,7 @@ export function recordModelChangeResolution(
           latestReports.get(taskId)!,
         ]),
       );
-      await store.artifact(
+      const resolution = await store.artifact(
         run,
         `model-changes/resolution-${change.reportId}.json`,
         "report",
@@ -742,6 +742,7 @@ export function recordModelChangeResolution(
           );
         },
       );
+      change.resolutionReportId = resolution.id;
     }
   })();
 }

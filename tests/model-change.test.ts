@@ -174,6 +174,20 @@ test("real AUTH waiting supports exact request-boundary replacement and explicit
             artifact.metadata.type === "task-model-change-resolution",
         );
       assert.ok(resolution);
+      assert.equal(
+        completedRun.modelChanges?.at(-1)?.resolutionReportId,
+        resolution.id,
+      );
+      const reopenedStore = new Store(f.p);
+      try {
+        assert.equal(
+          reopenedStore.get(completedRun.id).modelChanges?.at(-1)
+            ?.resolutionReportId,
+          resolution.id,
+        );
+      } finally {
+        reopenedStore.close();
+      }
       const evidence = JSON.parse(
         (await f.store.content(resolution!)).toString(),
       );
@@ -750,6 +764,10 @@ test("mutable replacement records only fresh passing checks and no failed resolu
       }
       assert.equal(result.state, "succeeded", result.reason);
       assert.equal(resolutions.length, 1);
+      assert.equal(
+        result.modelChanges?.at(-1)?.resolutionReportId,
+        resolutions[0]!.id,
+      );
       const evidence = JSON.parse(
         (await f.store.content(resolutions[0]!)).toString(),
       );
