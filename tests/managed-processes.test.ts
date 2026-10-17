@@ -15,6 +15,7 @@ import { runProcess } from "../src/process.js";
 import { Store } from "../src/storage.js";
 import { TaskExecutor } from "../src/task-executor.js";
 import { Sandbox } from "../src/sandbox.js";
+import { TaskTools } from "../src/tools.js";
 import {
   completed,
   fixture,
@@ -97,9 +98,11 @@ test("managed identity is written before container creation", async () => {
           const hasJob = calls.some((entry) => entry[0] === "create");
           const anchor = {
             Id: anchorId,
-            Labels: {
-              "local-agent.process-anchor":
-                config.execution.managedProcesses!.engineAnchor.token,
+            Config: {
+              Labels: {
+                "local-agent.process-anchor":
+                  config.execution.managedProcesses!.engineAnchor.token,
+              },
             },
           };
           if (!hasJob)
@@ -139,6 +142,138 @@ test("managed identity is written before container creation", async () => {
     f.store.operation(run, operation, "dispatched");
     await assert.rejects(() =>
       manager.start(task, operation, "printf ok", new AbortController().signal),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("cancellation between create and start leaves a cleanable identity", async () => {
+  const config = testConfig();
+  config.execution.backend = "podman";
+  config.execution.image = `fixture@sha256:${"b".repeat(64)}`;
+  config.execution.managedProcesses = {
+    engineAnchor: {
+      containerId: anchorId,
+      token: "00000000-0000-4000-8000-000000000000",
+    },
+    maxSeconds: 60,
+    maxProcesses: 1,
+  };
+  const f = await fixture(new ScriptedRuntime(async () => completed()), config);
+  try {
+    const origin = await gitWorkspace(f.root, { "README.md": "fixture\n" });
+    const created = await f.harness.create({
+      kind: "coding",
+      objective: "cancel process start",
+      workspace: origin,
+      access: "change",
+    });
+    const run = f.store.claim(created.id);
+    const task = {
+      id: "writer",
+      role: "worker" as const,
+      objective: "writer",
+      dependsOn: [],
+      write: true,
+      state: "pending" as const,
+      attempts: 0,
+    };
+    const command = "printf should-not-start";
+    const operation = f.store.prepare(run, task.id, "process_start", {
+      command,
+    });
+    const processId = "c".repeat(64);
+    const controller = new AbortController();
+    let jobToken = "";
+    let exists = false;
+    let started = false;
+    let removed = false;
+    const runner = async (_command: string, args: string[]) => {
+      if (args[0] === "info")
+        return { code: 0, stdout: "true\n", stderr: "", truncated: false };
+      if (args[0] === "inspect") {
+        const target = args[3];
+        const anchor = {
+          Id: anchorId,
+          Config: {
+            Labels: {
+              "local-agent.process-anchor":
+                config.execution.managedProcesses!.engineAnchor.token,
+            },
+          },
+        };
+        const job = {
+          Id: processId,
+          Name: `local-agent-process-${operation}`,
+          Config: {
+            Labels: {
+              "local-agent.process-token": jobToken,
+              "local-agent.process-run": run.id,
+              "local-agent.process-task": task.id,
+              "local-agent.process-operation": operation,
+            },
+          },
+          State: { Status: started ? "running" : "created", ExitCode: 0 },
+        };
+        if (target && exists)
+          return {
+            code: 0,
+            stdout: JSON.stringify([anchor, job]),
+            stderr: "",
+            truncated: false,
+          };
+        return {
+          code: target ? 1 : 0,
+          stdout: JSON.stringify([anchor]),
+          stderr: target ? `no such container ${target}` : "",
+          truncated: false,
+        };
+      }
+      if (args[0] === "create") {
+        exists = true;
+        jobToken = args
+          .find((arg) => arg.startsWith("--label=local-agent.process-token="))!
+          .split("=")
+          .at(-1)!;
+        controller.abort();
+        return {
+          code: 0,
+          stdout: `${processId}\n`,
+          stderr: "",
+          truncated: false,
+        };
+      }
+      if (args[0] === "start") {
+        started = true;
+        return { code: 0, stdout: "", stderr: "", truncated: false };
+      }
+      if (args[0] === "rm") {
+        exists = false;
+        removed = true;
+        return { code: 0, stdout: "", stderr: "", truncated: false };
+      }
+      throw new Error(`unexpected podman call: ${args.join(" ")}`);
+    };
+    const manager = new ManagedProcesses(config, f.store, run, task, runner);
+    await manager.prepare(task, operation, command);
+    f.store.operation(run, operation, "dispatched");
+    await assert.rejects(
+      () => manager.start(task, operation, command, controller.signal),
+      { name: "AbortError" },
+    );
+    assert.equal(started, false);
+    assert.equal(
+      f.store.operations(run.id).find((entry) => entry.id === operation)
+        ?.status,
+      "unknown",
+    );
+    await manager.stop(operation);
+    assert.equal(removed, true);
+    assert.equal(
+      f.store.operations(run.id).find((entry) => entry.id === operation)
+        ?.status,
+      "completed",
     );
   } finally {
     await f.cleanup();
@@ -187,6 +322,9 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
     let jobToken = "";
     let rmArgs: string[] | undefined;
     let createArgs: string[] | undefined;
+    let omitAnchor = false;
+    let inspectError: string | undefined;
+    let throwOnRm = false;
     const runner = async (_command: string, args: string[]) => {
       if (args[0] === "info")
         return { code: 0, stdout: "true\n", stderr: "", truncated: false };
@@ -194,30 +332,32 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
         const target = args[3];
         const anchor = {
           Id: anchorId,
-          Labels: { "local-agent.process-anchor": anchorToken },
+          Config: { Labels: { "local-agent.process-anchor": anchorToken } },
         };
         const job = {
           Id: processId,
-          Names: [name],
-          Labels: {
-            "local-agent.process-token": jobToken,
-            "local-agent.process-run": run.id,
-            "local-agent.process-task": task.id,
-            "local-agent.process-operation": operation,
+          Name: name,
+          Config: {
+            Labels: {
+              "local-agent.process-token": jobToken,
+              "local-agent.process-run": run.id,
+              "local-agent.process-task": task.id,
+              "local-agent.process-operation": operation,
+            },
           },
           State: { Status: started ? "running" : "created", ExitCode: 0 },
         };
         if (target && exists)
           return {
             code: 0,
-            stdout: JSON.stringify([anchor, job]),
+            stdout: JSON.stringify([...(omitAnchor ? [] : [anchor]), job]),
             stderr: "",
             truncated: false,
           };
         return {
           code: target ? 1 : 0,
-          stdout: JSON.stringify([anchor]),
-          stderr: target ? `no such container ${target}` : "",
+          stdout: JSON.stringify(omitAnchor ? [] : [anchor]),
+          stderr: target ? (inspectError ?? `no such container ${target}`) : "",
           truncated: false,
         };
       }
@@ -254,6 +394,7 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
         };
       if (args[0] === "rm") {
         rmArgs = args;
+        if (throwOnRm) throw new Error("synthetic removal failure");
         exists = false;
         return { code: 0, stdout: "", stderr: "", truncated: false };
       }
@@ -291,6 +432,12 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
     ])
       assert.ok(createArgs?.includes(flag), `missing ${flag}`);
     assert.ok(createArgs?.some((arg) => arg.endsWith(":/workspace:ro")));
+    const recordPath = join(
+      f.store.runDir(run.id),
+      "managed-processes",
+      `${operation}.json`,
+    );
+    const beforeRead = await readFile(recordPath);
     assert.equal(
       JSON.stringify(await manager.status(operation)).includes("running"),
       true,
@@ -300,9 +447,19 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
       output: "managed log\n",
       truncated: false,
     });
+    assert.deepEqual(await readFile(recordPath), beforeRead);
     assert.throws(() => f.store.assertManagedProcessesStopped(run), {
       code: "PROCESS_CLEANUP_REQUIRED",
     });
+
+    exists = false;
+    omitAnchor = true;
+    await assert.rejects(() => manager.status(operation));
+    omitAnchor = false;
+    inspectError = `cannot find mount for ${name}`;
+    await assert.rejects(() => manager.status(operation));
+    inspectError = undefined;
+    exists = true;
 
     anchorToken = "10000000-0000-4000-8000-000000000000";
     await assert.rejects(() => manager.stop(operation));
@@ -313,6 +470,20 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
       "unknown",
     );
     anchorToken = config.execution.managedProcesses!.engineAnchor.token;
+    throwOnRm = true;
+    await assert.rejects(
+      () => manager.stop(operation),
+      /synthetic removal failure/,
+    );
+    throwOnRm = false;
+    const blockedStart = f.store.prepare(run, task.id, "process_start", {
+      command: "printf blocked",
+    });
+    await assert.rejects(
+      () => manager.prepare(task, blockedStart, "printf blocked"),
+      { code: "PROCESS_CLEANUP_REQUIRED" },
+    );
+    f.store.operation(run, blockedStart, "failed");
     await manager.stop(operation);
     assert.deepEqual(rmArgs, ["rm", "--force", processId]);
     assert.equal(
@@ -321,6 +492,32 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
       "completed",
     );
     assert.doesNotThrow(() => f.store.assertManagedProcessesStopped(run));
+    f.store.operation(run, operation, "unknown");
+    let contactedEngine = false;
+    const changedConfig = structuredClone(config);
+    changedConfig.execution.backend = "bubblewrap";
+    changedConfig.execution.managedProcesses = undefined;
+    const recovered = new ManagedProcesses(
+      changedConfig,
+      f.store,
+      run,
+      task,
+      async () => {
+        contactedEngine = true;
+        throw new Error("engine must not be contacted");
+      },
+    );
+    assert.deepEqual(await recovered.status(operation), {
+      processId: operation,
+      status: "removed",
+    });
+    await recovered.stop(operation);
+    assert.equal(contactedEngine, false);
+    assert.equal(
+      f.store.operations(run.id).find((entry) => entry.id === operation)
+        ?.status,
+      "completed",
+    );
   } finally {
     await f.cleanup();
   }
@@ -394,19 +591,23 @@ test("TaskExecutor finally cleans a dispatched process after cancellation", asyn
         const target = args[3];
         const anchor = {
           Id: anchorId,
-          Labels: {
-            "local-agent.process-anchor":
-              config.execution.managedProcesses!.engineAnchor.token,
+          Config: {
+            Labels: {
+              "local-agent.process-anchor":
+                config.execution.managedProcesses!.engineAnchor.token,
+            },
           },
         };
         const job = {
           Id: processId,
-          Names: [`local-agent-process-${operationId}`],
-          Labels: {
-            "local-agent.process-token": jobToken,
-            "local-agent.process-run": run.id,
-            "local-agent.process-task": task.id,
-            "local-agent.process-operation": operationId,
+          Name: `local-agent-process-${operationId}`,
+          Config: {
+            Labels: {
+              "local-agent.process-token": jobToken,
+              "local-agent.process-run": run.id,
+              "local-agent.process-task": task.id,
+              "local-agent.process-operation": operationId,
+            },
           },
           State: { Status: started ? "running" : "created", ExitCode: 0 },
         };
@@ -495,16 +696,70 @@ test("TaskExecutor finally cleans a dispatched process after cancellation", asyn
   }
 });
 
-test("managed tools are restricted to ordinary coding writers", () => {
+test("managed tools are restricted to ordinary coding writers", async () => {
   const run = { kind: "coding", access: "change" } as never;
-  assert.equal(
-    processToolAllowed(run, { role: "worker", write: true } as never),
-    true,
-  );
-  assert.equal(
-    processToolAllowed(run, { role: "reviewer", write: true } as never),
-    false,
-  );
+  const cases = [
+    [{ role: "worker", write: true }, true],
+    [{ role: "reviewer", write: true }, false],
+    [{ role: "worker", write: false }, false],
+    [{ role: "worker", write: true, delegatedBy: "parent" }, false],
+    [{ role: "worker", write: true, purpose: "synthesis" }, false],
+  ] as const;
+  for (const [task, expected] of cases)
+    assert.equal(processToolAllowed(run, task as never), expected);
+
+  const config = testConfig();
+  config.execution.backend = "bubblewrap";
+  config.execution.managedProcesses = {
+    engineAnchor: {
+      containerId: anchorId,
+      token: "00000000-0000-4000-8000-000000000000",
+    },
+    maxSeconds: 60,
+    maxProcesses: 1,
+  };
+  const f = await fixture(new ScriptedRuntime(async () => completed()), config);
+  try {
+    const origin = await gitWorkspace(f.root, { "README.md": "fixture\n" });
+    const created = await f.harness.create({
+      kind: "coding",
+      objective: "non-Podman process gating",
+      workspace: origin,
+      access: "change",
+    });
+    const current = f.store.get(created.id);
+    const task = {
+      id: "writer",
+      role: "worker" as const,
+      objective: "writer",
+      dependsOn: [],
+      write: true,
+      state: "pending" as const,
+      attempts: 0,
+    };
+    let runnerCalls = 0;
+    const tools = new TaskTools(
+      config,
+      f.store,
+      current,
+      task,
+      join(f.store.runDir(current.id), "work"),
+      new Sandbox(config.execution),
+      undefined,
+      async () => {
+        runnerCalls++;
+        throw new Error("unexpected engine call");
+      },
+    );
+    assert.equal(
+      tools.all().some((tool) => tool.name.startsWith("process_")),
+      false,
+    );
+    await tools.close();
+    assert.equal(runnerCalls, 0);
+  } finally {
+    await f.cleanup();
+  }
 });
 
 test("real Podman enforces managed isolation, live workspace, logs, and deadline", async (t) => {
@@ -568,20 +823,20 @@ test("real Podman enforces managed isolation, live workspace, logs, and deadline
     };
     const operation = store.prepare(run, task.id, "process_start", {
       command:
-        "printf tmp > /tmp/managed-write; test -s /tmp/managed-write; if touch /workspace/managed-write-denied; then exit 91; fi; if touch /etc/hostname; then exit 92; fi; while :; do cat /workspace/README.md; sleep 1; done",
+        "set -e; printf tmp > /tmp/managed-write; test -s /tmp/managed-write; if touch /workspace/managed-write-denied; then exit 91; fi; if touch /etc/hostname; then exit 92; fi; while :; do cat /workspace/README.md; sleep 1; done",
     });
     const manager = new ManagedProcesses(config, store, run, task);
     managers.push({ manager, operation });
     await manager.prepare(
       task,
       operation,
-      "printf tmp > /tmp/managed-write; test -s /tmp/managed-write; if touch /workspace/managed-write-denied; then exit 91; fi; if touch /etc/hostname; then exit 92; fi; while :; do cat /workspace/README.md; sleep 1; done",
+      "set -e; printf tmp > /tmp/managed-write; test -s /tmp/managed-write; if touch /workspace/managed-write-denied; then exit 91; fi; if touch /etc/hostname; then exit 92; fi; while :; do cat /workspace/README.md; sleep 1; done",
     );
     store.operation(run, operation, "dispatched");
     await manager.start(
       task,
       operation,
-      "printf tmp > /tmp/managed-write; test -s /tmp/managed-write; if touch /workspace/managed-write-denied; then exit 91; fi; if touch /etc/hostname; then exit 92; fi; while :; do cat /workspace/README.md; sleep 1; done",
+      "set -e; printf tmp > /tmp/managed-write; test -s /tmp/managed-write; if touch /workspace/managed-write-denied; then exit 91; fi; if touch /etc/hostname; then exit 92; fi; while :; do cat /workspace/README.md; sleep 1; done",
       new AbortController().signal,
     );
     const waitForLog = async (needle: string) => {
@@ -628,7 +883,7 @@ test("real Podman enforces managed isolation, live workspace, logs, and deadline
     });
     const shortRun = store.claim(shortRunCreated.id);
     const shortOperation = store.prepare(shortRun, task.id, "process_start", {
-      command: "sleep 30",
+      command: "printf ready; sleep 30",
     });
     const shortManager = new ManagedProcesses(
       shortConfig,
@@ -637,14 +892,25 @@ test("real Podman enforces managed isolation, live workspace, logs, and deadline
       task,
     );
     managers.push({ manager: shortManager, operation: shortOperation });
-    await shortManager.prepare(task, shortOperation, "sleep 30");
+    await shortManager.prepare(task, shortOperation, "printf ready; sleep 30");
     store.operation(shortRun, shortOperation, "dispatched");
     await shortManager.start(
       task,
       shortOperation,
-      "sleep 30",
+      "printf ready; sleep 30",
       new AbortController().signal,
     );
+    const readyDeadline = Date.now() + 5000;
+    let ready = false;
+    while (Date.now() < readyDeadline) {
+      const value = await shortManager.logs(shortOperation);
+      if (String(value.output).includes("ready")) {
+        ready = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(ready, true);
     const deadline = Date.now() + 10000;
     let finalStatus: Record<string, unknown> = {};
     while (Date.now() < deadline) {
@@ -653,6 +919,7 @@ test("real Podman enforces managed isolation, live workspace, logs, and deadline
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     assert.equal(finalStatus.status, "exited");
+    assert.notEqual(finalStatus.exitCode, 0);
     await shortManager.stop(shortOperation);
   } finally {
     for (const { manager, operation } of managers) {

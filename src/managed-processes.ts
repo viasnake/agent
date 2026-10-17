@@ -23,9 +23,9 @@ import {
 const recordVersion = 1;
 const recordBytes = 16_000;
 const guard = [
-  'mem="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || printf invalid)"',
-  'pids="$(cat /sys/fs/cgroup/pids.max 2>/dev/null || printf invalid)"',
-  'cpu="$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || printf invalid)"',
+  "IFS= read -r mem < /sys/fs/cgroup/memory.max || mem=invalid",
+  "IFS= read -r pids < /sys/fs/cgroup/pids.max || pids=invalid",
+  "IFS= read -r cpu < /sys/fs/cgroup/cpu.max || cpu=invalid",
   "command=$1",
   "set -- $cpu",
   'valid() { case "$1" in ""|*[!0-9]*) return 1;; esac; test "$1" -gt 0; }',
@@ -56,9 +56,10 @@ interface ProcessRecord {
 
 interface InspectEntry {
   Id?: unknown;
-  Names?: unknown;
   Name?: unknown;
-  Labels?: unknown;
+  Config?: {
+    Labels?: unknown;
+  };
   State?: {
     Status?: unknown;
     ExitCode?: unknown;
@@ -93,7 +94,7 @@ function isUuid(value: unknown): value is string {
 }
 
 function label(entry: InspectEntry, key: string): string | undefined {
-  const labels = entry.Labels;
+  const labels = entry.Config?.Labels;
   return labels && typeof labels === "object" && !Array.isArray(labels)
     ? typeof (labels as Record<string, unknown>)[key] === "string"
       ? (labels as Record<string, string>)[key]
@@ -102,17 +103,78 @@ function label(entry: InspectEntry, key: string): string | undefined {
 }
 
 function names(entry: InspectEntry): string[] {
-  if (Array.isArray(entry.Names))
-    return entry.Names.filter(
-      (name): name is string => typeof name === "string",
-    );
   return typeof entry.Name === "string" ? [entry.Name] : [];
 }
 
 function status(entry: InspectEntry): string {
-  return typeof entry.State?.Status === "string"
-    ? entry.State.Status
+  const value = entry.State?.Status;
+  return typeof value === "string" &&
+    [
+      "configured",
+      "created",
+      "running",
+      "paused",
+      "stopped",
+      "exited",
+    ].includes(value)
+    ? value
     : "unknown";
+}
+
+function exitCode(entry: InspectEntry): number {
+  const value = entry.State?.ExitCode;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > 255
+  )
+    throw generic("PROCESS_ENGINE", "Managed-process exit status is invalid");
+  return value;
+}
+
+function validInspectEntry(entry: unknown): entry is InspectEntry {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const value = entry as InspectEntry;
+  if (!isId(value.Id)) return false;
+  if (value.Name !== undefined && typeof value.Name !== "string") return false;
+  if (value.Config !== undefined) {
+    if (
+      !value.Config ||
+      typeof value.Config !== "object" ||
+      Array.isArray(value.Config)
+    )
+      return false;
+    const labels = value.Config.Labels;
+    if (
+      labels !== undefined &&
+      (!labels || typeof labels !== "object" || Array.isArray(labels))
+    )
+      return false;
+  }
+  if (value.State !== undefined) {
+    if (
+      !value.State ||
+      typeof value.State !== "object" ||
+      Array.isArray(value.State)
+    )
+      return false;
+    if (
+      value.State.Status !== undefined &&
+      typeof value.State.Status !== "string"
+    )
+      return false;
+    const exitCode = value.State.ExitCode;
+    if (
+      exitCode !== undefined &&
+      (typeof exitCode !== "number" ||
+        !Number.isInteger(exitCode) ||
+        exitCode < 0 ||
+        exitCode > 255)
+    )
+      return false;
+  }
+  return true;
 }
 
 function generic(code: string, message: string): AgentError {
@@ -238,7 +300,29 @@ export class ManagedProcesses {
   }
 
   private async ensureDirectory(): Promise<void> {
+    await this.assertPrivateDirectory(this.store.paths.runs, false);
+    await this.assertPrivateDirectory(this.store.runDir(this.run.id), false);
     await privateDirectory(this.directory);
+  }
+
+  private async assertPrivateDirectory(
+    path: string,
+    allowMissing: boolean,
+  ): Promise<void> {
+    try {
+      const stat = await lstat(path);
+      if (
+        !stat.isDirectory() ||
+        stat.isSymbolicLink() ||
+        (stat.mode & 0o077) !== 0 ||
+        (process.getuid && stat.uid !== process.getuid())
+      )
+        throw generic("PROCESS_PATH", "Managed-process storage is not private");
+    } catch (error) {
+      if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT")
+        return;
+      throw error;
+    }
   }
 
   private path(operationId: string): string {
@@ -251,6 +335,9 @@ export class ManagedProcesses {
     operationId: string,
     allowConfigurationChange = false,
   ): Promise<ProcessRecord> {
+    await this.assertPrivateDirectory(this.store.paths.runs, false);
+    await this.assertPrivateDirectory(this.store.runDir(this.run.id), false);
+    await this.assertPrivateDirectory(this.directory, false);
     const data = await readBoundedFile(this.path(operationId), recordBytes, {
       privateStorage: true,
     });
@@ -319,8 +406,17 @@ export class ManagedProcesses {
     return record as ProcessRecord;
   }
 
-  private async write(record: ProcessRecord): Promise<void> {
+  private async write(
+    record: ProcessRecord,
+    rejectCancellation = true,
+  ): Promise<void> {
+    this.store.assertLease(this.run.id, this.run.generation);
+    if (rejectCancellation && this.store.cancelRequested(this.run.id))
+      throw generic("CANCELLED", "Cancellation requested");
     await this.ensureDirectory();
+    this.store.assertLease(this.run.id, this.run.generation);
+    if (rejectCancellation && this.store.cancelRequested(this.run.id))
+      throw generic("CANCELLED", "Cancellation requested");
     await atomicWrite(this.path(record.operationId), JSON.stringify(record));
   }
 
@@ -338,12 +434,25 @@ export class ManagedProcesses {
       timeoutMs: 10000,
       maxBytes: 256000,
     });
-    let parsed: InspectEntry[] = [];
+    if (result.truncated)
+      throw generic(
+        "PROCESS_ENGINE",
+        "Managed-process inspection was inconclusive",
+      );
+    let parsed: InspectEntry[];
     try {
       const value = JSON.parse(result.stdout);
-      parsed = Array.isArray(value) ? value : [];
+      if (
+        !Array.isArray(value) ||
+        value.some((entry) => !validInspectEntry(entry))
+      )
+        throw new Error("invalid inspect response");
+      parsed = value as InspectEntry[];
     } catch {
-      parsed = [];
+      throw generic(
+        "PROCESS_ENGINE",
+        "Managed-process inspection was inconclusive",
+      );
     }
     const anchor = parsed.find(
       (entry) => isId(entry.Id) && entry.Id === anchorId,
@@ -373,11 +482,16 @@ export class ManagedProcesses {
       );
     if (!target) return { anchor };
     if (job) return { anchor, job };
+    const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const missing = new RegExp(
-      `(?:no such|not found|cannot find)[^\\n]*${target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-      "i",
+      `^(?:Error: )?(?:error inspecting object: )?no such container ${escaped}$`,
     );
-    if (result.code === 0 || !missing.test(result.stderr))
+    const errorLines = result.stderr.split(/\r?\n/).filter(Boolean);
+    if (
+      result.code === 0 ||
+      errorLines.length !== 1 ||
+      !missing.test(errorLines[0]!)
+    )
       throw generic(
         "PROCESS_ENGINE",
         "Managed-process inspection was inconclusive",
@@ -389,12 +503,22 @@ export class ManagedProcesses {
     root: string;
     runtime?: string;
   }> {
-    const root = await realpath(this.store.runDir(this.run.id) + "/work");
+    const workPath = join(this.store.runDir(this.run.id), "work");
+    const workStat = await lstat(workPath);
+    if (
+      !workStat.isDirectory() ||
+      workStat.isSymbolicLink() ||
+      (workStat.mode & 0o077) !== 0 ||
+      (process.getuid && workStat.uid !== process.getuid())
+    )
+      throw generic("PROCESS_PATH", "Managed-process workspace is not private");
+    const root = await realpath(workPath);
     const rootStat = await lstat(root);
     if (
       !rootStat.isDirectory() ||
       rootStat.isSymbolicLink() ||
-      rootStat.mode & 0o077
+      rootStat.mode & 0o077 ||
+      (process.getuid && rootStat.uid !== process.getuid())
     )
       throw generic("PROCESS_PATH", "Managed-process workspace is not private");
     let runtime: string | undefined;
@@ -408,12 +532,22 @@ export class ManagedProcesses {
         task,
       );
     if (runtime) {
-      const runtimeStat = await lstat(runtime);
-      const resolved = await realpath(runtime);
+      const runtimePath = runtime;
+      const runtimeStat = await lstat(runtimePath);
       if (
         !runtimeStat.isDirectory() ||
         runtimeStat.isSymbolicLink() ||
-        runtimeStat.mode & 0o077 ||
+        (runtimeStat.mode & 0o077) !== 0 ||
+        (process.getuid && runtimeStat.uid !== process.getuid())
+      )
+        throw generic("PROCESS_PATH", "Managed-process runtime is not private");
+      const resolved = await realpath(runtime);
+      const resolvedStat = await lstat(resolved);
+      if (
+        !resolvedStat.isDirectory() ||
+        resolvedStat.isSymbolicLink() ||
+        resolvedStat.mode & 0o077 ||
+        (process.getuid && resolvedStat.uid !== process.getuid()) ||
         within(root, resolved) ||
         within(resolved, root) ||
         resolved.includes(":")
@@ -433,6 +567,38 @@ export class ManagedProcesses {
     return this.store.operations(this.run.id);
   }
 
+  private operation(operationId: string): Operation {
+    const operation = this.operations().find(
+      (entry) => entry.id === operationId,
+    );
+    if (!operation || operation.name !== "process_start")
+      throw generic(
+        "PROCESS_OPERATION",
+        "Managed-process operation is invalid",
+      );
+    return operation;
+  }
+
+  private assertCurrent(
+    task: Task,
+    operationId: string,
+    signal?: AbortSignal,
+    rejectCancellation = true,
+  ): Operation {
+    const operation = this.operation(operationId);
+    if (operation.task_id !== task.id || operation.status !== "dispatched")
+      throw generic(
+        "PROCESS_OPERATION",
+        "Managed-process operation is not dispatched",
+      );
+    this.assertConfigured(task);
+    this.store.assertLease(this.run.id, this.run.generation);
+    if (rejectCancellation && this.store.cancelRequested(this.run.id))
+      throw generic("CANCELLED", "Cancellation requested");
+    signal?.throwIfAborted();
+    return operation;
+  }
+
   async prepare(
     task: Task,
     operationId: string,
@@ -445,6 +611,7 @@ export class ManagedProcesses {
     if (
       !operation ||
       operation.name !== "process_start" ||
+      operation.task_id !== task.id ||
       operation.status !== "prepared"
     )
       throw generic(
@@ -462,10 +629,11 @@ export class ManagedProcesses {
       );
     const active = this.operations().filter(
       (entry) =>
+        entry.id !== operationId &&
         entry.name === "process_start" &&
         ["prepared", "dispatched", "unknown"].includes(entry.status),
     ).length;
-    if (active > limits.maxProcesses)
+    if (active >= limits.maxProcesses)
       throw generic(
         "PROCESS_LIMIT",
         "The managed-process limit is already reached",
@@ -480,8 +648,15 @@ export class ManagedProcesses {
         "PROCESS_ENGINE",
         "Podman must be running in rootless mode",
       );
+    this.assertConfigured(task);
+    this.store.assertLease(this.run.id, this.run.generation);
+    if (this.store.cancelRequested(this.run.id))
+      throw generic("CANCELLED", "Cancellation requested");
     await this.inspect(undefined);
-    await this.ensureDirectory();
+    this.assertConfigured(task);
+    this.store.assertLease(this.run.id, this.run.generation);
+    if (this.store.cancelRequested(this.run.id))
+      throw generic("CANCELLED", "Cancellation requested");
     const record: ProcessRecord = {
       version: 1,
       runId: this.run.id,
@@ -504,8 +679,10 @@ export class ManagedProcesses {
   async abandonPrepared(operationId: string): Promise<void> {
     try {
       const record = await this.read(operationId);
-      if (record.phase === "intent")
+      if (record.phase === "intent") {
+        this.store.assertLease(this.run.id, this.run.generation);
         await rm(this.path(operationId), { force: true });
+      }
     } catch {
       // A failed pre-dispatch preparation is reported by the operation itself.
     }
@@ -517,101 +694,118 @@ export class ManagedProcesses {
     command: string,
     signal: AbortSignal,
   ): Promise<Record<string, unknown>> {
-    this.assertConfigured(task);
-    const operation = this.operations().find(
-      (entry) => entry.id === operationId,
-    );
-    if (
-      !operation ||
-      operation.name !== "process_start" ||
-      operation.task_id !== task.id ||
-      operation.args_hash !== sha256(canonical({ command })) ||
-      operation.status !== "dispatched"
-    )
-      throw generic(
-        "PROCESS_OPERATION",
-        "Managed-process operation is not dispatched",
+    try {
+      const operation = this.assertCurrent(task, operationId, signal);
+      if (operation.args_hash !== sha256(canonical({ command })))
+        throw generic(
+          "PROCESS_OPERATION",
+          "Managed-process operation arguments do not match",
+        );
+      const record = await this.read(operationId);
+      if (
+        record.taskId !== task.id ||
+        record.commandSha256 !== sha256(command) ||
+        record.environmentBindingHash !== this.environmentBindingHash ||
+        record.image !== this.config.execution.image ||
+        record.phase !== "intent"
+      )
+        throw generic(
+          "PROCESS_RECORD",
+          "Managed-process identity binding failed",
+        );
+      const { root, runtime } = await this.rootAndRuntime(task);
+      await this.inspect(record);
+      const args = [
+        "create",
+        `--name=${record.name}`,
+        "--pull=never",
+        "--network=none",
+        "--read-only",
+        "--read-only-tmpfs=false",
+        "--image-volume=ignore",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit=128",
+        "--memory=2g",
+        "--cpus=2",
+        "--cgroupns=private",
+        "--userns=keep-id",
+        "--shm-size=16m",
+        "--tmpfs=/tmp:rw,nosuid,nodev,size=64m",
+        `--label=local-agent.process-token=${record.token}`,
+        `--label=local-agent.process-run=${record.runId}`,
+        `--label=local-agent.process-task=${record.taskId}`,
+        `--label=local-agent.process-operation=${record.operationId}`,
+        `--log-driver=k8s-file`,
+        `--log-opt=max-size=${record.maxOutputBytes}`,
+        `--timeout=${record.maxSeconds}`,
+        `--volume=${root}:/workspace:ro`,
+        ...(runtime ? [`--volume=${runtime}:/runtime:ro`] : []),
+        "--workdir=/workspace",
+        "--env=HOME=/tmp",
+        "--env=TMPDIR=/tmp",
+        "--entrypoint=/bin/sh",
+        record.image,
+        "-c",
+        guard,
+        "local-agent-managed-process",
+        command,
+      ];
+      this.assertCurrent(task, operationId, signal);
+      const created = await this.execute("podman", args, {
+        env: this.env,
+        signal,
+        timeoutMs: 30000,
+        maxBytes: 16000,
+      });
+      if (created.code !== 0 || !isId(created.stdout.trim()))
+        throw generic("PROCESS_ENGINE", "Managed process creation failed");
+      const containerId = created.stdout.trim();
+      const createdRecord = {
+        ...record,
+        phase: "created" as const,
+        containerId,
+      };
+      this.assertCurrent(task, operationId, undefined, false);
+      await this.write(createdRecord, false);
+      const proof = await this.inspect(createdRecord, record.name);
+      if (!proof.anchor || !proof.job || proof.job.Id !== containerId)
+        throw generic(
+          "PROCESS_ENGINE",
+          "Managed process identity could not be verified",
+        );
+      this.assertJob(proof.job, createdRecord);
+      this.assertCurrent(task, operationId, signal);
+      const started = await this.execute("podman", ["start", containerId], {
+        env: this.env,
+        signal,
+        timeoutMs: 15000,
+        maxBytes: 16000,
+      });
+      if (started.code !== 0)
+        throw generic("PROCESS_ENGINE", "Managed process start failed");
+      const afterStart = await this.inspect(
+        { ...createdRecord, phase: "started" },
+        record.name,
       );
-    const record = await this.read(operationId);
-    if (
-      record.taskId !== task.id ||
-      record.commandSha256 !== sha256(command) ||
-      record.environmentBindingHash !== this.environmentBindingHash ||
-      record.image !== this.config.execution.image ||
-      record.phase !== "intent"
-    )
-      throw generic(
-        "PROCESS_RECORD",
-        "Managed-process identity binding failed",
-      );
-    const { root, runtime } = await this.rootAndRuntime(task);
-    await this.inspect(record);
-    signal.throwIfAborted();
-    const args = [
-      "create",
-      `--name=${record.name}`,
-      "--pull=never",
-      "--network=none",
-      "--read-only",
-      "--read-only-tmpfs=false",
-      "--image-volume=ignore",
-      "--cap-drop=ALL",
-      "--security-opt=no-new-privileges",
-      "--pids-limit=128",
-      "--memory=2g",
-      "--cpus=2",
-      "--cgroupns=private",
-      "--userns=keep-id",
-      "--shm-size=16m",
-      "--tmpfs=/tmp:rw,nosuid,nodev,size=64m",
-      `--label=local-agent.process-token=${record.token}`,
-      `--label=local-agent.process-run=${record.runId}`,
-      `--label=local-agent.process-task=${record.taskId}`,
-      `--label=local-agent.process-operation=${record.operationId}`,
-      `--log-driver=k8s-file`,
-      `--log-opt=max-size=${record.maxOutputBytes}`,
-      `--timeout=${record.maxSeconds}`,
-      `--volume=${root}:/workspace:ro`,
-      ...(runtime ? [`--volume=${runtime}:/runtime:ro`] : []),
-      "--workdir=/workspace",
-      "--env=HOME=/tmp",
-      "--env=TMPDIR=/tmp",
-      "--entrypoint=/bin/sh",
-      record.image,
-      "-c",
-      guard,
-      "local-agent-managed-process",
-      command,
-    ];
-    const created = await this.execute("podman", args, {
-      env: this.env,
-      signal,
-      timeoutMs: 30000,
-      maxBytes: 16000,
-    });
-    if (created.code !== 0 || !isId(created.stdout.trim()))
-      throw generic("PROCESS_ENGINE", "Managed process creation failed");
-    const containerId = created.stdout.trim();
-    const createdRecord = { ...record, phase: "created" as const, containerId };
-    await this.write(createdRecord);
-    const proof = await this.inspect(createdRecord, record.name);
-    if (!proof.job || proof.job.Id !== containerId)
-      throw generic(
-        "PROCESS_ENGINE",
-        "Managed process identity could not be verified",
-      );
-    this.assertJob(proof.job, createdRecord);
-    signal.throwIfAborted();
-    const started = await this.execute("podman", ["start", containerId], {
-      env: this.env,
-      signal,
-      timeoutMs: 15000,
-      maxBytes: 16000,
-    });
-    if (started.code !== 0)
-      throw generic("PROCESS_ENGINE", "Managed process start failed");
-    await this.write({ ...createdRecord, phase: "started" });
-    return { processId: operationId, containerId, status: "running" };
+      if (!afterStart.anchor || !afterStart.job)
+        throw generic(
+          "PROCESS_ENGINE",
+          "Managed process status could not be verified",
+        );
+      this.assertJob(afterStart.job, createdRecord);
+      this.assertCurrent(task, operationId, undefined, false);
+      await this.write({ ...createdRecord, phase: "started" }, false);
+      return {
+        processId: operationId,
+        containerId,
+        status: status(afterStart.job),
+        exitCode: exitCode(afterStart.job),
+      };
+    } catch (error) {
+      this.markUnknown(operationId, "Managed process start is unresolved");
+      throw error;
+    }
   }
 
   private assertJob(entry: InspectEntry, record: ProcessRecord): void {
@@ -632,45 +826,34 @@ export class ManagedProcesses {
 
   private async verified(
     operationId: string,
-  ): Promise<{ record: ProcessRecord; inspection: InspectResult }> {
+  ): Promise<{ record: ProcessRecord; inspection?: InspectResult }> {
     const record = await this.read(operationId, true);
-    const operation = this.operations().find(
-      (entry) => entry.id === operationId,
-    );
+    const operation = this.operation(operationId);
     if (
-      !operation ||
-      operation.name !== "process_start" ||
-      operation.task_id !== record.taskId
+      operation.task_id !== record.taskId ||
+      (this.task && record.taskId !== this.task.id)
     )
       throw generic(
         "PROCESS_OWNERSHIP",
         "Managed process operation is not owned",
       );
+    if (record.phase === "cleaned") return { record };
     if (record.environmentBindingHash !== this.environmentBindingHash)
       throw generic(
         "PROCESS_ENGINE",
         "Managed-process engine environment changed",
       );
-    if (this.task && record.taskId !== this.task.id)
-      throw generic(
-        "PROCESS_OWNERSHIP",
-        "Managed process belongs to another task",
-      );
     const target = record.containerId ?? record.name;
     const inspection = await this.inspect(record, target);
     if (inspection.job) {
       this.assertJob(inspection.job, record);
-      if (!record.containerId) {
-        record.containerId = inspection.job.Id as string;
-        if (record.phase === "intent") record.phase = "created";
-        await this.write(record);
-      }
     }
     return { record, inspection };
   }
 
   async status(operationId: string): Promise<Record<string, unknown>> {
     const { record, inspection } = await this.verified(operationId);
+    if (!inspection) return { processId: operationId, status: "removed" };
     if (!inspection.job)
       return {
         processId: operationId,
@@ -680,13 +863,13 @@ export class ManagedProcesses {
       processId: operationId,
       status: status(inspection.job),
       containerId: record.containerId,
-      exitCode: inspection.job.State?.ExitCode,
+      exitCode: exitCode(inspection.job),
     };
   }
 
   async logs(operationId: string): Promise<Record<string, unknown>> {
     const { record, inspection } = await this.verified(operationId);
-    if (!inspection.job)
+    if (!inspection?.job)
       throw generic(
         "PROCESS_NOT_FOUND",
         "Managed process is unavailable; stop it to complete cleanup",
@@ -712,54 +895,57 @@ export class ManagedProcesses {
   }
 
   async stop(operationId: string): Promise<Record<string, unknown>> {
-    let verified: { record: ProcessRecord; inspection: InspectResult };
     try {
-      verified = await this.verified(operationId);
-    } catch (error) {
-      this.markUnknown(operationId, "Managed process cleanup is unresolved");
-      throw error;
-    }
-    const { record, inspection } = verified;
-    if (inspection.job) {
-      const result = await this.execute(
-        "podman",
-        ["rm", "--force", record.containerId!],
-        {
-          env: this.env,
-          timeoutMs: 15000,
-          maxBytes: 16000,
-        },
-      );
-      if (result.code !== 0) {
-        this.markUnknown(
+      const verified = await this.verified(operationId);
+      const { record, inspection } = verified;
+      if (!inspection) {
+        this.complete(
           operationId,
-          "Managed process removal was not confirmed",
+          "Managed process cleanup was already durably recorded",
         );
-        throw generic(
-          "PROCESS_CLEANUP",
-          "Managed process removal was not confirmed",
-        );
+        return { processId: operationId, status: "removed" };
       }
-      if (inspection.anchor) {
-        const after = await this.inspect(record, record.containerId!);
-        if (after.job) {
-          this.markUnknown(
-            operationId,
-            "Managed process remains after removal",
-          );
+      if (inspection.job) {
+        if (!record.containerId) {
+          record.containerId = inspection.job.Id as string;
+          if (record.phase === "intent") record.phase = "created";
+          await this.write(record, false);
+        }
+        this.store.assertLease(this.run.id, this.run.generation);
+        const result = await this.execute(
+          "podman",
+          ["rm", "--force", record.containerId],
+          {
+            env: this.env,
+            timeoutMs: 15000,
+            maxBytes: 16000,
+          },
+        );
+        if (result.code !== 0)
           throw generic(
             "PROCESS_CLEANUP",
             "Managed process removal was not confirmed",
           );
+        if (inspection.anchor) {
+          const after = await this.inspect(record, record.containerId);
+          if (after.job)
+            throw generic(
+              "PROCESS_CLEANUP",
+              "Managed process removal was not confirmed",
+            );
         }
       }
+      this.store.assertLease(this.run.id, this.run.generation);
+      await this.write({ ...record, phase: "cleaned" }, false);
+      this.complete(
+        operationId,
+        "Managed process removed and cleanup was durably recorded",
+      );
+      return { processId: operationId, status: "removed" };
+    } catch (error) {
+      this.markUnknown(operationId, "Managed process cleanup is unresolved");
+      throw error;
     }
-    await this.write({ ...record, phase: "cleaned" });
-    this.complete(
-      operationId,
-      "Managed process removed and cleanup was durably recorded",
-    );
-    return { processId: operationId, status: "removed" };
   }
 
   private complete(operationId: string, result: string): void {
@@ -776,11 +962,16 @@ export class ManagedProcesses {
     this.store.managedProcessState(this.run, operationId, "completed", result);
   }
 
-  private markUnknown(operationId: string, result: string): void {
+  markUnknown(operationId: string, result: string): void {
     const operation = this.operations().find(
       (entry) => entry.id === operationId,
     );
-    if (!operation || operation.name !== "process_start") return;
+    if (
+      !operation ||
+      operation.name !== "process_start" ||
+      (this.task && operation.task_id !== this.task.id)
+    )
+      return;
     if (["dispatched", "unknown"].includes(operation.status)) {
       try {
         this.store.managedProcessState(
@@ -796,7 +987,6 @@ export class ManagedProcesses {
   }
 
   async closeTask(taskId: string): Promise<void> {
-    this.assertConfigured();
     const operationIds = this.operations()
       .filter(
         (operation) =>
@@ -806,7 +996,6 @@ export class ManagedProcesses {
       )
       .map((operation) => operation.id);
     if (!operationIds.length) return;
-    await this.ensureDirectory();
     const failures: unknown[] = [];
     for (const operationId of operationIds) {
       try {
@@ -824,9 +1013,9 @@ export class ManagedProcesses {
 
   async list(): Promise<Array<Record<string, unknown>>> {
     try {
-      const stat = await lstat(this.directory);
-      if (!stat.isDirectory() || stat.isSymbolicLink())
-        throw generic("PROCESS_RECORD", "Managed-process directory is unsafe");
+      await this.assertPrivateDirectory(this.store.paths.runs, false);
+      await this.assertPrivateDirectory(this.store.runDir(this.run.id), false);
+      await this.assertPrivateDirectory(this.directory, false);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;

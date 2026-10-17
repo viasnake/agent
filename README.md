@@ -201,10 +201,16 @@ job ID だけを再試行できます。共有画像・準備済み文書・chec
 `process_start`、`process_status`、`process_logs`、`process_stop` を公開します。
 `agent process list/status/logs/stop` は保存済みの run を対象にします。異常終了後は
 `agent process stop <run-id> <process-id>` で所有証明を再確認してから回収してください。
+Task の成功・失敗・キャンセルを返す前にも finally cleanup を行います。未解決の
+cleanup は成功として隠さず、再開・適用・削除などの操作を停止します。エンジンの
+anchor は、未解決の job をすべて回収するまで削除・置換しないでください。
 
-プロセスは network 無し、read-only の `/workspace` と task-local `/runtime`、
-`/tmp` の 64 MiB tmpfs、`/dev/shm` の 16 MiB、Podman/conmon の独立した lifetime
-deadline、bounded logs を使います。ホストの資格情報や環境変数を container に渡さず、
+プロセスは network 無し、live な作業コピーを read-only で公開する `/workspace` と
+task-local の read-only `/runtime`、`/tmp` の 64 MiB tmpfs、`/dev/shm` の 16 MiB、
+Podman/conmon の独立した lifetime deadline、bounded logs を使います。workspace の
+変更は process から見えますが、process からは書き込めません。cgroup v2 の memory、
+pid、CPU 制限が検証できない環境では user command を実行しません。既定の lifetime
+`maxSeconds` は 600 秒、同時実行 `maxProcesses` は 1 です。ホストの資格情報や環境変数を渡さず、
 PID kill や host fallback も行いません。管理サーバーは host browser からアクセスできず、
 framework cache は `/tmp` に置いてください。これは live disk quota、通常の one-shot
 Bubblewrap、または完全な resource parity を提供する機能ではありません。

@@ -99,6 +99,10 @@ export class TaskTools {
     options: {
       keepDispatched?: boolean;
       onUndispatched?: (operationId: string) => Promise<void>;
+      onDispatchedFailure?: (
+        operationId: string,
+        reason: string,
+      ) => Promise<void>;
     } = {},
   ): ToolSpec {
     return {
@@ -175,7 +179,12 @@ export class TaskTools {
                 "failed",
                 errorMessage(error),
               );
-            } else if (!(options.keepDispatched && name === "process_start")) {
+            } else if (options.keepDispatched && name === "process_start") {
+              await options.onDispatchedFailure?.(
+                operation,
+                errorMessage(error),
+              );
+            } else {
               this.store.operation(
                 this.run,
                 operation,
@@ -555,6 +564,7 @@ export class TaskTools {
         ),
       );
     if (
+      this.config.execution.backend === "podman" &&
       this.config.execution.managedProcesses &&
       processToolAllowed(this.run, this.task)
     ) {
@@ -582,6 +592,9 @@ export class TaskTools {
             keepDispatched: true,
             onUndispatched: (operationId) =>
               manager.abandonPrepared(operationId),
+            onDispatchedFailure: async (operationId, reason) => {
+              manager.markUnknown(operationId, reason);
+            },
           },
         ),
         this.wrap(
