@@ -3810,13 +3810,16 @@ export class Application extends EventEmitter {
           "FORK_TIMEOUT",
           "分岐の復元が時間上限を超えました。",
         );
-      if (
-        this.closed ||
-        this.forkSelection(seq, mode).preview.binding !== binding
-      )
-        throw new AgentError("STALE_VIEW", "分岐の確認内容が変わりました。");
-      this.session = this.conversations.acquire(child.id);
-      this.conversations.release(parent.id);
+      this.session = this.store.transaction(() => {
+        if (
+          this.closed ||
+          this.forkSelection(seq, mode).preview.binding !== binding
+        )
+          throw new AgentError("STALE_VIEW", "分岐の確認内容が変わりました。");
+        this.conversations.save(child);
+        this.conversations.release(parent.id);
+        return child;
+      });
       ++this.generation;
       this.accessOverride = undefined;
     } catch (error) {

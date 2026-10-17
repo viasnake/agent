@@ -117,9 +117,18 @@ async function savedCodingBoundary() {
   };
 }
 
-test("state fork freezes coding bytes, modes, sources and producer state; seeds never execute", async () => {
+test("state fork freezes coding bytes, modes, sources and producer state; seeds never execute", async (t) => {
   const f = await savedCodingBoundary();
   try {
+    let releasedAtomically = false;
+    const release = f.app.conversations.release.bind(f.app.conversations);
+    t.mock.method(f.app.conversations, "release", (sessionId: string) => {
+      if (sessionId === f.parentId && f.app.busy) {
+        assert.equal(f.store.db.isTransaction, true);
+        releasedAtomically = true;
+      }
+      release(sessionId);
+    });
     await writeFile(
       join(f.store.runDir(f.run.id), "work/main.txt"),
       "future change\n",
@@ -145,6 +154,7 @@ test("state fork freezes coding bytes, modes, sources and producer state; seeds 
     f.app.conversations.message(f.app.session, "user", "future message");
     const preview = await f.app.previewFork(f.seq, "state");
     await f.app.forkConversation(f.seq, "state", preview.binding);
+    assert.equal(releasedAtomically, true);
     const childId = f.app.session.id;
     const seed = f.store.get(f.app.session.workRunId!);
     assert.ok(seed.forkCheckpointId);
