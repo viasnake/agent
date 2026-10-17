@@ -9,6 +9,7 @@ import {
   canonical,
   errorMessage,
   readText,
+  readBoundedFile,
   safePath,
   sha256,
 } from "./util.js";
@@ -33,6 +34,7 @@ import {
   requireAuthorizedSource,
 } from "./collaboration.js";
 import { taskReportInstruction } from "./collaboration-prompts.js";
+import { codeInfoSchema, inspectCode } from "./code-info.js";
 import { reviewWriting, writingOptionsSchema } from "./writing-quality.js";
 import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
 import { id } from "./util.js";
@@ -271,6 +273,25 @@ export class TaskTools {
           }
           return JSON.stringify({ matches, more: false });
         },
+      ),
+      this.wrap(
+        "code_info",
+        "Read TypeScript/JavaScript definitions, references or diagnostics from captured source. Positions are 1-based UTF-16 columns. Uses bounded fixed compiler settings, NOT project tsconfig, dependencies, plugins or a build check. No scripts run. Read limitations and truncation in the result; never treat empty diagnostics as a passing project check.",
+        codeInfoSchema,
+        async (args, signal) =>
+          JSON.stringify(
+            await inspectCode(
+              this.root,
+              args,
+              this.config.limits.maxWorkspaceBytes,
+              async (path) =>
+                readBoundedFile(
+                  await this.file(path),
+                  Math.min(this.config.limits.maxFileBytes, 512_000),
+                ),
+              signal,
+            ),
+          ),
       ),
     ];
     if (this.task.write && this.task.role !== "reviewer")
@@ -872,6 +893,7 @@ export class TaskTools {
           "read_file",
           "list_files",
           "search_files",
+          "code_info",
           "read_source",
           "read_context",
           "read_task_report",
@@ -894,6 +916,7 @@ export class TaskTools {
           "read_source",
           "list_files",
           "search_files",
+          "code_info",
           "read_context",
           ...(this.run.kind === "research"
             ? [

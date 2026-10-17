@@ -321,6 +321,7 @@ export class TaskExecutor {
         "read_file",
         "list_files",
         "search_files",
+        "code_info",
         "read_source",
       ])
         chatTools.add(name);
@@ -350,6 +351,7 @@ export class TaskExecutor {
                       "read_source",
                       "list_files",
                       "search_files",
+                      "code_info",
                       "read_context",
                       ...(run.kind === "research"
                         ? [
