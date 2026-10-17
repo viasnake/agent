@@ -387,7 +387,12 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
             },
           },
           State: {
-            Status: started ? "running" : "created",
+            Status:
+              inspectedExitCode === -1
+                ? "exited"
+                : started
+                  ? "running"
+                  : "created",
             ExitCode: inspectedExitCode,
           },
         };
@@ -506,8 +511,11 @@ test("managed lifecycle stays dispatched until verified cleanup", async () => {
       output: "managed log\n",
       truncated: false,
     });
-    await assert.rejects(() => manager.status(operation), {
-      code: "PROCESS_ENGINE",
+    assert.deepEqual(await manager.status(operation), {
+      processId: operation,
+      status: "exited",
+      containerId: processId,
+      exitCode: -1,
     });
     inspectedExitCode = 0;
     assert.deepEqual(await readFile(recordPath), descriptorBeforeQueries);

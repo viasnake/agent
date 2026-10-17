@@ -126,8 +126,8 @@ function exitCode(entry: InspectEntry): number {
   if (
     typeof value !== "number" ||
     !Number.isInteger(value) ||
-    value < 0 ||
-    value > 255
+    value < -2147483648 ||
+    value > 2147483647
   )
     throw generic("PROCESS_ENGINE", "Managed-process exit status is invalid");
   return value;
