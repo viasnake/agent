@@ -302,6 +302,53 @@ test("runtime contract rejects post-cancellation success and drains cancellation
   assert.equal(await pending, "cancelled");
 });
 
+test("runtime contract aborts pending context transforms before accepting early success", async () => {
+  const caller = new AbortController();
+  let transformSignal: AbortSignal | undefined;
+  let capturedTransform: Promise<unknown> | undefined;
+  const runtime = adapter(async (input) => {
+    capturedTransform = input.transformContext!(
+      { messages: [{ role: "user", content: "fixture" }] },
+      caller.signal,
+    );
+    const id = input.beforeRequest(1);
+    input.afterRequest(id, unknownUsage);
+    return "early";
+  });
+  const transform = async (_context: unknown, signal: AbortSignal) => {
+    transformSignal = signal;
+    return await new Promise<never>((_resolve, reject) => {
+      signal.addEventListener(
+        "abort",
+        () => reject(new DOMException("Transform aborted", "AbortError")),
+        { once: true },
+      );
+    });
+  };
+  await assert.rejects(
+    runRuntime(runtime, request({ transformContext: transform })),
+    { code: "RUNTIME_CONTRACT" },
+  );
+  assert.equal(caller.signal.aborted, false);
+  assert.equal(transformSignal?.aborted, true);
+  assert.ok(capturedTransform);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(
+      () => reject(new Error("pending transform was not aborted")),
+      1000,
+    );
+  });
+  try {
+    await Promise.race([
+      assert.rejects(capturedTransform, { name: "AbortError" }),
+      deadline,
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+});
+
 class JsonSessionRuntime implements Runtime {
   readonly contract = { ...descriptor };
   readonly requests: RuntimeRequest[] = [];

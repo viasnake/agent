@@ -59,6 +59,7 @@ export async function runRuntime(
   let active = true,
     requests = 0,
     toolsRunning = 0,
+    transformsRunning = 0,
     boundaryFailure: unknown;
   const invocation = new AbortController();
   const signal = AbortSignal.any([request.signal, invocation.signal]);
@@ -99,24 +100,28 @@ export async function runRuntime(
           }
         },
       })),
-      transformContext: async (context, signal) => {
+      transformContext: async (context, transformSignal) => {
+        transformsRunning++;
         try {
           current();
-          signal.throwIfAborted();
+          const combinedTransformSignal = AbortSignal.any([
+            transformSignal,
+            signal,
+          ]);
+          combinedTransformSignal.throwIfAborted();
           contextFrame(context);
           const transformed = request.transformContext
-            ? await request.transformContext(
-                context,
-                AbortSignal.any([signal, request.signal]),
-              )
+            ? await request.transformContext(context, combinedTransformSignal)
             : context;
           current();
-          signal.throwIfAborted();
+          combinedTransformSignal.throwIfAborted();
           contextFrame(transformed);
           return transformed;
         } catch (error) {
           boundaryFailure ??= error;
           throw error;
+        } finally {
+          transformsRunning--;
         }
       },
       onSession: (file) =>
@@ -174,7 +179,7 @@ export async function runRuntime(
     });
     current();
     if (boundaryFailure) throw boundaryFailure;
-    if (!requests || pending.size || toolsRunning)
+    if (!requests || pending.size || toolsRunning || transformsRunning)
       failure("A final result requires accounted requests and completed tools");
     if (typeof result !== "string" || !result.trim())
       throw new AgentError(
