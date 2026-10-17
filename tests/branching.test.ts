@@ -567,7 +567,7 @@ test("restore failure rolls back child rows and directories while retaining the 
     const row = f.store.boundary(f.parentId, f.seq)!;
     const state = stateForBoundary(row);
     await assert.rejects(
-      verifyBoundaryState(f.p, f.config, state, f.origin, 0),
+      verifyBoundaryState(f.p, f.config, state, f.app.session.workspace, 0),
       { code: "FORK_TIMEOUT" },
     );
     for (const mutate of [
