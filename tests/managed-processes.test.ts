@@ -1111,8 +1111,9 @@ test("real Podman enforces managed isolation, live workspace, logs, and deadline
       access: "change",
     });
     const shortRun = store.claim(shortRunCreated.id);
+    const shortCommand = "printf 'ready\\n'; sleep 30";
     const shortOperation = store.prepare(shortRun, task.id, "process_start", {
-      command: "printf ready; sleep 30",
+      command: shortCommand,
     });
     const shortManager = new ManagedProcesses(
       shortConfig,
@@ -1121,12 +1122,12 @@ test("real Podman enforces managed isolation, live workspace, logs, and deadline
       task,
     );
     managers.push({ manager: shortManager, operation: shortOperation });
-    await shortManager.prepare(task, shortOperation, "printf ready; sleep 30");
+    await shortManager.prepare(task, shortOperation, shortCommand);
     store.operation(shortRun, shortOperation, "dispatched");
     await shortManager.start(
       task,
       shortOperation,
-      "printf ready; sleep 30",
+      shortCommand,
       new AbortController().signal,
     );
     const readyDeadline = Date.now() + 10000;
