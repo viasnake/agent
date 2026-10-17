@@ -40,6 +40,11 @@ import {
   developmentDirectory,
   measureDevelopmentDirectory,
 } from "./development-runtime.js";
+import {
+  ManagedProcesses,
+  processToolAllowed,
+  type ManagedProcessRunner,
+} from "./managed-processes.js";
 import { reviewWriting, writingOptionsSchema } from "./writing-quality.js";
 import { AgentError, type Run, type Task, type ToolSpec } from "./types.js";
 import { id } from "./util.js";
@@ -47,6 +52,7 @@ import { id } from "./util.js";
 const pathSchema = z.string().min(1).max(1000);
 export class TaskTools {
   private queue: Promise<unknown> = Promise.resolve();
+  private managed?: ManagedProcesses;
   constructor(
     readonly config: Config,
     readonly store: Store,
@@ -61,17 +67,39 @@ export class TaskTools {
       maxBytes?: number,
       dependencies?: PublicFetchDependencies,
     ) => Promise<PublicFetchResult> = fetchPublic,
+    readonly managedProcessRunner?: ManagedProcessRunner,
   ) {}
+  private processManager(): ManagedProcesses {
+    return (this.managed ??= new ManagedProcesses(
+      this.config,
+      this.store,
+      this.run,
+      this.task,
+      this.managedProcessRunner,
+    ));
+  }
+  async close(): Promise<void> {
+    await this.queue;
+    await this.managed?.closeTask(this.task.id);
+  }
   wrap<S extends z.ZodObject>(
     name: string,
     description: string,
     schema: S,
-    execute: (args: z.output<S>, signal: AbortSignal) => Promise<string>,
+    execute: (
+      args: z.output<S>,
+      signal: AbortSignal,
+      operationId?: string,
+    ) => Promise<string>,
     beforeDispatch?: (
       args: z.output<S>,
       signal: AbortSignal,
       operationId: string,
     ) => Promise<void>,
+    options: {
+      keepDispatched?: boolean;
+      onUndispatched?: (operationId: string) => Promise<void>;
+    } = {},
   ): ToolSpec {
     return {
       name,
@@ -108,7 +136,7 @@ export class TaskTools {
               );
             this.store.operation(this.run, operation, "dispatched");
             dispatched = true;
-            const result = await execute(data, signal);
+            const result = await execute(data, signal, operation);
             signal.throwIfAborted();
             const log = await this.store.artifact(
               this.run,
@@ -117,7 +145,8 @@ export class TaskTools {
               result,
               { taskId: this.task.id, tool: name, operationId: operation },
             );
-            this.store.operation(this.run, operation, "completed", log.id);
+            if (!options.keepDispatched)
+              this.store.operation(this.run, operation, "completed", log.id);
             return result;
           } catch (error) {
             // A cancelled external call or killed shell may have completed its side effect.
@@ -138,12 +167,22 @@ export class TaskTools {
                 name === "shell" ||
                 name === "run_profile" ||
                 name.startsWith("mcp_"));
-            this.store.operation(
-              this.run,
-              operation,
-              uncertain ? "unknown" : "failed",
-              errorMessage(error),
-            );
+            if (!dispatched) {
+              await options.onUndispatched?.(operation);
+              this.store.operation(
+                this.run,
+                operation,
+                "failed",
+                errorMessage(error),
+              );
+            } else if (!(options.keepDispatched && name === "process_start")) {
+              this.store.operation(
+                this.run,
+                operation,
+                uncertain || name === "process_stop" ? "unknown" : "failed",
+                errorMessage(error),
+              );
+            }
             throw error;
           }
         });
@@ -515,6 +554,56 @@ export class TaskTools {
           },
         ),
       );
+    if (
+      this.config.execution.managedProcesses &&
+      processToolAllowed(this.run, this.task)
+    ) {
+      const manager = this.processManager();
+      tools.push(
+        this.wrap(
+          "process_start",
+          "Start one bounded Podman process with a read-only workspace and task runtime.",
+          z.strictObject({ command: z.string().min(1).max(8000) }),
+          async (args, signal, operationId) => {
+            if (!operationId)
+              throw new AgentError(
+                "PROCESS_OPERATION",
+                "Missing process identity",
+              );
+            return JSON.stringify(
+              await manager.start(this.task, operationId, args.command, signal),
+            );
+          },
+          async (args, signal, operationId) => {
+            await manager.prepare(this.task, operationId, args.command);
+            signal.throwIfAborted();
+          },
+          {
+            keepDispatched: true,
+            onUndispatched: (operationId) =>
+              manager.abandonPrepared(operationId),
+          },
+        ),
+        this.wrap(
+          "process_status",
+          "Read bounded status for a managed process owned by this task.",
+          z.strictObject({ processId: z.string().uuid() }),
+          async (args) => JSON.stringify(await manager.status(args.processId)),
+        ),
+        this.wrap(
+          "process_logs",
+          "Read the bounded tail of logs for a managed process owned by this task.",
+          z.strictObject({ processId: z.string().uuid() }),
+          async (args) => JSON.stringify(await manager.logs(args.processId)),
+        ),
+        this.wrap(
+          "process_stop",
+          "Stop a managed process and verify its removal.",
+          z.strictObject({ processId: z.string().uuid() }),
+          async (args) => JSON.stringify(await manager.stop(args.processId)),
+        ),
+      );
+    }
     if (
       this.run.kind === "research" &&
       this.config.web.allowedHosts.length &&

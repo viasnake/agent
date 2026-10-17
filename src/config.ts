@@ -127,6 +127,16 @@ export const configSchema = z.strictObject({
           }),
         )
         .optional(),
+      managedProcesses: z
+        .strictObject({
+          engineAnchor: z.strictObject({
+            containerId: z.string().regex(/^[a-f0-9]{64}$/),
+            token: z.uuid(),
+          }),
+          maxSeconds: z.number().int().min(1).max(3600).default(600),
+          maxProcesses: z.number().int().min(1).max(2).default(1),
+        })
+        .optional(),
     })
     .prefault({}),
   checks: z

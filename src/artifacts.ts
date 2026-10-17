@@ -63,6 +63,7 @@ export async function applyRun(
   }, 1000);
   heartbeat.unref();
   try {
+    store.assertManagedProcessesStopped(run);
     if (run.forkCheckpointId)
       throw new AgentError("FORK_SEED", "保存状態復元シードは適用できません。");
     if (run.state !== "succeeded" || run.kind !== "coding")

@@ -578,6 +578,18 @@ export class Store {
   ): void {
     this.transaction(() => {
       this.assertLease(run.id, run.generation);
+      if (
+        this.operations(run.id).some(
+          (operation) =>
+            operation.id === operationId &&
+            operation.name === "process_start" &&
+            operation.status === "unknown",
+        )
+      )
+        throw new AgentError(
+          "PROCESS_CLEANUP_REQUIRED",
+          "Use agent process stop to verify managed-process cleanup; a manual outcome cannot replace cleanup",
+        );
       const changed = this.db
         .prepare(
           "UPDATE operations SET status=?,result=? WHERE id=? AND run_id=? AND status='unknown'",
@@ -590,6 +602,40 @@ export class Store {
         outcome,
         reason,
       });
+    });
+  }
+  assertManagedProcessesStopped(run: Run): void {
+    if (
+      this.operations(run.id).some(
+        (operation) =>
+          operation.name === "process_start" &&
+          ["prepared", "dispatched", "unknown"].includes(operation.status),
+      )
+    )
+      throw new AgentError(
+        "PROCESS_CLEANUP_REQUIRED",
+        "Managed-process cleanup is unresolved; use agent process stop before continuing",
+      );
+  }
+  managedProcessState(
+    run: Run,
+    operationId: string,
+    status: "unknown" | "completed",
+    result: string,
+  ): void {
+    this.transaction(() => {
+      this.assertLease(run.id, run.generation);
+      const changed = this.db
+        .prepare(
+          "UPDATE operations SET status=?,result=? WHERE id=? AND run_id=? AND name='process_start' AND status IN ('dispatched','unknown')",
+        )
+        .run(status, result, operationId, run.id);
+      if (!changed.changes)
+        throw new AgentError(
+          "OPERATION",
+          "Unresolved managed-process operation not found",
+        );
+      this.event(run.id, "managed_process_" + status, { operationId, result });
     });
   }
   reserve(

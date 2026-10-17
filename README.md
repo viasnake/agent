@@ -192,6 +192,23 @@ job ID だけを再試行できます。共有画像・準備済み文書・chec
 
 開発・検証方法は [docs/architecture.md](docs/architecture.md)、保守用 CLI は `agent --help` を参照してください。
 
+## 管理プロセス
+
+長時間動作する開発サーバーは、`execution.backend: "podman"` と固定 digest
+イメージを設定し、`agent process provision` で作成した停止中の engine anchor を
+`execution.managedProcesses.engineAnchor` に明示してから利用します。設定はプロセスを
+自動起動・再起動せず、通常の coding writer の task にだけ bounded な
+`process_start`、`process_status`、`process_logs`、`process_stop` を公開します。
+`agent process list/status/logs/stop` は保存済みの run を対象にします。異常終了後は
+`agent process stop <run-id> <process-id>` で所有証明を再確認してから回収してください。
+
+プロセスは network 無し、read-only の `/workspace` と task-local `/runtime`、
+`/tmp` の 64 MiB tmpfs、`/dev/shm` の 16 MiB、Podman/conmon の独立した lifetime
+deadline、bounded logs を使います。ホストの資格情報や環境変数を container に渡さず、
+PID kill や host fallback も行いません。管理サーバーは host browser からアクセスできず、
+framework cache は `/tmp` に置いてください。これは live disk quota、通常の one-shot
+Bubblewrap、または完全な resource parity を提供する機能ではありません。
+
 ## Collaboration backend
 
 Assisted and reviewed runs use host-assigned task graphs. New collaborative

@@ -860,7 +860,7 @@ export class Harness {
       if (unknown.length)
         throw new AgentError(
           "UNKNOWN_OPERATION",
-          `${unknown.length} operations need reconciliation; use agent reconcile before resuming`,
+          `${unknown.length} operations need reconciliation; use agent process stop for managed processes, and agent reconcile for other operations`,
         );
       if (additionalInput) {
         if (
@@ -946,6 +946,7 @@ export class Harness {
         }
         controller.signal.throwIfAborted();
         if (acceptInstructions()) continue;
+        this.store.assertManagedProcessesStopped(run);
         if (this.store.operations(run.id).some((o) => o.status === "unknown"))
           throw new AgentError(
             "UNKNOWN_OPERATION",
@@ -1068,7 +1069,12 @@ export class Harness {
         cancelled: controller.signal.aborted,
         uncertain: this.store
           .operations(run.id)
-          .some((operation) => operation.status === "unknown"),
+          .some(
+            (operation) =>
+              operation.status === "unknown" ||
+              (operation.name === "process_start" &&
+                operation.status === "dispatched"),
+          ),
       });
       this.store.transition(
         run,

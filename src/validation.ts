@@ -28,6 +28,7 @@ export class Evaluator {
     ) => void = () => {},
   ) {}
   async validate(run: Run, signal: AbortSignal): Promise<CheckResult[]> {
+    this.store.assertManagedProcessesStopped(run);
     if (run.forkCheckpointId)
       throw new AgentError(
         "FORK_SEED",
@@ -359,6 +360,7 @@ export class Evaluator {
     return results;
   }
   async verifyPublished(run: Run): Promise<void> {
+    this.store.assertManagedProcessesStopped(run);
     if (run.access === "read-only") return;
     for (const artifact of this.store.artifacts(run.id))
       await this.store.content(artifact);
