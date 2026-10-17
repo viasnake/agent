@@ -220,7 +220,7 @@ export function registerMaintenanceCommands(cli: CliContext): void {
         if (options.write && !jobIds.length)
           throw new Error("--write requires at least one cleanup job ID");
         const jobs = options.write
-          ? await retryDeletionCleanup(store, jobIds)
+          ? await retryDeletionCleanup(store, jobIds, { signal })
           : pendingDeletions(store);
         print({
           written: !!options.write,

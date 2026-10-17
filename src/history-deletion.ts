@@ -83,6 +83,17 @@ export interface DeletionResult {
   pendingCleanup: Array<{ id: string; runIds: string[]; error?: string }>;
 }
 
+export interface DeletionCleanupPreview {
+  jobs: Array<{ id: string; runIds: string[]; error?: string }>;
+  binding: string;
+}
+
+interface CleanupOptions {
+  preview?: DeletionCleanupPreview;
+  signal?: AbortSignal;
+  beforeCleanup?: () => void;
+}
+
 interface Identity {
   dev: string;
   ino: string;
@@ -952,27 +963,35 @@ function queueRows(
   payload: QueueRecord;
 }> {
   const rows: Array<{ id: string; payload: string }> = [];
+  let bytes = 0;
+  const collect = (values: Iterable<unknown>) => {
+    for (const value of values) {
+      const row = value as { id: string; payload: string };
+      bytes += Buffer.byteLength(row.payload);
+      if (bytes > maxBytes || rows.length >= maxRows)
+        fail("DELETE_LIMIT", "Deletion cleanup metadata exceeds its limits");
+      rows.push(row);
+    }
+  };
   if (ids?.length) {
     if (ids.length > maxRows)
       fail("DELETE_LIMIT", "Too many deletion jobs were requested");
     for (const group of chunks(ids))
-      rows.push(
-        ...(store.db
+      collect(
+        store.db
           .prepare(
             `SELECT id,payload FROM deletion_queue WHERE id IN (${group.map(() => "?").join(",")})`,
           )
-          .all(...group) as Array<{ id: string; payload: string }>),
+          .iterate(...group),
       );
   } else {
-    rows.push(
-      ...(store.db
+    collect(
+      store.db
         .prepare(
           "SELECT id,payload FROM deletion_queue ORDER BY created_at LIMIT ?",
         )
-        .all(maxRows + 1) as Array<{ id: string; payload: string }>),
+        .iterate(maxRows + 1),
     );
-    if (rows.length > maxRows)
-      fail("DELETE_LIMIT", "Too many pending deletion jobs to list");
   }
   return rows.map((row) => {
     try {
@@ -1065,9 +1084,52 @@ function parseQueueIdentity(value: unknown): Identity {
   return { dev: identity.dev, ino: identity.ino };
 }
 
-async function cleanupJobs(store: Store, ids: string[]): Promise<void> {
+function cleanupPreview(
+  rows: ReturnType<typeof queueRows>,
+): DeletionCleanupPreview {
+  const sorted = [...rows].sort((a, b) => a.id.localeCompare(b.id));
+  return {
+    jobs: sorted.map(({ id, payload }) => ({
+      id,
+      runIds: payload.runIds,
+      ...(payload.error ? { error: payload.error } : {}),
+    })),
+    binding: sha256(canonical(sorted)),
+  };
+}
+
+export function previewDeletionCleanup(
+  store: Store,
+  ids: string[],
+): DeletionCleanupPreview {
+  const unique = [...new Set(ids)].map((value) =>
+    ensureUuid(value, "Deletion job ID"),
+  );
+  if (!unique.length || unique.length > maxUnits)
+    fail("DELETE_LIMIT", "Select between 1 and 500 cleanup jobs");
+  const rows = queueRows(store, unique);
+  if (rows.length !== unique.length)
+    fail("NOT_FOUND", "A requested deletion job does not exist");
+  return cleanupPreview(rows);
+}
+
+async function cleanupJobs(
+  store: Store,
+  ids: string[],
+  options: CleanupOptions = {},
+): Promise<void> {
   if (!ids.length) return;
-  for (const job of queueRows(store, ids)) {
+  const jobs = store.transaction(() => {
+    const rows = queueRows(store, ids);
+    if (
+      options.preview &&
+      canonical(cleanupPreview(rows)) !== canonical(options.preview)
+    )
+      fail("STALE_VIEW", "Cleanup preview is stale; choose it again");
+    options.beforeCleanup?.();
+    return rows;
+  });
+  for (const job of jobs) {
     let error: string | undefined;
     try {
       const currentRoot = storageRoot(store);
@@ -1077,6 +1139,7 @@ async function cleanupJobs(store: Store, ids: string[]): Promise<void> {
           "Run storage root identity changed",
         );
       for (const directory of job.payload.directories) {
+        checkSignal(options.signal);
         ensureUuid(directory.runId, "Queued run ID");
         if (
           store.db.prepare("SELECT 1 FROM runs WHERE id=?").get(directory.runId)
@@ -1180,10 +1243,8 @@ export async function confirmHistoryDeletion(
       queueIds = deleteMetadata(store, current, options);
       return current;
     });
-    await cleanupJobs(store, queueIds);
-    const remaining = pendingDeletions(store).filter((job) =>
-      queueIds.includes(job.id),
-    );
+    await cleanupJobs(store, queueIds, { signal: options.signal });
+    const remaining = cleanupPreview(queueRows(store, queueIds)).jobs;
     return {
       removedConversations: plan.preview.conversationIds,
       removedRuns: [
@@ -1205,21 +1266,23 @@ export async function confirmHistoryDeletion(
 export function pendingDeletions(
   store: Store,
 ): Array<{ id: string; runIds: string[]; error?: string }> {
-  return queueRows(store).map((row) => ({
-    id: row.id,
-    runIds: row.payload.runIds,
-    ...(row.payload.error ? { error: row.payload.error } : {}),
-  }));
+  return cleanupPreview(queueRows(store)).jobs;
 }
 
 export async function retryDeletionCleanup(
   store: Store,
   ids: string[],
+  options: CleanupOptions = {},
 ): Promise<Array<{ id: string; runIds: string[]; error?: string }>> {
+  checkSignal(options.signal);
   const unique = [...new Set(ids)].map((value) =>
     ensureUuid(value, "Deletion job ID"),
   );
-  if (!unique.length) return pendingDeletions(store);
+  if (!unique.length) {
+    if (options.preview)
+      fail("STALE_VIEW", "Cleanup preview has no selected jobs");
+    return pendingDeletions(store);
+  }
   if (unique.length > maxUnits)
     fail("DELETE_LIMIT", "Too many cleanup jobs were requested");
   const release = await lockfile.lock(store.paths.database, {
@@ -1227,11 +1290,12 @@ export async function retryDeletionCleanup(
     stale: 30_000,
   });
   try {
+    checkSignal(options.signal);
     const jobs = queueRows(store, unique);
     if (jobs.length !== unique.length)
       fail("NOT_FOUND", "A requested deletion job does not exist");
-    await cleanupJobs(store, unique);
-    return pendingDeletions(store).filter((job) => unique.includes(job.id));
+    await cleanupJobs(store, unique, options);
+    return cleanupPreview(queueRows(store, unique)).jobs;
   } finally {
     await release();
   }

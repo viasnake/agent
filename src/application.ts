@@ -12,6 +12,16 @@ import {
   type BackupPreview,
 } from "./backup.js";
 import {
+  previewHistoryDeletion as previewBackendHistoryDeletion,
+  confirmHistoryDeletion as confirmBackendHistoryDeletion,
+  pendingDeletions,
+  previewDeletionCleanup,
+  retryDeletionCleanup,
+  type HistoryDeletionRequest,
+  type HistoryDeletionPreview,
+  type DeletionCleanupPreview,
+} from "./history-deletion.js";
+import {
   configHash,
   loadConfig,
   validateConfig,
@@ -283,6 +293,14 @@ export class Application extends EventEmitter {
   private closed = false;
   private readonly previews = new WeakMap<InputPreview, InputSnapshot>();
   private readonly backupPreviews = new WeakMap<BackupPreview, string>();
+  private readonly deletionPreviews = new WeakMap<
+    HistoryDeletionPreview,
+    string
+  >();
+  private readonly cleanupPreviews = new WeakMap<
+    DeletionCleanupPreview,
+    string
+  >();
   private accessOverride?: RequestAccess;
   constructor(
     public config: Config,
@@ -3297,9 +3315,13 @@ export class Application extends EventEmitter {
       await release();
     }
   }
-  private backupBinding(): string {
+  private maintenanceBinding(): string {
     return sha256(
-      canonical({ session: this.session, generation: this.generation }),
+      canonical({
+        session: this.session,
+        generation: this.generation,
+        config: configHash(this.config),
+      }),
     );
   }
   previewHistoryBackup(destination: string): BackupPreview {
@@ -3308,14 +3330,14 @@ export class Application extends EventEmitter {
     const preview = previewBackup(this.store, this.config, destination, {
       owner: { sessionId: this.session.id, owner: this.conversations.owner },
     });
-    this.backupPreviews.set(preview, this.backupBinding());
+    this.backupPreviews.set(preview, this.maintenanceBinding());
     return preview;
   }
   async confirmHistoryBackup(preview: BackupPreview): Promise<BackupManifest> {
     this.idle();
     const binding = this.backupPreviews.get(preview);
     const guard = () => {
-      if (this.closed || binding !== this.backupBinding())
+      if (this.closed || binding !== this.maintenanceBinding())
         throw new AgentError(
           "STALE_VIEW",
           "会話が変わりました。/backup から選び直してください。",
@@ -3334,6 +3356,102 @@ export class Application extends EventEmitter {
       this.busy = false;
       this.publish("changed");
     }
+  }
+  private assertMaintenanceView(binding: string | undefined): void {
+    if (this.closed || binding !== this.maintenanceBinding())
+      throw new AgentError(
+        "STALE_VIEW",
+        "会話・設定が変わりました。削除候補を選び直してください。",
+      );
+    const row = this.store.db
+      .prepare("SELECT owner FROM conversations WHERE id=?")
+      .get(this.session.id);
+    if (row?.owner !== this.conversations.owner)
+      throw new AgentError(
+        "SESSION_BUSY",
+        "会話の所有権が変わりました。削除を中止します。",
+      );
+  }
+  private async historyOperation<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    this.idle();
+    this.busy = true;
+    const controller = new AbortController();
+    this.controller = controller;
+    const work = Promise.resolve().then(() => operation(controller.signal));
+    this.work = work.then(
+      () => {},
+      () => {},
+    );
+    this.publish("changed");
+    try {
+      return await work;
+    } finally {
+      this.work = undefined;
+      this.controller = undefined;
+      this.busy = false;
+      this.publish("changed");
+    }
+  }
+  previewHistoryDeletion(
+    request: HistoryDeletionRequest,
+  ): HistoryDeletionPreview {
+    this.idle();
+    this.assertMaintenanceView(this.maintenanceBinding());
+    this.conversations.save(this.session);
+    const preview = previewBackendHistoryDeletion(
+      this.store,
+      this.config,
+      {
+        ...request,
+        workspace: this.session.workspace,
+      },
+      { currentSessionId: this.session.id },
+    );
+    this.deletionPreviews.set(preview, this.maintenanceBinding());
+    return preview;
+  }
+  async confirmHistoryDeletion(preview: HistoryDeletionPreview) {
+    this.idle();
+    const binding = this.deletionPreviews.get(preview);
+    const guard = () => this.assertMaintenanceView(binding);
+    guard();
+    this.deletionPreviews.delete(preview);
+    const currentSessionId = this.session.id;
+    return this.historyOperation((signal) =>
+      confirmBackendHistoryDeletion(this.store, this.config, preview, {
+        currentSessionId,
+        signal,
+        beforeCommit: guard,
+      }),
+    );
+  }
+  pendingHistoryDeletions() {
+    this.idle();
+    return pendingDeletions(this.store);
+  }
+  previewHistoryCleanup(jobIds: string[]): DeletionCleanupPreview {
+    this.idle();
+    this.assertMaintenanceView(this.maintenanceBinding());
+    const preview = previewDeletionCleanup(this.store, jobIds);
+    this.cleanupPreviews.set(preview, this.maintenanceBinding());
+    return preview;
+  }
+  async confirmHistoryCleanup(preview: DeletionCleanupPreview) {
+    this.idle();
+    const binding = this.cleanupPreviews.get(preview);
+    const guard = () => this.assertMaintenanceView(binding);
+    guard();
+    this.cleanupPreviews.delete(preview);
+    const ids = preview.jobs.map((job) => job.id);
+    return this.historyOperation((signal) =>
+      retryDeletionCleanup(this.store, ids, {
+        preview,
+        signal,
+        beforeCleanup: guard,
+      }),
+    );
   }
   async doctor() {
     const directory = await mkdtemp(join(this.paths.home, "doctor-"));

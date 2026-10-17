@@ -12,6 +12,7 @@ import { SearchBrowser } from "./search-browser.js";
 import { ForkBrowser } from "./fork-browser.js";
 import { ModelChangeBrowser } from "./model-change-browser.js";
 import { BackupBrowser } from "./backup-browser.js";
+import { HistoryBrowser } from "./history-browser.js";
 import {
   SettingsEditor,
   type SettingsField,
@@ -885,6 +886,29 @@ export class TerminalApp {
             this.notice = text;
           },
         }).save(argument || undefined);
+        break;
+      }
+      case "delete":
+      case "prune":
+      case "cleanup-deletions": {
+        const browser = new HistoryBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        });
+        if (command === "delete") await browser.remove(argument || undefined);
+        else {
+          if (argument)
+            throw new AgentError(
+              "DELETE_REQUEST",
+              `/${command} は引数なしで候補を確認してください。`,
+            );
+          if (command === "prune") await browser.prune();
+          else await browser.cleanup();
+        }
         break;
       }
       case "search": {
