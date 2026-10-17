@@ -1,5 +1,6 @@
 import { type Config } from "./config.js";
 import {
+  assertReviewerIndependence,
   isCollaborative,
   requireAuthorizedSource,
   saveAttemptReport,
@@ -244,7 +245,7 @@ export class Planner {
         signal,
       );
     }
-    this.assertReviewerIndependence(plannedTasks);
+    assertReviewerIndependence(this.config, plannedTasks);
 
     if (collaborative)
       for (const task of plannedTasks) {
@@ -370,7 +371,7 @@ export class Planner {
     if (stagedTasks.length > this.config.limits.maxTasks)
       throw new AgentError("TASK_LIMIT", "Delegation exceeds maxTasks");
     this.assertDelegationBudget(run, 0, stagedTasks);
-    this.assertReviewerIndependence(stagedTasks);
+    assertReviewerIndependence(this.config, stagedTasks);
     this.store.assertLease(run.id, run.generation);
     this.store.save(run, "delegations_admitted", { admissions }, () => {
       run.tasks = stagedTasks;
@@ -449,25 +450,6 @@ export class Planner {
     };
     visit(task);
     return ids;
-  }
-
-  private assertReviewerIndependence(tasks: Task[]): void {
-    for (const reviewer of tasks.filter((task) => task.role === "reviewer")) {
-      const reviewerModel = this.config.models[reviewer.model!]?.id;
-      if (!reviewerModel) continue;
-      for (const taskId of this.ancestors(tasks, reviewer)) {
-        const producer = tasks.find((task) => task.id === taskId);
-        if (
-          producer?.role !== "reviewer" &&
-          producer?.model &&
-          this.config.models[producer.model]?.id === reviewerModel
-        )
-          throw new AgentError(
-            "INVALID_PLAN",
-            "A reviewer must use a model distinct from every producer",
-          );
-      }
-    }
   }
 
   private uniqueTaskId(

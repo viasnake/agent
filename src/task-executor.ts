@@ -106,7 +106,10 @@ export class TaskExecutor {
   ): Promise<void> {
     if (
       task.attempts >=
-      1 + this.config.limits.maxRepairs + (task.delegationRounds ?? 0)
+      1 +
+        this.config.limits.maxRepairs +
+        (task.delegationRounds ?? 0) +
+        (task.modelChangeCount ?? 0)
     )
       throw new AgentError(
         "TASK_LIMIT",

@@ -1,6 +1,36 @@
 import { AgentError, type Artifact, type Run, type Task } from "./types.js";
 import type { Store } from "./storage.js";
+import type { Config } from "./config.js";
 import { id, sha256 } from "./util.js";
+
+export function assertReviewerIndependence(
+  config: Config,
+  tasks: Task[],
+): void {
+  for (const reviewer of tasks.filter((task) => task.role === "reviewer")) {
+    const reviewerModel = config.models[reviewer.model!]?.id;
+    if (!reviewerModel) continue;
+    const visited = new Set<string>();
+    const pending = [...reviewer.dependsOn];
+    while (pending.length) {
+      const taskId = pending.pop()!;
+      if (visited.has(taskId)) continue;
+      visited.add(taskId);
+      const producer = tasks.find((task) => task.id === taskId);
+      if (!producer) continue;
+      if (
+        producer.role !== "reviewer" &&
+        producer.model &&
+        config.models[producer.model]?.id === reviewerModel
+      )
+        throw new AgentError(
+          "INVALID_PLAN",
+          "A reviewer must use a model distinct from every producer",
+        );
+      pending.push(...producer.dependsOn);
+    }
+  }
+}
 
 export function isCollaborative(run: Run): boolean {
   return run.mode !== "single";

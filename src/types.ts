@@ -39,6 +39,7 @@ export interface Task {
   delegatedBy?: string;
   assignment?: DelegationRequest;
   delegationRounds?: number;
+  modelChangeCount?: number;
   attemptReportIds?: string[];
   contextArchiveIds?: string[];
   reworkLinks?: Array<{
@@ -55,6 +56,16 @@ export interface TaskResult {
   artifacts: string[];
   unresolved: string[];
   delegations?: DelegationRequest[];
+}
+export interface ModelChange {
+  reportId: string;
+  taskId: string;
+  fromModel: string;
+  toModel: string;
+  affectedTaskIds: string[];
+  at: number;
+  supersededByReportId?: string;
+  resolutionReportId?: string;
 }
 export interface ImageReference {
   id: string;
@@ -214,6 +225,7 @@ export interface Run {
   planAttempts: number;
   repairAttempts: number;
   lastFailureFingerprint?: string;
+  modelChanges?: ModelChange[];
   forkCheckpointId?: string;
 }
 export interface Artifact {

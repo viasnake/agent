@@ -16,6 +16,7 @@ import { lineagePolicy, safetyContext } from "./branching.js";
 import { normalizeConversationContext } from "./context.js";
 import { TaskExecutor } from "./task-executor.js";
 import { isCollaborative } from "./collaboration.js";
+import { recordModelChangeResolution as recordTaskModelChangeResolution } from "./model-change.js";
 import {
   AgentError,
   type DataClass,
@@ -949,6 +950,7 @@ export class Harness {
           );
         if (run.access === "read-only") {
           await closeResources();
+          await recordTaskModelChangeResolution(this.store, run, [], true);
           if (
             elapsed + Date.now() - started >=
             this.config.limits.maxSeconds * 1000
@@ -967,6 +969,12 @@ export class Harness {
           runId: run.id,
           generation: run.generation,
         });
+        const priorCheckIds = new Set(
+          this.store
+            .artifacts(run.id)
+            .filter((artifact) => artifact.kind === "check")
+            .map((artifact) => artifact.id),
+        );
         const checks = await this.evaluator.validate(run, controller.signal);
         this.notify("validation", { runId: run.id, checks });
         if (acceptInstructions()) {
@@ -975,6 +983,19 @@ export class Harness {
         }
         if (checks.every((check) => check.passed)) {
           await this.evaluator.verifyPublished(run);
+          const freshCheckIds = this.store
+            .artifacts(run.id)
+            .filter(
+              (artifact) =>
+                artifact.kind === "check" && !priorCheckIds.has(artifact.id),
+            )
+            .map((artifact) => artifact.id);
+          await recordTaskModelChangeResolution(
+            this.store,
+            run,
+            freshCheckIds,
+            false,
+          );
           await this.store.artifact(
             run,
             "result.json",

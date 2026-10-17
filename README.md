@@ -122,5 +122,14 @@ budgets, and the task-scoped context archive allow-list are enforced by the
 host rather than by model instructions. Legacy saved tasks without
 `resultFormat` retain their previous text/structured parsing behavior.
 
+Prepared runs waiting for input, quota, or approval can explicitly replace the
+model for one selected task. Candidates use the same host policy as initial
+routing; replacement invalidates that task and its transitive dependents while
+preserving independent results, budgets, counters, and immutable attempt
+evidence. Preview and confirmation are bound to the run graph, operations,
+usage, configuration, and active session policy. Confirmation never probes a
+provider or resumes a run; a later explicit resume is required. Model-change
+and resolution records are host evidence and never assert semantic equivalence.
+
 独立した Firecracker agent environment の管理者セットアップ、CLI、制約は
 [docs/firecracker.md](docs/firecracker.md) を参照してください。

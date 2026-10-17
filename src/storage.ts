@@ -36,6 +36,14 @@ export interface UsageSummary {
   output: number | null;
   usageComplete: boolean;
 }
+export interface RequestReservation {
+  id: string;
+  connection: string;
+  model: string;
+  reservedUsd: number;
+  costUsd: number | null;
+  status: string;
+}
 export class Store {
   readonly db: DatabaseSync;
   constructor(readonly paths: Paths) {
@@ -326,12 +334,18 @@ export class Store {
         "This run is owned by another process or has been released",
       );
   }
-  claim(runId: string, allowSucceeded = false, reconcileTerminal = false): Run {
+  claim(
+    runId: string,
+    allowSucceeded = false,
+    reconcileTerminal = false,
+    beforeClaim?: (run: Run) => void,
+  ): Run {
     return this.transaction(() => {
       const row = this.db
         .prepare("SELECT * FROM runs WHERE id=?")
         .get(runId) as unknown as RunRow | undefined;
       const run = this.get(runId);
+      beforeClaim?.(run);
       if (
         terminalStates.includes(run.state) &&
         !(allowSucceeded && run.state === "succeeded") &&
@@ -674,6 +688,13 @@ export class Store {
       output: row.requests && !row.unknownOutputRequests ? row.output : null,
       usageComplete: Boolean(row.requests && !row.unknownUsageRequests),
     };
+  }
+  requestLedger(runId: string): RequestReservation[] {
+    return this.db
+      .prepare(
+        "SELECT id,connection,model,reserved_usd AS reservedUsd,cost_usd AS costUsd,status FROM requests WHERE run_id=? ORDER BY at,id",
+      )
+      .all(runId) as unknown as RequestReservation[];
   }
   usageByConnection(runId: string): Array<Record<string, unknown>> {
     const rows = this.db

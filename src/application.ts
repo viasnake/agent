@@ -68,6 +68,13 @@ import {
   mergeImageReferences,
 } from "./images.js";
 import { modelCandidates } from "./policy.js";
+import {
+  confirmTaskModelChange as confirmBackendTaskModelChange,
+  previewTaskModelChange as previewBackendTaskModelChange,
+  taskModelCandidates as backendTaskModelCandidates,
+  type ModelCandidate,
+  type ModelChangePreview,
+} from "./model-change.js";
 import { endpoint } from "./runtime/providers.js";
 import { sanitizeWorkCopy, secretPath, workspaceDiff } from "./workspace.js";
 import {
@@ -120,6 +127,10 @@ export interface AppEvent {
   sessionId: string;
   runId?: string;
   detail: Record<string, unknown>;
+}
+export interface ApplicationModelChangePreview extends ModelChangePreview {
+  sessionBinding: string;
+  appBinding: string;
 }
 export interface InputPreview {
   text: string;
@@ -1920,6 +1931,180 @@ export class Application extends EventEmitter {
     });
     this.publish("run_finished", { run: result });
   }
+  private assertRunPolicyCurrent(run: Run): void {
+    if (run.configHash !== configHash(this.config))
+      throw new AgentError(
+        "POLICY_CHANGED",
+        "This run uses an older configuration",
+      );
+    const active = normalizeConversationContext(this.session.context);
+    const saved = normalizeConversationContext(run.contextState);
+    if (
+      canonical({
+        ids: active.excludedSourceIds ?? [],
+        hashes: active.excludedSourceHashes ?? [],
+        urls: active.excludedSourceUrls ?? [],
+      }) !==
+      canonical({
+        ids: saved.excludedSourceIds ?? [],
+        hashes: saved.excludedSourceHashes ?? [],
+        urls: saved.excludedSourceUrls ?? [],
+      })
+    )
+      throw new AgentError(
+        "SOURCE_EXCLUDED",
+        "The active source policy changed",
+      );
+    const activeRedactions = new Set(active.redactedImageIds ?? []);
+    const savedRedactions = new Set(saved.redactedImageIds ?? []);
+    if (
+      activeRedactions.size !== savedRedactions.size ||
+      [...activeRedactions].some((value) => !savedRedactions.has(value)) ||
+      [...savedRedactions].some((value) => !activeRedactions.has(value)) ||
+      run.images?.some((image) => activeRedactions.has(image.id))
+    )
+      throw new AgentError("IMAGE_REDACTED", "The active image policy changed");
+    if (this.session.localOnly && !run.localOnly)
+      throw new AgentError(
+        "POLICY_CHANGED",
+        "The active session requires local models",
+      );
+    const rank: Record<DataClass, number> = {
+      public: 0,
+      private: 1,
+      restricted: 2,
+    };
+    if (rank[this.session.dataClass] > rank[run.dataClass])
+      throw new AgentError(
+        "POLICY_CHANGED",
+        "The active data policy is stricter",
+      );
+    const owner = this.store.db
+      .prepare("SELECT owner,workspace FROM conversations WHERE id=?")
+      .get(this.session.id) as
+      { owner?: string; workspace?: string } | undefined;
+    if (
+      !owner ||
+      owner.owner !== this.conversations.owner ||
+      owner.workspace !== this.session.workspace
+    )
+      throw new AgentError("CONVERSATION", "Conversation ownership changed");
+    const member = this.store.db
+      .prepare(
+        "SELECT 1 FROM conversation_runs WHERE session_id=? AND run_id=?",
+      )
+      .get(this.session.id, run.id);
+    if (!member)
+      throw new AgentError("CONVERSATION", "Run is not in this conversation");
+  }
+  private modelChangeRun(runId?: string): Run {
+    const run = this.currentRun();
+    if (!run || (runId && run.id !== runId))
+      throw new AgentError(
+        "RUN",
+        "The current conversation has no matching run",
+      );
+    this.assertRunPolicyCurrent(run);
+    return run;
+  }
+  private modelChangeSessionBinding(run: Run): string {
+    return sha256(
+      canonical({
+        generation: this.generation,
+        sessionId: this.session.id,
+        runId: run.id,
+        workspace: this.session.workspace,
+        kind: this.session.kind,
+        model: this.session.model,
+        reviewer: this.session.reviewer,
+        strategy: this.session.strategy,
+        access: this.session.access,
+        dataClass: this.session.dataClass,
+        localOnly: this.session.localOnly,
+        context: normalizeConversationContext(this.session.context),
+      }),
+    );
+  }
+  private assertModelChangeSession(
+    runId: string,
+    generation: number,
+    binding: string,
+  ): void {
+    if (this.closed || this.generation !== generation || this.busy === false)
+      throw new AgentError(
+        "STALE_SESSION",
+        "The model replacement session is stale",
+      );
+    const run = this.modelChangeRun(runId);
+    if (this.modelChangeSessionBinding(run) !== binding)
+      throw new AgentError(
+        "STALE_SESSION",
+        "The model replacement session changed",
+      );
+  }
+  taskModelCandidates(taskId: string): ModelCandidate[] {
+    this.idle();
+    const run = this.modelChangeRun();
+    return backendTaskModelCandidates(this.store, this.config, run, taskId);
+  }
+  previewTaskModelChange(
+    taskId: string,
+    model: string,
+  ): ApplicationModelChangePreview {
+    this.idle();
+    const run = this.modelChangeRun();
+    const preview = previewBackendTaskModelChange(
+      this.store,
+      this.config,
+      run,
+      taskId,
+      model,
+    );
+    const sessionBinding = this.modelChangeSessionBinding(run);
+    return {
+      ...preview,
+      sessionBinding,
+      appBinding: sha256(
+        canonical({ preview: preview.binding, sessionBinding }),
+      ),
+    };
+  }
+  async confirmTaskModelChange(
+    preview: ApplicationModelChangePreview,
+  ): Promise<void> {
+    this.idle();
+    const run = this.modelChangeRun(preview.runId);
+    const fresh = this.previewTaskModelChange(preview.taskId, preview.toModel);
+    if (
+      fresh.binding !== preview.binding ||
+      fresh.appBinding !== preview.appBinding ||
+      fresh.sessionBinding !== preview.sessionBinding
+    )
+      throw new AgentError(
+        "STALE_MODEL_CHANGE",
+        "Model replacement preview is stale",
+      );
+    this.busy = true;
+    this.activeRunId = run.id;
+    this.controller = new AbortController();
+    const generation = this.generation;
+    const binding = preview.sessionBinding;
+    this.work = (async () => {
+      await confirmBackendTaskModelChange(this.store, this.config, preview, {
+        signal: this.controller!.signal,
+        appGuard: () =>
+          this.assertModelChangeSession(run.id, generation, binding),
+      });
+    })();
+    try {
+      await this.work;
+    } finally {
+      this.work = undefined;
+      this.controller = undefined;
+      this.activeRunId = undefined;
+      this.busy = false;
+    }
+  }
   async resume(): Promise<void> {
     this.idle();
     const run = this.currentRun();
@@ -1928,55 +2113,7 @@ export class Application extends EventEmitter {
         "TERMINAL_RUN",
         "完了・失敗・中断した作業は再実行しません。続きの依頼を入力してください。",
       );
-    if (run.configHash !== configHash(this.config))
-      throw new AgentError(
-        "POLICY_CHANGED",
-        "設定が変わっています。新しい依頼として続けてください。",
-      );
-    if (
-      canonical({
-        ids:
-          normalizeConversationContext(this.session.context)
-            .excludedSourceIds ?? [],
-        hashes:
-          normalizeConversationContext(this.session.context)
-            .excludedSourceHashes ?? [],
-        urls:
-          normalizeConversationContext(this.session.context)
-            .excludedSourceUrls ?? [],
-      }) !==
-      canonical({
-        ids:
-          normalizeConversationContext(run.contextState).excludedSourceIds ??
-          [],
-        hashes:
-          normalizeConversationContext(run.contextState).excludedSourceHashes ??
-          [],
-        urls:
-          normalizeConversationContext(run.contextState).excludedSourceUrls ??
-          [],
-      })
-    )
-      throw new AgentError(
-        "SOURCE_EXCLUDED",
-        "This run predates a source exclusion; continue with a fresh request",
-      );
-    const activeRedactions = new Set(
-      normalizeConversationContext(this.session.context).redactedImageIds ?? [],
-    );
-    const runRedactions = new Set(
-      normalizeConversationContext(run.contextState).redactedImageIds ?? [],
-    );
-    if (
-      activeRedactions.size !== runRedactions.size ||
-      [...activeRedactions].some((id) => !runRedactions.has(id)) ||
-      [...runRedactions].some((id) => !activeRedactions.has(id)) ||
-      run.images?.some((image) => activeRedactions.has(image.id))
-    )
-      throw new AgentError(
-        "IMAGE_REDACTED",
-        "This run predates an image redaction; continue with a fresh request",
-      );
+    this.assertRunPolicyCurrent(run);
     this.busy = true;
     this.activeRunId = run.id;
     this.controller = new AbortController();
