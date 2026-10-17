@@ -774,6 +774,7 @@ export class Harness {
     acknowledgeInstructions: () => void = () => {},
   ): Promise<Run> {
     let run = this.store.get(runId);
+    assertContextReady(run);
     if (run.forkCheckpointId)
       throw new AgentError(
         "FORK_SEED",
@@ -784,7 +785,7 @@ export class Harness {
         "POLICY_CHANGED",
         "Configuration changed; create a new run to use the new policy",
       );
-    run = this.store.claim(runId);
+    run = this.store.claim(runId, false, false, assertContextReady);
     const controller = new AbortController(),
       started = Date.now(),
       elapsed = run.elapsedMs;

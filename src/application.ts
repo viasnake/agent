@@ -1079,7 +1079,7 @@ export class Application extends EventEmitter {
           error.code === "CONTEXT_REVIEW_REQUIRED"
         ) {
           this.publish("notice", {
-            text: "Context review is required before queued work can start.",
+            text: "コンテキストの確認が必要です。/context-review で内容を確認してください。待機入力は保持しています。",
           });
           return;
         }

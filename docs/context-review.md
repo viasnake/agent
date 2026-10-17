@@ -22,5 +22,14 @@ same parsed arguments and result digest are a conservative host signal; it is
 not a universal semantic duplicate detector. A changed result digest or an
 intervening mutation resets that query's repeat window. Evidence and
 references are task-scoped, and excluded sources cannot be used as a bypass.
-Heuristic false positives are expected and require human review. TUI preview
-and rendered acceptance are separate follow-up work.
+Heuristic false positives are expected and require human review.
+
+In the TUI, `/context-review` displays the pending concerns, literal evidence,
+reference IDs and preserved policy/usage. Review the bounded note and confirm
+explicitly; cancelling any dialog changes nothing. A changed conversation,
+run, configuration or retained context invalidates the preview. Notes are
+audit records, not new model instructions. Acknowledgement gives pending tasks
+one additional attempt without resetting run-wide budgets, and never starts
+the queue or resumes inference. Use a new request to change requirements;
+terminal runs cannot be resumed. Rendered TUI acceptance and real-provider
+semantic quality validation remain separate from automated tests.

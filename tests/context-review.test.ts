@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify } from "yaml";
 import { Application } from "../src/application.js";
+import { emptyConversationContext } from "../src/context.js";
 import {
   assertContextReady,
   confirmContextReview,
@@ -30,6 +31,154 @@ const task: Task = {
   state: "pending",
   attempts: 0,
 };
+
+test("context evidence references respect task assignments and source exclusions", async () => {
+  const f = await fixture(
+    new ScriptedRuntime(async () =>
+      assert.fail("No inference during reference checks"),
+    ),
+  );
+  try {
+    const created = await f.harness.create({
+      objective: "Scoped evidence",
+      kind: "writing",
+      mode: "single",
+      model: "worker",
+      localOnly: true,
+    });
+    const run = f.store.claim(created.id);
+    try {
+      run.mode = "assisted";
+      run.state = "waiting_input";
+      const allowed = await f.store.artifact(
+        run,
+        "allowed.txt",
+        "source",
+        "allowed source",
+      );
+      const foreign = await f.store.artifact(
+        run,
+        "foreign.txt",
+        "source",
+        "other source",
+      );
+      const reviewer: Task = {
+        ...structuredClone(task),
+        id: "review",
+        role: "reviewer",
+        resultFormat: "structured",
+        contextArchiveIds: ["a".repeat(64)],
+      };
+      const child: Task = {
+        ...structuredClone(task),
+        id: "child",
+        delegatedBy: "work",
+        resultFormat: "structured",
+        assignment: {
+          objective: "Scoped evidence",
+          constraints: [],
+          sourceIds: [allowed.id],
+          expectedResult: "report",
+          acceptance: [],
+        },
+      };
+      run.tasks = [structuredClone(task), reviewer, child];
+      const foreignOperation = f.store.prepare(run, "work", "read_file", {
+        path: "private.txt",
+      });
+      const input = {
+        kind: "contradiction" as const,
+        detail: "unverified private concern",
+        evidence: "literal evidence",
+      };
+      assert.throws(
+        () =>
+          recordContextIssue(
+            f.store,
+            run,
+            child,
+            { ...input, sourceIds: [foreign.id] },
+            "model",
+          ),
+        { code: "SOURCE" },
+      );
+      assert.throws(
+        () =>
+          recordContextIssue(
+            f.store,
+            run,
+            reviewer,
+            { ...input, archiveIds: ["b".repeat(64)] },
+            "model",
+          ),
+        { code: "SOURCE" },
+      );
+      assert.throws(
+        () =>
+          recordContextIssue(
+            f.store,
+            run,
+            reviewer,
+            { ...input, operationIds: [foreignOperation] },
+            "model",
+          ),
+        { code: "SOURCE" },
+      );
+      run.contextState = emptyConversationContext();
+      run.contextState.excludedSourceIds = [allowed.id];
+      assert.throws(
+        () =>
+          recordContextIssue(
+            f.store,
+            run,
+            child,
+            { ...input, sourceIds: [allowed.id] },
+            "model",
+          ),
+        { code: "SOURCE" },
+      );
+      assert.throws(
+        () =>
+          recordContextIssue(
+            f.store,
+            run,
+            reviewer,
+            { ...input, archiveIds: reviewer.contextArchiveIds },
+            "model",
+          ),
+        { code: "SOURCE_EXCLUDED" },
+      );
+      assert.equal(run.contextIssues?.length ?? 0, 0);
+      run.contextState.excludedSourceIds = [];
+      const issue = recordContextIssue(
+        f.store,
+        run,
+        reviewer,
+        {
+          ...input,
+          sourceIds: [allowed.id],
+          archiveIds: reviewer.contextArchiveIds,
+        },
+        "model",
+      );
+      assert.equal(issue.taskId, reviewer.id);
+      assert.deepEqual(issue.archiveIds, reviewer.contextArchiveIds);
+      assert.throws(
+        () => recordContextIssue(f.store, run, child, input, "model"),
+        (error: unknown) => {
+          assert.ok(error instanceof AgentError);
+          assert.equal(error.code, "CONTEXT_REVIEW_REQUIRED");
+          assert.equal(error.message.includes(input.detail), false);
+          return true;
+        },
+      );
+    } finally {
+      f.store.release(run);
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
 
 test("context issues pause a run and require an explicit bound acknowledgement", async () => {
   const f = await fixture({
@@ -183,6 +332,11 @@ test("four identical exploration reads pause before final success and retain com
     assert.equal(result.state, "waiting_input");
     assert.equal(calls, 1);
     assert.equal(result.contextIssues?.[0]?.kind, "repeated_exploration");
+    const stopped = JSON.stringify(f.store.get(result.id));
+    await assert.rejects(f.harness.execute(result.id), {
+      code: "CONTEXT_REVIEW_REQUIRED",
+    });
+    assert.equal(JSON.stringify(f.store.get(result.id)), stopped);
     assert.ok(
       f.store
         .operations(result.id)
@@ -345,9 +499,10 @@ test("changed exploration results reset the repeated-read window", async () => {
   const runtime = new ScriptedRuntime(async (request) => {
     await call(request, "read_file", { path: "facts.txt" });
     await call(request, "read_file", { path: "facts.txt" });
+    await call(request, "read_file", { path: "facts.txt" });
     await writeFile(factsPath, "changed fact\n");
     await call(request, "read_file", { path: "facts.txt" });
-    await call(request, "read_file", { path: "facts.txt" });
+    await writeFile(factsPath, "original fact\n");
     await call(request, "read_file", { path: "facts.txt" });
     return completed([], "finished after progress");
   });

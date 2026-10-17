@@ -14,6 +14,7 @@ import { SearchBrowser } from "./search-browser.js";
 import { SkillBrowser } from "./skill-browser.js";
 import { ForkBrowser } from "./fork-browser.js";
 import { ModelChangeBrowser } from "./model-change-browser.js";
+import { ContextReviewBrowser } from "./context-review-browser.js";
 import { BackupBrowser } from "./backup-browser.js";
 import { BackupReaderBrowser } from "./backup-reader-browser.js";
 import { DiagnosticsBrowser } from "./diagnostics-browser.js";
@@ -1145,6 +1146,16 @@ export class TerminalApp {
             this.notice = text;
           },
         }).change(argument || undefined);
+        break;
+      case "context-review":
+        await new ContextReviewBrowser(app, {
+          show: this.show.bind(this),
+          prompt: this.prompt.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).review();
         break;
       case "tasks": {
         const run = app.currentRun();

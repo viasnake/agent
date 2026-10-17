@@ -345,21 +345,21 @@ export class TaskExecutor {
       isContextExplorationTool(tool.name),
     );
     if (
-      hasExplorationTool &&
-      (run.inputs.length ||
-        run.preparedInputs?.length ||
-        repositoryReadOnly ||
-        hasSources ||
-        hasArchives)
-    )
-      chatTools.add("report_context_issue");
-    if (
       run.access === "read-only" &&
       !newCollaboration &&
       task.purpose !== "synthesis"
     )
       chatTools.add("read_research_checkpoint");
     if (newCollaboration) chatTools.add("read_task_report");
+    if (
+      allTools.some(
+        (tool) =>
+          chatTools.has(tool.name) &&
+          tool.name !== "read_task_report" &&
+          isContextExplorationTool(tool.name),
+      )
+    )
+      chatTools.add("report_context_issue");
     const tools =
         !model.tools || task.role === "lead"
           ? []

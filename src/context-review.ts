@@ -63,7 +63,7 @@ export function assertContextReady(run: Run): void {
   if (issue)
     throw new AgentError(
       "CONTEXT_REVIEW_REQUIRED",
-      `Context integrity requires human review; use agent context-review ${run.id} (${issue.id})`,
+      `Context concern requires human review; use /context-review or agent context-review ${run.id} (${issue.id})`,
     );
 }
 
@@ -206,6 +206,8 @@ function repeatedReadIssue(
     } catch {
       break;
     }
+    if (!artifact || typeof artifact !== "object" || Array.isArray(artifact))
+      break;
     if (
       artifact.metadata?.taskId !== task.id ||
       artifact.metadata?.operationId !== row.id ||
@@ -349,7 +351,8 @@ export function confirmContextReview(
     );
     run.contextReviewCursor = latest?.id;
     for (const task of run.tasks)
-      task.contextReviewCount = (task.contextReviewCount ?? 0) + 1;
+      if (task.state === "pending")
+        task.contextReviewCount = (task.contextReviewCount ?? 0) + 1;
     if (!terminalStates.includes(run.state)) {
       run.state = "waiting_input";
       run.reason =
