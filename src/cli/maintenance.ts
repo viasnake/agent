@@ -54,7 +54,7 @@ export function registerMaintenanceCommands(cli: CliContext): void {
           ...result,
           cleanupComplete: result.pending.length === 0,
           warning:
-            "バックアップ・共有キャッシュ・SQLite残存ページは対象外です。",
+            "共有キャッシュを削除します。バックアップ・SQLite残存ページは対象外で、暗号学的消去は保証しません。",
         });
       }),
     );
@@ -74,11 +74,11 @@ export function registerMaintenanceCommands(cli: CliContext): void {
         if (!options.write) {
           print({
             written: false,
-            preview: await previewCacheCleanupJob(store.paths, jobId),
+            preview: await previewCacheCleanupJob(store, config, jobId),
           });
           return;
         }
-        const preview = await previewCacheCleanupJob(store.paths, jobId);
+        const preview = await previewCacheCleanupJob(store, config, jobId);
         const result = await confirmCacheCleanup(
           store,
           config,

@@ -12,11 +12,11 @@ import {
   realpathSync,
   renameSync,
   unlinkSync,
-  writeSync,
+  writeFileSync,
   type Stats,
 } from "node:fs";
-import { join } from "node:path";
-import type { Config, Paths } from "./config.js";
+import { join, resolve } from "node:path";
+import { configHash, type Config, type Paths } from "./config.js";
 import {
   readSharedBlobPinsSync,
   withSharedBlobLock,
@@ -24,7 +24,7 @@ import {
 } from "./shared-blobs.js";
 import { snapshotMetadata } from "./metadata-snapshot.js";
 import type { Store } from "./storage.js";
-import { AgentError } from "./types.js";
+import { AgentError, terminalStates } from "./types.js";
 import { canonical, sha256 } from "./util.js";
 
 const maxCandidates = 500;
@@ -66,6 +66,7 @@ type Candidate = {
   root: DirIdentity;
   parent: DirIdentity;
   parentPath: string;
+  ancestors: Record<string, DirIdentity>;
 };
 type Retained = { path: string; reason: string };
 export interface CacheCleanupRequest {
@@ -81,6 +82,7 @@ export interface CacheCleanupPreview {
   retained: Array<{ path: string; reason: string }>;
   moreCandidates: number;
   jobId?: string;
+  snapshot: string;
 }
 export interface CacheCleanupResult {
   removed: string[];
@@ -92,13 +94,18 @@ type JobEntry = {
   root: DirIdentity;
   parent: DirIdentity;
   parentPath: string;
+  ancestors: Record<string, DirIdentity>;
   status: "pending" | "removed" | "retained";
   reason?: string;
 };
-type Job = { version: 2; id: string; entries: JobEntry[]; error?: string };
+type Job = { version: 3; id: string; entries: JobEntry[]; error?: string };
 
 function fail(message: string, code = "DELETE_REQUEST"): never {
   throw new AgentError(code, message);
+}
+function checkDeadline(deadline: number): void {
+  if (Date.now() >= deadline)
+    fail("共有キャッシュ処理の時間上限を超えました。", "DELETE_LIMIT");
 }
 function nowCutoff(cutoff: number | undefined): number {
   const now = Date.now();
@@ -145,15 +152,38 @@ function privateDirectory(path: string): DirIdentity {
   return dirIdentity(stat);
 }
 function safeRoot(paths: Paths): DirIdentity {
+  if (
+    resolve(paths.attachments) !== join(resolve(paths.home), "attachments") ||
+    resolve(paths.checkpoints) !== join(resolve(paths.home), "checkpoints")
+  )
+    fail("共有キャッシュの保存先設定が一致しません。", "UNSAFE_STORAGE");
   const home = privateDirectory(paths.home);
   realpathSync(paths.home);
   if (!same(home, dirIdentity(lstatSync(paths.home))))
     fail("共有キャッシュ root が変化しました。", "UNSAFE_STORAGE");
   return home;
 }
+function parents(paths: Paths, relative: string): Record<string, DirIdentity> {
+  const root = safeRoot(paths);
+  const home = realpathSync(paths.home);
+  const result: Record<string, DirIdentity> = { "": root };
+  let prefix = "";
+  for (const part of relative.split("/")) {
+    prefix = prefix ? `${prefix}/${part}` : part;
+    const path = join(paths.home, prefix);
+    result[prefix] = privateDirectory(path);
+    if (realpathSync(path) !== join(home, prefix))
+      fail(
+        "共有キャッシュの親ディレクトリが保存領域外です。",
+        "UNSAFE_STORAGE",
+      );
+  }
+  return result;
+}
 function enumerate(
   paths: Paths,
   cutoff: number,
+  deadline: number,
 ): { candidates: Candidate[]; retained: Retained[] } {
   const homeRoot = safeRoot(paths);
   const candidates: Candidate[] = [];
@@ -162,7 +192,7 @@ function enumerate(
   for (const { directory: relativeDir, patterns } of directoryKinds) {
     const directory = join(paths.home, relativeDir);
     try {
-      privateDirectory(directory);
+      parents(paths, relativeDir);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw error;
@@ -171,6 +201,7 @@ function enumerate(
     try {
       const names: string[] = [];
       while (true) {
+        checkDeadline(deadline);
         const item = handle.readSync();
         if (!item) break;
         if (++entries > maxEntries)
@@ -181,6 +212,7 @@ function enumerate(
         names.push(item.name);
       }
       for (const name of names.sort()) {
+        checkDeadline(deadline);
         const path = `${relativeDir}/${name}`;
         if (!patterns.some((pattern) => pattern.test(name))) {
           retained.push({ path, reason: "既知の共有 blob ではありません" });
@@ -217,6 +249,7 @@ function enumerate(
           root: homeRoot,
           parent: dirIdentity(lstatSync(directory)),
           parentPath: relativeDir,
+          ancestors: parents(paths, relativeDir),
         });
       }
     } finally {
@@ -254,7 +287,7 @@ function writeAtomic(paths: Paths, job: Job): void {
     0o600,
   );
   try {
-    writeSync(fd, data);
+    writeFileSync(fd, data);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -330,7 +363,7 @@ function readJournalFile(path: string): string {
     fail("cleanup journal file が unsafe です。", "UNSAFE_STORAGE");
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const opened = lstatSync(path);
+    const opened = fstatSync(fd);
     if (!sameStat(before, opened))
       fail("cleanup journal file が置き換えられました。", "UNSAFE_STORAGE");
     const buffer = Buffer.alloc(maxJobBytes + 1);
@@ -354,18 +387,23 @@ function readJournalFile(path: string): string {
     closeSync(fd);
   }
 }
-function readJobs(paths: Paths): Job[] {
+function readJobs(paths: Paths, deadline = Date.now() + 10_000): Job[] {
   privateJournal(paths);
   const handle = opendirSync(journalDir(paths));
   const names: string[] = [];
+  let entries = 0;
+  let bytes = 0;
   try {
     while (true) {
       const entry = handle.readSync();
       if (!entry) break;
-      if (names.length >= maxJobs + 100)
+      if (Date.now() >= deadline || ++entries > maxJobs + 100)
         fail("cleanup journal の件数上限を超えました。", "DELETE_LIMIT");
+      bytes += lstatSync(join(journalDir(paths), entry.name)).size;
+      if (bytes > 64_000_000)
+        fail("cleanup journal の合計サイズ上限を超えました。", "DELETE_LIMIT");
       if (entry.name.endsWith(".tmp")) {
-        if (!/^[0-9a-f-]{36}\.[0-9a-f-]{36}\.tmp$/.test(entry.name))
+        if (!/^[0-9a-f-]{36}\.json\.[0-9a-f-]{36}\.tmp$/.test(entry.name))
           fail(
             "cleanup journal の temporary file が不正です。",
             "UNSAFE_STORAGE",
@@ -395,6 +433,7 @@ function readJobs(paths: Paths): Job[] {
     fail("cleanup journal の件数上限を超えました。", "DELETE_LIMIT");
   names.sort();
   return names.map((name) => {
+    checkDeadline(deadline);
     if (!name.endsWith(".json") || !uuidPattern.test(name.slice(0, -5)))
       fail("cleanup journal の名前が不正です。", "UNSAFE_STORAGE");
     const raw = readJournalFile(join(journalDir(paths), name));
@@ -415,7 +454,7 @@ function readJobs(paths: Paths): Job[] {
     )
       fail("cleanup journal に未知の field があります。", "UNSAFE_STORAGE");
     if (
-      value.version !== 2 ||
+      value.version !== 3 ||
       value.id !== id ||
       !Array.isArray(value.entries) ||
       !value.entries.length ||
@@ -434,9 +473,9 @@ function readJobs(paths: Paths): Job[] {
       const item = entry as Record<string, unknown>;
       if (
         Object.keys(item).sort().join(",") !==
-          "identity,parent,parentPath,path,root,status" &&
+          "ancestors,identity,parent,parentPath,path,root,status" &&
         Object.keys(item).sort().join(",") !==
-          "identity,parent,parentPath,path,reason,root,status"
+          "ancestors,identity,parent,parentPath,path,reason,root,status"
       )
         fail(
           "cleanup journal の entry に未知の field があります。",
@@ -456,8 +495,18 @@ function readJobs(paths: Paths): Job[] {
         fail("cleanup journal に重複 path があります。", "UNSAFE_STORAGE");
       entryPaths.add(item.path);
       const expectedParent = item.path.slice(0, item.path.lastIndexOf("/"));
+      const ancestorKeys = [
+        "",
+        ...expectedParent
+          .split("/")
+          .map((_, index, parts) => parts.slice(0, index + 1).join("/")),
+      ].sort();
       if (
         item.parentPath !== expectedParent ||
+        !item.ancestors ||
+        typeof item.ancestors !== "object" ||
+        !same(Object.keys(item.ancestors).sort(), ancestorKeys) ||
+        !Object.values(item.ancestors).every(validDir) ||
         (item.status === "retained" &&
           (typeof item.reason !== "string" || item.reason.length > 1000)) ||
         (item.status !== "retained" && "reason" in item)
@@ -485,8 +534,10 @@ function safety(store: Store, request: CacheCleanupRequest): void {
       );
   }
   const liveRun = store.db
-    .prepare("SELECT id FROM runs WHERE heartbeat> ? LIMIT 1")
-    .get(Date.now() - 15_000);
+    .prepare(
+      `SELECT id FROM runs WHERE heartbeat> ? OR state NOT IN (${terminalStates.map(() => "?").join(",")}) LIMIT 1`,
+    )
+    .get(Date.now() - 15_000, ...terminalStates);
   if (liveRun)
     fail("稼働中の実行があるため共有 cache を削除できません。", "SESSION_BUSY");
   const active = store.db
@@ -507,11 +558,21 @@ function safety(store: Store, request: CacheCleanupRequest): void {
     )
       fail("稼働中の会話があるため削除できません。", "SESSION_BUSY");
   }
+  if (
+    request.owner &&
+    !active.some(
+      (row) =>
+        row.id === request.owner!.sessionId &&
+        row.owner === request.owner!.owner,
+    )
+  )
+    fail("現在の会話の所有権を確認できません。", "SESSION_BUSY");
 }
 function previewValue(
   store: Store,
-  _config: Config,
+  config: Config,
   request: CacheCleanupRequest,
+  deadline = Date.now() + 10_000,
 ): Omit<CacheCleanupPreview, "binding"> {
   if (
     !request ||
@@ -535,10 +596,10 @@ function previewValue(
     fail("重複した cache path は指定できません。");
   for (const path of paths) validateSharedBlobPath(path);
   safety(store, request);
-  const state = snapshotMetadata(store.db, Date.now() + 10_000);
-  const enumerated = enumerate(store.paths, cutoff);
+  const state = snapshotMetadata(store.db, deadline);
+  const enumerated = enumerate(store.paths, cutoff, deadline);
   const all = enumerated.candidates;
-  const pins = readSharedBlobPinsSync(store.paths);
+  const pins = readSharedBlobPinsSync(store.paths, deadline);
   const pinned = new Set(
     pins.filter((pin) => pin.live).flatMap((pin) => pin.paths),
   );
@@ -580,6 +641,14 @@ function previewValue(
     selected,
     retained,
     moreCandidates,
+    snapshot: sha256(
+      canonical({
+        metadata: state.binding,
+        pins,
+        home: realpathSync(store.paths.home),
+        config: configHash(config),
+      }),
+    ),
   };
 }
 export async function previewCacheCleanup(
@@ -587,16 +656,24 @@ export async function previewCacheCleanup(
   config: Config,
   request: CacheCleanupRequest,
 ): Promise<CacheCleanupPreview> {
-  const preview = store.transaction(() => previewValue(store, config, request));
-  return { ...preview, binding: sha256(canonical(preview)) };
+  return withSharedBlobLock(store.paths, async () => {
+    const preview = store.transaction(() =>
+      previewValue(store, config, request),
+    );
+    return { ...preview, binding: sha256(canonical(preview)) };
+  });
 }
 function currentMatches(
   store: Store,
   config: Config,
   preview: CacheCleanupPreview,
+  deadline: number,
 ): void {
-  const current = previewValue(store, config, preview.request);
-  if (canonical(current) !== canonical({ ...preview, binding: undefined }))
+  const current = previewValue(store, config, preview.request, deadline);
+  if (
+    canonical({ ...current, binding: sha256(canonical(current)) }) !==
+    canonical(preview)
+  )
     fail("共有 cache preview が stale です。", "STALE_VIEW");
 }
 function pendingResult(job: Job): CacheCleanupResult {
@@ -632,6 +709,7 @@ function jobPreview(job: Job): Omit<CacheCleanupPreview, "binding"> {
       root: entry.root,
       parent: entry.parent,
       parentPath: entry.parentPath,
+      ancestors: entry.ancestors,
     })),
     retained: job.entries
       .filter((entry) => entry.status === "retained")
@@ -641,35 +719,111 @@ function jobPreview(job: Job): Omit<CacheCleanupPreview, "binding"> {
       })),
     moreCandidates: 0,
     jobId: job.id,
+    snapshot: sha256(canonical(job)),
   };
 }
-export async function previewCacheCleanupJob(
-  paths: Paths,
-  id: string,
-): Promise<CacheCleanupPreview> {
-  const job = readJobs(paths).find((item) => item.id === id);
-  if (!job) fail("cache cleanup job が存在しません。", "NOT_FOUND");
+function retryValue(
+  store: Store,
+  config: Config,
+  job: Job,
+  owner?: CacheCleanupRequest["owner"],
+  cutoff?: number,
+  deadline = Date.now() + 10_000,
+): Omit<CacheCleanupPreview, "binding"> {
+  const state = previewValue(
+    store,
+    config,
+    { kind: "eligible", paths: [], owner, cutoff },
+    deadline,
+  );
+  const references = snapshotMetadata(store.db, deadline).referencedDigests;
+  const pins = new Set(
+    readSharedBlobPinsSync(store.paths, deadline)
+      .filter((pin) => pin.live)
+      .flatMap((pin) => pin.paths),
+  );
   const preview = jobPreview(job);
-  return { ...preview, binding: sha256(canonical(preview)) };
+  preview.request.owner = owner;
+  preview.request.cutoff = state.request.cutoff;
+  preview.retained = [];
+  preview.selected = preview.selected.filter((entry) => {
+    checkDeadline(deadline);
+    let reason: string | undefined;
+    if (references.has(entry.path.match(/[a-f0-9]{64}/)![0]))
+      reason = "再参照されています";
+    else if (pins.has(entry.path)) reason = "稼働中プロセスが保持しています";
+    else {
+      try {
+        if (!same(parents(store.paths, entry.parentPath), entry.ancestors))
+          reason = "親ディレクトリが変わりました";
+        else {
+          try {
+            if (
+              !same(
+                identity(lstatSync(join(store.paths.home, entry.path))),
+                entry.identity,
+              )
+            )
+              reason = "ファイルが置き換えられました";
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+              reason = "ファイルを安全に確認できません";
+          }
+        }
+      } catch {
+        reason = "保存領域を安全に確認できません";
+      }
+    }
+    if (reason) preview.retained.push({ path: entry.path, reason });
+    return !reason;
+  });
+  preview.snapshot = sha256(
+    canonical({ job, state, retained: preview.retained }),
+  );
+  return preview;
+}
+export async function previewCacheCleanupJob(
+  store: Store,
+  config: Config,
+  id: string,
+  owner?: CacheCleanupRequest["owner"],
+): Promise<CacheCleanupPreview> {
+  if (!uuidPattern.test(id)) fail("cleanup job ID が不正です。");
+  return withSharedBlobLock(store.paths, async () =>
+    store.transaction(() => {
+      const deadline = Date.now() + 10_000;
+      const job = readJobs(store.paths, deadline).find(
+        (item) => item.id === id,
+      );
+      if (!job) fail("cache cleanup job が存在しません。", "NOT_FOUND");
+      const preview = retryValue(
+        store,
+        config,
+        job,
+        owner,
+        undefined,
+        deadline,
+      );
+      return { ...preview, binding: sha256(canonical(preview)) };
+    }),
+  );
 }
 function processJob(
   store: Store,
   job: Job,
+  deadline: number,
   signal?: AbortSignal,
 ): CacheCleanupResult {
-  const refs = snapshotMetadata(
-    store.db,
-    Date.now() + 10_000,
-  ).referencedDigests;
+  const refs = snapshotMetadata(store.db, deadline).referencedDigests;
   const pins = new Set(
-    readSharedBlobPinsSync(store.paths)
+    readSharedBlobPinsSync(store.paths, deadline)
       .filter((pin) => pin.live)
       .flatMap((pin) => pin.paths),
   );
   for (const entry of job.entries) {
     if (entry.status !== "pending") continue;
-    if (signal?.aborted) {
-      job.error = "処理が中断されました。";
+    if (signal?.aborted || Date.now() >= deadline) {
+      job.error = "処理が中断されたか、時間上限に達しました。";
       writeAtomic(store.paths, job);
       return pendingResult(job);
     }
@@ -679,6 +833,15 @@ function processJob(
       entry.reason = refs.has(digest)
         ? "再参照されました"
         : "pin が追加されました";
+      writeAtomic(store.paths, job);
+      continue;
+    }
+    try {
+      if (!same(parents(store.paths, entry.parentPath), entry.ancestors))
+        fail("親ディレクトリが置き換えられました。", "UNSAFE_STORAGE");
+    } catch {
+      entry.status = "retained";
+      entry.reason = "保存領域または親ディレクトリが変わりました";
       writeAtomic(store.paths, job);
       continue;
     }
@@ -693,7 +856,7 @@ function processJob(
       }
       entry.status = "retained";
       entry.reason = "対象を安全に検査できません";
-      job.error = String((error as Error).message);
+      job.error = String((error as Error).message).slice(0, 2000);
       writeAtomic(store.paths, job);
       continue;
     }
@@ -705,7 +868,7 @@ function processJob(
     } catch (error) {
       entry.status = "retained";
       entry.reason = "parent/root を安全に検査できません";
-      job.error = String((error as Error).message);
+      job.error = String((error as Error).message).slice(0, 2000);
       writeAtomic(store.paths, job);
       return pendingResult(job);
     }
@@ -718,6 +881,11 @@ function processJob(
       entry.reason = "ファイルまたは parent identity が変わりました";
       writeAtomic(store.paths, job);
       continue;
+    }
+    if (Date.now() >= deadline) {
+      job.error = "時間上限に達したため、残りの処理を保留しました。";
+      writeAtomic(store.paths, job);
+      return pendingResult(job);
     }
     try {
       unlinkSync(join(store.paths.home, entry.path));
@@ -732,7 +900,7 @@ function processJob(
     } catch (error) {
       entry.status = "retained";
       entry.reason = "unlink に失敗したため保留しています";
-      job.error = String((error as Error).message);
+      job.error = String((error as Error).message).slice(0, 2000);
       writeAtomic(store.paths, job);
       return pendingResult(job);
     }
@@ -764,6 +932,7 @@ export async function confirmCacheCleanup(
     signal?.throwIfAborted();
     options?.beforeCommit?.();
     return store.transaction(() => {
+      const deadline = Date.now() + 10_000;
       options?.beforeCommit?.();
       if (preview.jobId) {
         safety(store, {
@@ -771,22 +940,34 @@ export async function confirmCacheCleanup(
           paths: [],
           owner: options?.owner,
         });
-        const job = readJobs(store.paths).find(
+        const job = readJobs(store.paths, deadline).find(
           (item) => item.id === preview.jobId,
         );
+        if (!job) fail("cache cleanup job が存在しません。", "NOT_FOUND");
+        const current = retryValue(
+          store,
+          config,
+          job,
+          options?.owner,
+          preview.request.cutoff,
+          deadline,
+        );
         if (
-          !job ||
-          canonical(jobPreview(job)) !==
-            canonical({ ...preview, binding: undefined })
+          canonical({ ...current, binding: sha256(canonical(current)) }) !==
+          canonical(preview)
         )
           fail("cache cleanup retry preview が stale です。", "STALE_VIEW");
         for (const entry of job.entries)
-          if (entry.status === "retained") entry.status = "pending";
-        return processJob(store, job, signal);
+          if (entry.status === "retained") {
+            entry.status = "pending";
+            delete entry.reason;
+          }
+        return processJob(store, job, deadline, signal);
       }
-      currentMatches(store, config, preview);
+      currentMatches(store, config, preview, deadline);
+      if (!preview.selected.length) fail("削除対象がありません。");
       const job: Job = {
-        version: 2,
+        version: 3,
         id: randomUUID(),
         entries: preview.selected.map((entry) => ({
           path: entry.path,
@@ -794,11 +975,12 @@ export async function confirmCacheCleanup(
           root: entry.root,
           parent: entry.parent,
           parentPath: entry.parentPath,
+          ancestors: entry.ancestors,
           status: "pending" as const,
         })),
       };
       writeAtomic(store.paths, job);
-      return processJob(store, job, signal);
+      return processJob(store, job, deadline, signal);
     });
   });
 }
@@ -817,19 +999,11 @@ export async function pendingCacheCleanups(
 }
 export async function retryCacheCleanup(
   store: Store,
-  _config: Config,
+  config: Config,
   id: string,
   signal?: AbortSignal,
 ): Promise<CacheCleanupResult> {
   signal?.throwIfAborted();
-  return withSharedBlobLock(store.paths, async () => {
-    signal?.throwIfAborted();
-    return store.transaction(() => {
-      const job = readJobs(store.paths).find((item) => item.id === id);
-      if (!job) fail("cache cleanup job が存在しません。", "NOT_FOUND");
-      for (const entry of job.entries)
-        if (entry.status === "retained") entry.status = "pending";
-      return processJob(store, job, signal);
-    });
-  });
+  const preview = await previewCacheCleanupJob(store, config, id);
+  return confirmCacheCleanup(store, config, preview, signal);
 }

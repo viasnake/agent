@@ -3504,7 +3504,11 @@ export class Application extends EventEmitter {
     this.assertMaintenanceView(this.maintenanceBinding());
     this.conversations.save(this.session);
     const binding = this.maintenanceBinding();
-    const preview = await previewCacheCleanupJob(this.paths, id);
+    const preview = await previewCacheCleanupJob(this.store, this.config, id, {
+      sessionId: this.session.id,
+      owner: this.conversations.owner,
+      idleSaved: true,
+    });
     if (binding !== this.maintenanceBinding())
       throw new AgentError(
         "STALE_VIEW",

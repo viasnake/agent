@@ -347,7 +347,7 @@ export class HistoryBrowser {
         const choices = [
           ...page.map((item) => ({
             value: item.path,
-            label: `${selected.has(item.path) ? "[選択済] " : ""}${literal(item.path)} · ${item.bytes} bytes`,
+            label: `${selected.has(item.path) ? "[選択済] " : ""}${safeText(item.path)} · ${item.bytes} bytes`,
           })),
           ...(selected.size
             ? [
@@ -364,7 +364,13 @@ export class HistoryBrowser {
         ];
         if (!choices.length) {
           await this.dialogs.show(
-            "削除可能な共有 cache はありません。保持理由を確認してください。",
+            [
+              "削除可能な共有キャッシュはありません。",
+              ...initial.retained.map(
+                (item) =>
+                  `保持: ${literal(item.path)}\n理由: ${safeText(item.reason)}`,
+              ),
+            ].join("\n\n"),
             "共有キャッシュ · 候補なし",
             "",
           );
@@ -408,6 +414,7 @@ export class HistoryBrowser {
         (item) => `保持: ${literal(item.path)}\n理由: ${safeText(item.reason)}`,
       ),
       "24時間未満、参照中、プロセス寿命中保持する pin は保護します。バックアップ・SQLite残存ページ・外部コピーの暗号学的消去は保証しません。",
+      "削除したファイルは元に戻せません。必要なデータは事前に別途保存してください。履歴バックアップには未参照キャッシュは含まれません。",
     ].join("\n\n");
     if (!preview.selected.length) {
       await this.dialogs.show(text, "共有キャッシュ · 保持", "");

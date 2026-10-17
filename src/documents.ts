@@ -204,9 +204,10 @@ export async function prepareDocument(
     );
   await privateDirectory(paths.attachments);
   const blob = join(paths.attachments, `${rawSha256}.raw`);
+  const id = `doc-${sha256(`${rawSha256}\0${parsed.path}\0${JSON.stringify(parsed.selector)}\0${sha256(selected.text)}`)}`;
   await pinSharedBlobs(paths, [
     `attachments/${rawSha256}.raw`,
-    `attachments/doc-${sha256(`${rawSha256}\0${parsed.path}\0${JSON.stringify(parsed.selector)}\0${sha256(selected.text)}`)}.selected`,
+    `attachments/${id}.selected`,
   ]);
   try {
     const existing = await lstat(blob);
@@ -231,7 +232,7 @@ export async function prepareDocument(
     await atomicWrite(blob, raw);
   }
   const reference: DocumentReference = {
-    id: `doc-${sha256(`${rawSha256}\0${parsed.path}\0${JSON.stringify(parsed.selector)}\0${sha256(selected.text)}`)}`,
+    id,
     originalName: basename(parsed.path),
     format,
     selector: token.slice(parsed.path.length),

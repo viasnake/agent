@@ -11,6 +11,7 @@ import {
   historyDeletionText,
 } from "../src/tui/history-browser.js";
 import { commands } from "../src/tui/actions.js";
+import { pinSharedBlobs, withSharedBlobLock } from "../src/shared-blobs.js";
 import { fixture, gitWorkspace, ScriptedRuntime } from "./helpers.js";
 
 async function historyFixture() {
@@ -435,6 +436,96 @@ test("cache dialog requires exact selection and retries only one reviewed job", 
     assert.equal(f.runtime.requests.length, 0);
   } finally {
     syncBuiltinESMExports();
+    await f.close();
+  }
+});
+
+test("cache maintenance binds ownership and close waits for a cancelled lock-waiting cleanup", async () => {
+  const f = await historyFixture();
+  let release = () => {};
+  let appClosed = false;
+  try {
+    const relative = `images/${"9".repeat(64)}.img`;
+    const path = join(f.p.home, relative);
+    await fs.mkdir(join(f.p.home, "images"), { mode: 0o700 });
+    await fs.writeFile(path, "cache", { mode: 0o600 });
+    const old = new Date(Date.now() - 2 * 86_400_000);
+    await fs.utimes(path, old, old);
+    const changed = await f.app.previewCacheCleanup([relative]);
+    f.app.session.draft = "changed after preview";
+    await assert.rejects(f.app.confirmCacheCleanup(changed), {
+      code: "STALE_VIEW",
+    });
+    const owner = await f.app.previewCacheCleanup([relative]);
+    f.store.db
+      .prepare("UPDATE conversations SET owner=? WHERE id=?")
+      .run("foreign-owner", f.app.session.id);
+    await assert.rejects(f.app.confirmCacheCleanup(owner), {
+      code: "SESSION_BUSY",
+    });
+    f.store.db
+      .prepare("UPDATE conversations SET owner=? WHERE id=?")
+      .run(f.app.conversations.owner, f.app.session.id);
+    const preview = await f.app.previewCacheCleanup([relative]);
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lock = withSharedBlobLock(f.p, async () => {
+      entered();
+      await gate;
+    });
+    await started;
+    const operation = f.app.confirmCacheCleanup(preview);
+    const rejected = assert.rejects(operation);
+    let closed = false;
+    const closing = f.app.close().then(() => {
+      closed = true;
+    });
+    await Promise.resolve();
+    assert.equal(closed, false);
+    release();
+    await lock;
+    await rejected;
+    await closing;
+    appClosed = true;
+    assert.equal(existsSync(path), true);
+    assert.equal(f.runtime.requests.length, 0);
+  } finally {
+    release();
+    if (appClosed) await f.cleanup();
+    else await f.close();
+  }
+});
+
+test("cache dialog displays reasons when all files are pinned without offering deletion", async () => {
+  const f = await historyFixture();
+  try {
+    const relative = `images/${"8".repeat(64)}.img`;
+    const path = join(f.p.home, relative);
+    await fs.mkdir(join(f.p.home, "images"), { mode: 0o700 });
+    await fs.writeFile(path, "cache", { mode: 0o600 });
+    const old = new Date(Date.now() - 2 * 86_400_000);
+    await fs.utimes(path, old, old);
+    await pinSharedBlobs(f.p, [relative]);
+    let shown = false;
+    await new HistoryBrowser(f.app, {
+      choose: async () => assert.fail("No eligible candidates"),
+      confirm: async () => assert.fail("No deletion may be confirmed"),
+      show: async (text) => {
+        assert.ok(text.includes(relative));
+        assert.match(text, /pin/);
+        shown = true;
+        return false;
+      },
+      notice: () => assert.fail("No deletion was performed"),
+    }).cacheCleanup();
+    assert.equal(shown, true);
+    assert.equal(existsSync(path), true);
+  } finally {
     await f.close();
   }
 });
