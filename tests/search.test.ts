@@ -221,10 +221,21 @@ test("search centers late body matches and keeps conversation names independent"
     });
     assert.equal(messagePage.hits.length, 1);
     assert.ok((messagePage.hits[0]?.matchOffset ?? 0) > 20_000);
-    assert.match(messagePage.hits[0]!.excerpt, /late needle/);
+    assert.equal(messagePage.hits[0]!.excerpt, "late needle");
     const message = await f.app.readSearchResult(messagePage.hits[0]!);
     assert.match(message.text, /1: .*late needle/);
     assert.ok(Buffer.byteLength(message.text) <= 32_000);
+    f.app.conversations.message(
+      f.app.session,
+      "user",
+      "行\n".repeat(300) + "遠い一致😀" + "後".repeat(500),
+    );
+    const multilinePage = await f.app.search({
+      kind: "messages",
+      text: "遠い一致😀",
+    });
+    assert.ok(multilinePage.hits[0]!.excerpt.startsWith("遠い一致😀"));
+    assert.equal([...multilinePage.hits[0]!.excerpt].length, 500);
     await assert.rejects(
       f.app.readSearchResult({
         ...messagePage.hits[0]!,

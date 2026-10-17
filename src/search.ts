@@ -200,28 +200,15 @@ function firstLine(text: string, offset: number): number {
   return line;
 }
 
-function previousCodePointStart(text: string, offset: number): number {
-  if (offset <= 0) return 0;
-  const previous = text.charCodeAt(offset - 1);
-  return offset - (previous >= 0xdc00 && previous <= 0xdfff ? 2 : 1);
-}
-
-function excerpt(text: string, offset: number, matchLength: number): string {
-  const matchChars = [...text.slice(offset, offset + matchLength)].length;
-  const before = Math.floor(Math.max(0, maxExcerptChars - matchChars) / 2);
-  let start = offset;
-  for (let index = 0; index < before; index++)
-    start = previousCodePointStart(text, start);
-  let end = start;
+function excerpt(text: string, offset: number): string {
+  let end = offset;
   let count = 0;
   while (end < text.length && count < maxExcerptChars) {
     const codePoint = text.codePointAt(end)!;
     end += codePoint > 0xffff ? 2 : 1;
     count++;
   }
-  const matchEnd = offset + matchLength;
-  if (end < matchEnd) end = matchEnd;
-  return text.slice(start, end);
+  return text.slice(offset, end);
 }
 
 function matchText(text: string, query: string): Match {
@@ -230,7 +217,7 @@ function matchText(text: string, query: string): Match {
   return {
     found: true,
     line: firstLine(text, offset),
-    excerpt: excerpt(text, offset, query.length),
+    excerpt: excerpt(text, offset),
     offset,
   };
 }
