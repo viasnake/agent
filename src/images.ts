@@ -5,6 +5,7 @@ import sharp from "sharp";
 import type { Paths } from "./config.js";
 import { AgentError, type DataClass, type ImageReference } from "./types.js";
 import { atomicWrite, privateDirectory, sha256 } from "./util.js";
+import { pinSharedBlobs } from "./shared-blobs.js";
 
 export const maxImageBytes = 5_000_000;
 export const maxImageSide = 2048;
@@ -288,6 +289,7 @@ export async function saveImage(
   const directory = join(paths.home, "images");
   await privateDirectory(directory);
   const target = join(directory, `${digest}.img`);
+  await pinSharedBlobs(paths, [`images/${digest}.img`]);
   const existing = await lstat(target).catch(() => undefined);
   if (!existing) await atomicWrite(target, bytes);
   else {
@@ -425,6 +427,7 @@ export async function loadStoredImage(
   )
     throw new AgentError("IMAGE_STORAGE", "Image storage is unavailable");
   const path = join(directory, `${ref.sha256}.img`);
+  await pinSharedBlobs(paths, [`images/${ref.sha256}.img`]);
   const pathStat = await lstat(path).catch(() => undefined);
   if (
     !pathStat?.isFile() ||

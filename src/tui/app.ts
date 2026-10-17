@@ -911,6 +911,16 @@ export class TerminalApp {
         }
         break;
       }
+      case "cache-cleanup":
+        await new HistoryBrowser(app, {
+          choose: this.choose.bind(this),
+          show: this.show.bind(this),
+          confirm: this.confirm.bind(this),
+          notice: (text) => {
+            this.notice = text;
+          },
+        }).cacheCleanup();
+        break;
       case "search": {
         const text =
           argument ||

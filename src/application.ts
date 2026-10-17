@@ -22,6 +22,13 @@ import {
   type DeletionCleanupPreview,
 } from "./history-deletion.js";
 import {
+  previewCacheCleanup,
+  confirmCacheCleanup,
+  pendingCacheCleanups,
+  retryCacheCleanup,
+  type CacheCleanupPreview,
+} from "./cache-cleanup.js";
+import {
   configHash,
   loadConfig,
   validateConfig,
@@ -301,6 +308,7 @@ export class Application extends EventEmitter {
     DeletionCleanupPreview,
     string
   >();
+  private readonly cachePreviews = new WeakMap<CacheCleanupPreview, string>();
   private accessOverride?: RequestAccess;
   constructor(
     public config: Config,
@@ -3451,6 +3459,35 @@ export class Application extends EventEmitter {
         signal,
         beforeCleanup: guard,
       }),
+    );
+  }
+  async previewCacheCleanup(paths: string[] = []) {
+    this.idle();
+    const binding = this.maintenanceBinding();
+    const preview = await previewCacheCleanup(this.store, this.config, {
+      kind: paths.length ? "selection" : "eligible",
+      paths,
+    });
+    this.cachePreviews.set(preview, binding);
+    return preview;
+  }
+  async confirmCacheCleanup(preview: CacheCleanupPreview) {
+    this.idle();
+    const binding = this.cachePreviews.get(preview);
+    this.cachePreviews.delete(preview);
+    this.assertMaintenanceView(binding);
+    return this.historyOperation((signal) =>
+      confirmCacheCleanup(this.store, this.config, preview, signal),
+    );
+  }
+  async pendingCacheCleanups() {
+    this.idle();
+    return pendingCacheCleanups(this.paths);
+  }
+  async retryCacheCleanup(id: string) {
+    this.idle();
+    return this.historyOperation((signal) =>
+      retryCacheCleanup(this.store, this.config, id, signal),
     );
   }
   async doctor() {

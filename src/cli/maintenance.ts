@@ -11,11 +11,85 @@ import {
   previewHistoryDeletion,
   retryDeletionCleanup,
 } from "../history-deletion.js";
+import {
+  confirmCacheCleanup,
+  pendingCacheCleanups,
+  previewCacheCleanup,
+  retryCacheCleanup,
+} from "../cache-cleanup.js";
 
 const deletionWarning =
   "メタデータを先に削除する限定的な処理です。共有画像・文書・checkpoint は残り、SQLite の残存ページや外部バックアップにも内容が残る場合があります。物理削除は保留になることがあり、自動再試行や暗号学的消去は行いません。";
 export function registerMaintenanceCommands(cli: CliContext): void {
   const { program, print, context, signal } = cli;
+  program
+    .command("prune-cache [paths...]")
+    .description(
+      "Preview shared cache cleanup; --write explicitly removes selected blobs",
+    )
+    .option("--write", "explicitly confirm cleanup")
+    .action((paths: string[], options) =>
+      context(async (config, _p, store) => {
+        const preview = await previewCacheCleanup(store, config, {
+          kind: paths.length ? "selection" : "eligible",
+          paths,
+        });
+        if (!options.write) {
+          print({
+            ...preview,
+            written: false,
+            warning:
+              "24時間未満・参照中・稼働中プロセスの保持物は削除しません。暗号学的消去は保証しません。",
+          });
+          return;
+        }
+        const result = await confirmCacheCleanup(
+          store,
+          config,
+          preview,
+          signal,
+        );
+        print({
+          written: true,
+          ...result,
+          cleanupComplete: result.pending.length === 0,
+          warning:
+            "バックアップ・共有キャッシュ・SQLite残存ページは対象外です。",
+        });
+      }),
+    );
+  program
+    .command("cleanup-cache [job-id]")
+    .description("List or explicitly retry one shared cache cleanup job")
+    .option("--write", "retry the selected job")
+    .action((jobId: string | undefined, options) =>
+      context(async (config, _p, store) => {
+        if (!jobId) {
+          print({
+            written: false,
+            jobs: await pendingCacheCleanups(store.paths),
+          });
+          return;
+        }
+        if (!options.write) {
+          print({
+            written: false,
+            preview: await previewCacheCleanup(store, config, {
+              kind: "selection",
+              paths:
+                (await pendingCacheCleanups(store.paths)).find(
+                  (job) => job.id === jobId,
+                )?.paths ?? [],
+            }),
+          });
+          return;
+        }
+        print({
+          written: true,
+          ...(await retryCacheCleanup(store, config, jobId, signal)),
+        });
+      }),
+    );
   program
     .command("backup <directory>")
     .description(

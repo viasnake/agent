@@ -37,6 +37,7 @@ import {
   safePath,
   sha256,
 } from "./util.js";
+import { pinSharedBlobs } from "./shared-blobs.js";
 import {
   inventory,
   readSnapshot,
@@ -332,6 +333,7 @@ export async function verifyBoundaryState(
           privateStorage: true,
         },
       );
+      await pinSharedBlobs(paths, [`checkpoints/blobs/${entry.hash}`]);
       seen.set(entry.hash, entry.bytes);
     }
   }
@@ -472,6 +474,7 @@ async function tree(
         expectedSha256: entry.hash,
       });
       const blob = join(paths.checkpoints, "blobs", entry.hash);
+      await pinSharedBlobs(paths, [`checkpoints/blobs/${entry.hash}`]);
       try {
         const existing = await readBoundedFile(blob, entry.bytes, {
           expectedBytes: entry.bytes,

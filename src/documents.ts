@@ -17,6 +17,7 @@ import { extractOffice } from "./office.js";
 import type { Sandbox } from "./sandbox.js";
 import { extractPdf } from "./pdf.js";
 import type { DataClass, ImageReference } from "./types.js";
+import { pinSharedBlobs } from "./shared-blobs.js";
 
 export const maxDocumentBytes = 20_000_000;
 export const maxZipEntries = 2_000;
@@ -203,6 +204,10 @@ export async function prepareDocument(
     );
   await privateDirectory(paths.attachments);
   const blob = join(paths.attachments, `${rawSha256}.raw`);
+  await pinSharedBlobs(paths, [
+    `attachments/${rawSha256}.raw`,
+    `attachments/doc-${sha256(`${rawSha256}\0${parsed.path}\0${JSON.stringify(parsed.selector)}\0${sha256(selected.text)}`)}.selected`,
+  ]);
   try {
     const existing = await lstat(blob);
     if (
@@ -301,6 +306,10 @@ export async function storePreparedText(
   await privateDirectory(paths.attachments);
   const rawPath = join(paths.attachments, `${rawSha256}.raw`),
     selectedPath = join(paths.attachments, `${reference.id}.selected`);
+  await pinSharedBlobs(paths, [
+    `attachments/${rawSha256}.raw`,
+    `attachments/${reference.id}.selected`,
+  ]);
   for (const [path, bytes] of [
     [rawPath, raw],
     [selectedPath, Buffer.from(text)],
@@ -371,6 +380,10 @@ export async function loadPreparedInput(
     );
   const rawPath = join(paths.attachments, `${reference.rawSha256}.raw`);
   const selectedPath = join(paths.attachments, `${reference.id}.selected`);
+  await pinSharedBlobs(paths, [
+    `attachments/${reference.rawSha256}.raw`,
+    `attachments/${reference.id}.selected`,
+  ]);
   await readBoundedFile(rawPath, maxDocumentBytes, {
     expectedBytes: reference.rawBytes,
     expectedSha256: reference.rawSha256,

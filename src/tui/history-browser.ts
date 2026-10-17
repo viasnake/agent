@@ -286,4 +286,43 @@ export class HistoryBrowser {
       return;
     }
   }
+
+  async cacheCleanup(): Promise<void> {
+    const sessionId = this.app.session.id;
+    this.current(sessionId);
+    const preview = await this.app.previewCacheCleanup();
+    const text = [
+      "## 共有キャッシュ削除候補（まだ削除していません）",
+      `対象: ${preview.selected.length} 件、超過候補: ${preview.moreCandidates} 件`,
+      ...preview.selected.map(
+        (item) => `${literal(item.path)} (${item.bytes} bytes)`,
+      ),
+      ...preview.retained.map(
+        (item) => `保持: ${literal(item.path)}\n理由: ${safeText(item.reason)}`,
+      ),
+      "24時間未満、参照中、稼働プロセスの pin は保持します。バックアップ・SQLite残存ページ・外部コピーの暗号学的消去は保証しません。",
+    ].join("\n\n");
+    if (
+      !(await this.dialogs.show(
+        text,
+        "共有キャッシュ · 候補",
+        "最終確認へ進む",
+      ))
+    )
+      return;
+    this.current(sessionId);
+    if (
+      !(await this.dialogs.confirm(
+        "表示された共有キャッシュを明示的に削除しますか？",
+      ))
+    )
+      return;
+    this.current(sessionId);
+    const result = await this.app.confirmCacheCleanup(preview);
+    this.dialogs.notice(
+      result.pending.length
+        ? `共有キャッシュの一部を保留しました。${result.pending.map((job) => job.id).join(", ")}`
+        : "共有キャッシュの削除が完了しました。暗号学的消去は保証しません。",
+    );
+  }
 }
