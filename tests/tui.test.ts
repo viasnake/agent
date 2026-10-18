@@ -8,7 +8,13 @@ import { fixture, ScriptedRuntime, gitWorkspace } from "./helpers.js";
 import { Sandbox } from "../src/sandbox.js";
 import { runProcess, cleanEnvironment } from "../src/process.js";
 
-for (const scenario of ["conversation", "coding", "tmux", "exception"]) {
+for (const scenario of [
+  "conversation",
+  "coding",
+  "tmux",
+  "exception",
+  "editor",
+]) {
   test(
     `real PTY: ${scenario}, resize, input, terminal restoration`,
     { skip: process.platform !== "linux", timeout: 40000 },

@@ -1752,6 +1752,7 @@ export class TerminalApp {
         this.tui.start();
         this.tui.invalidate();
         this.render();
+        this.tui.requestRender(true);
       }
     }
   }

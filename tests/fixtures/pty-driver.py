@@ -197,6 +197,17 @@ try:
         read_for(.8)
         send("/quit\r")
         proc.wait(timeout=10)
+    elif scenario == "editor":
+        editor = os.path.abspath(os.path.join(os.path.dirname(__file__), "editor.py"))
+        send("/editor-config " + json.dumps(["python3", editor]) + "\r")
+        wait_for("このエディタをホスト上で起動する設定を保存しますか")
+        send("\r")
+        wait_for("表示した内容で実行しますか")
+        send("\x1b[B\r")
+        wait_for("エディタ設定を保存しました")
+        mark = len(output)
+        send("/editor\r")
+        wait_for("editor-return-marker", timeout=5, after=mark)
     elif scenario == "exception":
         # An explicitly injected process exception checks the shared restoration path.
         proc.send_signal(signal.SIGUSR2)
