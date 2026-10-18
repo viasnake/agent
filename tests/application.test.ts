@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   Application,
+  inferAccess,
   inferKind,
   fileReferences,
   type AppEvent,
@@ -22,6 +23,8 @@ import {
 import { safeText, markdown } from "../src/tui/components.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { PiRuntime } from "../src/runtime/pi.js";
+import type { Runtime } from "../src/types.js";
+import { readSnapshot } from "../src/workspace.js";
 
 const until = async (condition: () => boolean) => {
   const deadline = Date.now() + 5000;
@@ -50,6 +53,413 @@ test("simple conversation uses one model without planning, shell or document req
       app.conversations.messages(app.session.id).at(-1)?.text,
       "こんにちは。",
     );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("collaborative chat stores only the synthesis response and retains intermediate reports", async () => {
+  let calls = 0;
+  const runtime = new ScriptedRuntime(async () =>
+    completed(
+      [],
+      ["producer claim", "review finding", "統合した最終回答"][calls++]!,
+    ),
+  );
+  const f = await fixture(runtime);
+  f.config.models.hiddenReviewer = {
+    ...f.config.models.reviewer!,
+    id: "reviewer-without-tools",
+    tools: false,
+    priority: 100,
+  };
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  try {
+    await app.initialize();
+    app.session.kind = "chat";
+    app.session.strategy = "reviewed";
+    await app.submit("この会話について返答してください");
+    await app.waitForIdle();
+    const run = app.currentRun()!;
+    assert.equal(run.state, "succeeded", run.reason);
+    assert.equal(runtime.requests[1]?.model, "reviewer");
+    assert.equal(
+      app.conversations.messages(app.session.id).at(-1)?.text,
+      "統合した最終回答",
+    );
+    assert.equal(run.tasks[0]?.result?.summary, "producer claim");
+    assert.equal(run.tasks[1]?.result?.summary, "review finding");
+    assert.equal(
+      run.tasks.filter((task) => task.attemptReportIds?.length).length,
+      3,
+    );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("collaborative chat attachment previews expose every required role", async () => {
+  const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => new ScriptedRuntime(async () => "unused"),
+  );
+  try {
+    await app.initialize();
+    await writeFile(join(f.root, "facts.txt"), "local evidence");
+    for (const strategy of ["assisted", "reviewed"] as const) {
+      app.session.kind = "chat";
+      app.session.strategy = strategy;
+      const preview = await app.previewInput("@facts.txt");
+      assert.ok(
+        preview.destinations.some((value) => value.startsWith("worker —")),
+      );
+      assert.ok(
+        preview.destinations.some((value) => value.startsWith("reviewer —")),
+      );
+    }
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("repository exploration stays read-only across planning and coding-copy transitions", async (t) => {
+  const runtime = new ScriptedRuntime(async (request, index) => {
+    if (request.tools.some((tool) => tool.name === "write_file")) {
+      await call(request, "write_file", {
+        path: "draft.md",
+        content: "pending coding copy",
+        expectedSha256: null,
+      });
+      return completed(["draft.md"]);
+    }
+    assert.ok(request.tools.some((tool) => tool.name === "read_file"));
+    assert.ok(!request.tools.some((tool) => tool.name === "write_file"));
+    await assert.rejects(
+      call(request, "write_file", {
+        path: "forbidden.md",
+        content: "must not be written",
+        expectedSha256: null,
+      }),
+      /Tool unavailable/,
+    );
+    if (index === 0 || index === 1)
+      assert.match(
+        await call(request, "read_file", { path: "README.md" }),
+        /original workspace/,
+      );
+    if (index === 3)
+      assert.match(
+        await call(request, "read_file", { path: "draft.md" }),
+        /pending coding copy/,
+      );
+    return "read-only findings";
+  });
+  const f = await fixture(runtime);
+  let probes = 0,
+    checks = 0;
+  t.mock.method(Sandbox.prototype, "probe", async () => {
+    probes++;
+    return { ok: true, detail: "unit fixture" };
+  });
+  t.mock.method(Sandbox.prototype, "execute", async () => {
+    checks++;
+    return { code: 0, stdout: "", stderr: "", truncated: false };
+  });
+  f.config.checks = {
+    test: { command: "true", protectedPaths: [] },
+  };
+  const origin = await gitWorkspace(f.root, {
+    "README.md": "original workspace\n",
+  });
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    origin,
+    async () => runtime,
+  );
+  try {
+    await app.initialize();
+    app.addPin("Keep the public API stable.");
+    app.addConstraint("Never modify the original workspace.");
+    await app.submit("Explain this repository");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.access, "read-only");
+
+    await app.submit("Review the plan; まだ変更しない");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.kind, "chat");
+    assert.equal(app.currentRun()?.access, "read-only");
+
+    await app.submit("実装して add feature");
+    await app.waitForIdle();
+    const codingRun = app.currentRun()!;
+    assert.equal(codingRun.kind, "coding");
+    assert.equal(codingRun.access, "change");
+    assert.equal(
+      await readFile(join(origin, "draft.md")).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+
+    const probesBeforeReview = probes,
+      checksBeforeReview = checks;
+    await app.submit("Explain this bug");
+    await app.waitForIdle();
+    const explanationRun = app.currentRun()!;
+    assert.equal(explanationRun.kind, "coding");
+    assert.equal(explanationRun.access, "read-only");
+    assert.equal(explanationRun.state, "succeeded", explanationRun.reason);
+    assert.match(
+      runtime.requests[3]!.system,
+      /Answer the user in their language/,
+    );
+    assert.doesNotMatch(runtime.requests[3]!.system, /result JSON/i);
+    assert.equal(app.session.workRunId, codingRun.id);
+    assert.equal(probes, probesBeforeReview);
+    assert.equal(checks, checksBeforeReview);
+    assert.equal(
+      await readFile(
+        join(f.store.runDir(codingRun.id), "work", "draft.md"),
+        "utf8",
+      ),
+      "pending coding copy",
+    );
+
+    await app.submit("まだ変更しないで説明して");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.kind, "chat");
+    assert.equal(app.currentRun()?.access, "read-only");
+    assert.equal(app.session.workRunId, codingRun.id);
+    assert.deepEqual(
+      runtime.requests.map((request) => request.tools.length > 0),
+      [true, true, true, true, true],
+    );
+    for (const request of runtime.requests) {
+      assert.deepEqual(request.constraints, [
+        "Never modify the original workspace.",
+      ]);
+      assert.match(request.objective, /Keep the public API stable/);
+    }
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("explicit no-change prohibitions take precedence over change verbs", () => {
+  assert.equal(inferKind("まだ変更しないが、修正案を説明して"), "chat");
+  assert.equal(inferAccess("Explain how to fix this bug"), "read-only");
+  assert.equal(inferAccess("Review this change"), "read-only");
+  assert.equal(
+    inferAccess("do not modify files; explain how to implement it"),
+    "read-only",
+  );
+  assert.equal(
+    inferAccess("コードを変更しないで修正案を説明して"),
+    "read-only",
+  );
+  assert.equal(inferAccess("fix this bug"), "change");
+  assert.equal(inferAccess("実装して"), "change");
+  assert.equal(inferAccess("ambiguous follow-up"), "read-only");
+});
+
+test("access overrides are one-turn and cannot override explicit prohibitions", async (t) => {
+  const runtime = new ScriptedRuntime(async (request) => {
+    if (request.access === "change") {
+      await call(request, "write_file", {
+        path: "change.txt",
+        content: "changed",
+        expectedSha256: null,
+      });
+      return completed();
+    }
+    assert.ok(!request.tools.some((tool) => tool.name === "write_file"));
+    return "read-only answer";
+  });
+  const f = await fixture(runtime),
+    origin = await gitWorkspace(f.root, { "README.md": "baseline\n" }),
+    app = new Application(f.config, f.p, f.store, origin, async () => runtime);
+  t.mock.method(Sandbox.prototype, "probe", async () => ({
+    ok: true,
+    detail: "unit fixture",
+  }));
+  t.mock.method(Sandbox.prototype, "execute", async () => ({
+    code: 0,
+    stdout: "",
+    stderr: "",
+    truncated: false,
+  }));
+  f.config.checks = { test: { command: "true", protectedPaths: [] } };
+  try {
+    await app.initialize();
+    app.session.kind = "coding";
+    app.session.checks = ["test"];
+    app.setAccessOverride("change");
+    const preview = await app.previewInput("ambiguous follow-up");
+    assert.equal(preview.access, "change");
+    assert.equal(preview.accessOverride, "change");
+    await app.submit("ambiguous follow-up", "instruction", preview);
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.access, "change");
+    assert.equal(
+      app.currentRun()?.state,
+      "succeeded",
+      app.currentRun()?.reason,
+    );
+    assert.equal(app.session.access, "read-only");
+    const nextPreview = await app.previewInput("ambiguous follow-up");
+    assert.equal(nextPreview.accessOverride, undefined);
+    assert.equal(nextPreview.access, "read-only");
+
+    app.setAccessOverride("change");
+    const stalePreview = await app.previewInput("ambiguous follow-up");
+    app.setAccessOverride("read-only");
+    await assert.rejects(
+      () => app.submit("ambiguous follow-up", "instruction", stalePreview),
+      { code: "IMAGE_PREVIEW_STALE" },
+    );
+    assert.equal(app.session.queue.length, 0);
+
+    app.session.kind = "chat";
+    app.setAccessOverride("change");
+    const prohibited = await app.previewInput(
+      "do not modify files; explain how to implement it",
+    );
+    assert.equal(prohibited.accessOverride, "change");
+    assert.equal(prohibited.access, "read-only");
+    await app.submit(
+      "do not modify files; explain how to implement it",
+      "instruction",
+      prohibited,
+    );
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.access, "read-only");
+    assert.equal(app.currentRun()?.state, "succeeded");
+    assert.equal(runtime.requests.at(-1)?.access, "read-only");
+    assert.equal(app.session.access, "read-only");
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("user context notes and constraints survive a conversation restart without changing privacy policy", async () => {
+  const runtime = new ScriptedRuntime(async () => "unused");
+  const f = await fixture(runtime);
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  let reopened: Application | undefined;
+  try {
+    await app.initialize();
+    const sessionId = app.session.id;
+    const policy = {
+      dataClass: app.session.dataClass,
+      localOnly: app.session.localOnly,
+    };
+    app.addPin("Keep the original API stable.");
+    app.addContextNote("decision", "Use the local database.");
+    app.addContextNote("question", "Which platforms need support?");
+    app.addConstraint("Do not change the public endpoint.");
+    await app.close();
+
+    reopened = new Application(
+      f.config,
+      f.p,
+      f.store,
+      f.root,
+      async () => runtime,
+    );
+    await reopened.initialize();
+    reopened.openSession(sessionId);
+    assert.equal(reopened.pins()[0]?.text, "Keep the original API stable.");
+    const context = reopened.session.context!;
+    assert.equal(context.pins[0]?.author, "user");
+    assert.equal(context.pins[0]?.trusted, true);
+    assert.equal(context.decisions[0]?.text, "Use the local database.");
+    assert.equal(
+      context.openQuestions[0]?.text,
+      "Which platforms need support?",
+    );
+    assert.deepEqual(context.constraints, [
+      "Do not change the public endpoint.",
+    ]);
+    assert.deepEqual(
+      {
+        dataClass: reopened.session.dataClass,
+        localOnly: reopened.session.localOnly,
+      },
+      policy,
+    );
+  } finally {
+    if (reopened) await reopened.close();
+    else await app.close();
+    await f.cleanup();
+  }
+});
+
+test("status keeps context estimates separate from unknown provider usage", async () => {
+  const runtime: Runtime = {
+    contract: new ScriptedRuntime(async () => "unused").contract,
+    async run(request) {
+      request.signal.throwIfAborted();
+      const reservation = request.beforeRequest(
+        Buffer.byteLength(request.objective),
+      );
+      request.afterRequest(reservation, {
+        input: null,
+        output: null,
+        costUsd: null,
+      });
+      return "answer";
+    },
+    async close() {},
+  };
+  const f = await fixture(runtime);
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  try {
+    await app.initialize();
+    await app.submit("Give a short answer");
+    await app.waitForIdle();
+    const view = app.view();
+    assert.ok(view.context);
+    assert.ok(view.context.bytes > 0);
+    assert.equal(view.usage?.input, null);
+    assert.equal(view.usage?.output, null);
+    assert.equal(view.usage?.usageComplete, false);
+    const connectionUsage = f.store.usageByConnection(app.currentRun()!.id)[0]!;
+    assert.equal(connectionUsage.inputTokens, null);
+    assert.equal(connectionUsage.outputTokens, null);
+    assert.equal(connectionUsage.usageComplete, false);
+    const report = app.session.context?.workingState.history.at(-1)?.results[0];
+    assert.equal(report?.author, "model");
+    assert.equal(report?.trusted, false);
   } finally {
     await app.close();
     await f.cleanup();
@@ -354,27 +764,109 @@ test("referenced inputs are bounded and secret and traversal paths are rejected 
   }
 });
 
-test("compaction creates a deterministic handoff without extra inference or deleting history", async () => {
-  const runtime = new ScriptedRuntime(async () => "回答"),
-    f = await fixture(runtime),
+test("source artifacts remain readable across linked conversation kinds", async () => {
+  let sourceId: string | undefined;
+  const runtime = new ScriptedRuntime(async (request) => {
+    if (request.objective.includes("read the cited source")) {
+      const readSource = request.tools.find(
+        (tool) => tool.name === "read_source",
+      );
+      assert.ok(readSource);
+      assert.match(
+        await readSource.execute(
+          { id: sourceId!, startLine: 1, lines: 10 },
+          request.signal,
+        ),
+        /note\.md/,
+      );
+      return "The linked source contains the requested note.";
+    }
+    return "Source received.";
+  });
+  const f = await fixture(runtime),
     app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
   try {
+    await writeFile(join(f.root, "note.md"), "cross-kind source\n");
     await app.initialize();
-    await app.submit("質問");
+    app.session.kind = "research";
+    await app.submit('Research @"note.md"');
+    await app.waitForIdle();
+    const source = f.store
+      .artifacts(app.currentRun()!.id)
+      .find((artifact) => artifact.kind === "source");
+    assert.ok(source);
+    sourceId = source.id;
+
+    app.session.kind = "chat";
+    await app.submit("read the cited source");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.state, "succeeded");
+    assert.ok(
+      runtime.requests
+        .at(-1)
+        ?.tools.some((tool) => tool.name === "read_source"),
+    );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("compaction creates a deterministic handoff without extra inference or deleting history", async () => {
+  const runtime = new ScriptedRuntime(async () => "回答"),
+    f = await fixture(runtime);
+  f.config.models.worker!.contextWindow = 8192;
+  f.config.models.worker!.maxOutputTokens = 512;
+  f.config.models.reviewer!.contextWindow = 512;
+  f.config.models.reviewer!.maxOutputTokens = 128;
+  f.config.models = {
+    reviewer: f.config.models.reviewer!,
+    worker: f.config.models.worker!,
+  };
+  const app = new Application(
+    f.config,
+    f.p,
+    f.store,
+    f.root,
+    async () => runtime,
+  );
+  try {
+    await app.initialize();
+    await app.submit("質問".repeat(1200));
     await app.waitForIdle();
     const runId = app.currentRun()!.id;
     await app.compact();
     assert.equal(runtime.requests.length, 1);
     assert.equal(app.session.compacted, true);
+    const handoff = app.session.handoff;
+    const archiveDirectory = join(
+      f.p.home,
+      "conversations",
+      app.session.id,
+      "archives",
+    );
+    const archives = await readdir(archiveDirectory);
+    await app.compact();
+    assert.equal(app.session.handoff, handoff);
+    assert.deepEqual(await readdir(archiveDirectory), archives);
     assert.equal(
       JSON.parse(
         await readFile(join(f.store.runDir(runId), "handoff.json"), "utf8"),
       ).state,
       "succeeded",
     );
+    await writeFile(
+      join(f.store.runDir(runId), "handoff.json"),
+      JSON.stringify({ state: "succeeded", objective: "legacy handoff" }),
+      { mode: 0o600 },
+    );
+    app.session.handoff = undefined;
+    app.session.contextRunId = undefined;
+    app.save();
     await app.submit("続けて質問");
     await app.waitForIdle();
     assert.ok(app.currentRun()?.context);
+    assert.match(runtime.requests[1]!.objective, /legacy handoff/);
     assert.equal(app.conversations.messages(app.session.id).length, 4);
   } finally {
     await app.close();
@@ -399,7 +891,7 @@ test("version-one database migration preserves runs and writes a consistent back
           user_version: number;
         }
       ).user_version,
-      2,
+      4,
     );
     assert.ok(
       (await readdir(f.p.home)).some(
@@ -524,7 +1016,10 @@ test("research sources and documents survive a writing follow-up with stable cit
   try {
     await writeFile(join(f.root, "note.md"), "原文");
     await app.initialize();
-    await app.submit("調査してください @note.md");
+    const input = "調査してください @note.md",
+      preview = await app.previewInput(input);
+    await unlink(join(f.root, "note.md"));
+    await app.submit(input, "next", preview);
     await app.waitForIdle();
     assert.equal(
       app.currentRun()?.state,
@@ -551,6 +1046,275 @@ test("research sources and documents survive a writing follow-up with stable cit
   }
 });
 
+test("attachment count and raw-byte budgets reject before creating prepared blobs", async () => {
+  const runtime = new ScriptedRuntime(async () => "unused"),
+    f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  try {
+    await app.initialize();
+    const names = Array.from({ length: 9 }, (_, index) => `small-${index}.txt`);
+    for (const name of names) await writeFile(join(f.root, name), "text");
+    await assert.rejects(
+      app.previewInput(names.map((name) => `@${name}`).join(" ")),
+      { code: "INPUT_SIZE" },
+    );
+
+    const largeNames = ["large-a.txt", "large-b.txt"];
+    for (const name of largeNames)
+      await writeFile(join(f.root, name), Buffer.alloc(10_000_001, "x"));
+    await assert.rejects(
+      app.previewInput(largeNames.map((name) => `@${name}`).join(" ")),
+      { code: "INPUT_SIZE" },
+    );
+    await assert.rejects(readdir(f.p.attachments), { code: "ENOENT" });
+    assert.equal(runtime.requests.length, 0);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("redacted conversations do not inherit prior Git sources", async () => {
+  const runtime = new ScriptedRuntime(async (request) => {
+    const readSource = request.tools.find(
+      (tool) => tool.name === "read_source",
+    );
+    assert.ok(readSource);
+    await assert.rejects(
+      readSource.execute(
+        { id: gitSourceId!, startLine: 1, lines: 10 },
+        request.signal,
+      ),
+      { code: "SOURCE" },
+    );
+    assert.match(
+      await readSource.execute(
+        { id: allowedSourceId!, startLine: 1, lines: 10 },
+        request.signal,
+      ),
+      /authorized source/,
+    );
+    return "Previous non-Git evidence remains available only when authorized.";
+  });
+  const f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  let gitSourceId: string | undefined, allowedSourceId: string | undefined;
+  try {
+    const gitBytes = Buffer.from("selected Git source\n"),
+      origin = await gitWorkspace(f.root, {
+        "inputs/git.patch": gitBytes.toString(),
+        "aliases/git-copy.patch": gitBytes.toString(),
+        "README.md": "safe source\n",
+      }),
+      sourceRun = await f.harness.create({
+        kind: "chat",
+        objective: "own Git source",
+      });
+    const owned = f.store.claim(sourceRun.id, true, true);
+    const source = await f.store.artifact(
+      owned,
+      "git.patch",
+      "source",
+      gitBytes,
+      { format: "git", locator: "working diff" },
+    );
+    const allowedSource = await f.store.artifact(
+      owned,
+      "note.txt",
+      "source",
+      Buffer.from("authorized source\n"),
+      { format: "text", locator: "line 1" },
+    );
+    f.store.release(owned);
+    gitSourceId = source.id;
+    allowedSourceId = allowedSource.id;
+    await app.initialize();
+    app.session.workspace = origin;
+    app.conversations.link(app.session, sourceRun);
+    const context = (app.session.context ??= {
+      pins: [],
+      decisions: [],
+      openQuestions: [],
+      constraints: [],
+      instructions: [],
+      sourceIds: [],
+      imageIds: [],
+      originalRunIds: [],
+      compactions: [],
+      workingState: {
+        checks: [],
+        hashes: {},
+        artifacts: [],
+        operations: [],
+        history: [],
+      },
+    });
+    context.sourceIds = [source.id, allowedSource.id];
+    context.redactedImageIds = [`img-${"a".repeat(64)}`];
+    context.workingState.artifacts = [source.id, allowedSource.id];
+    context.workingState.hashes = {
+      "git.patch": source.sha256,
+      "note.txt": allowedSource.sha256,
+    };
+    context.workingState.history = [
+      {
+        runId: sourceRun.id,
+        status: "succeeded",
+        checks: [],
+        hashes: {
+          "git.patch": source.sha256,
+          "note.txt": allowedSource.sha256,
+        },
+        artifacts: [source.id, allowedSource.id],
+        operations: [],
+        results: [],
+      },
+    ];
+    app.save();
+
+    await app.submit("Explain the earlier evidence");
+    await app.waitForIdle();
+    const run = app.currentRun()!;
+    assert.equal(run.state, "succeeded", run.reason);
+    assert.ok(!run.contextState?.sourceIds.includes(source.id));
+    assert.ok(!run.contextState?.workingState.artifacts.includes(source.id));
+    assert.ok(
+      !run.contextState?.workingState.history[0]?.artifacts.includes(source.id),
+    );
+    assert.equal(run.contextState?.workingState.hashes["git.patch"], undefined);
+    assert.ok(
+      !f.store
+        .artifacts(run.id)
+        .some(
+          (artifact) =>
+            artifact.kind === "source" && artifact.metadata.format === "git",
+        ),
+    );
+    assert.ok(
+      f.store
+        .artifacts(run.id)
+        .some((artifact) => artifact.id === allowedSource.id),
+    );
+    const snapshot = await readSnapshot(f.store.runDir(run.id));
+    assert.ok(snapshot.redactedPaths?.includes("inputs/git.patch"));
+    assert.ok(snapshot.redactedPaths?.includes("aliases/git-copy.patch"));
+    await assert.rejects(
+      readFile(join(f.store.runDir(run.id), "work", "inputs", "git.patch")),
+      { code: "ENOENT" },
+    );
+    assert.equal(
+      await readFile(
+        join(f.store.runDir(run.id), "baseline", "inputs", "git.patch"),
+        "utf8",
+      ),
+      gitBytes.toString(),
+    );
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("restricted historical Git bytes are projected from work without granting source access", async () => {
+  let gitSourceId: string | undefined;
+  const runtime = new ScriptedRuntime(async (request) => {
+    const readSource = request.tools.find(
+      (tool) => tool.name === "read_source",
+    );
+    assert.ok(readSource);
+    await assert.rejects(
+      readSource.execute(
+        { id: gitSourceId!, startLine: 1, lines: 10 },
+        request.signal,
+      ),
+      { code: "SOURCE" },
+    );
+    return "The redacted working copy is safe to inspect.";
+  });
+  const f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  try {
+    const gitBytes = Buffer.from("restricted Git source bytes\n"),
+      origin = await gitWorkspace(f.root, {
+        "inputs/git.patch": gitBytes.toString(),
+        "aliases/git-copy.patch": gitBytes.toString(),
+        "README.md": "safe source\n",
+      }),
+      sourceRun = await f.harness.create({
+        kind: "chat",
+        objective: "restricted historical Git source",
+        dataClass: "restricted",
+      });
+    const owned = f.store.claim(sourceRun.id, true, true);
+    const source = await f.store.artifact(
+      owned,
+      "git.patch",
+      "source",
+      gitBytes,
+      {
+        format: "git",
+        locator: "working diff",
+      },
+    );
+    gitSourceId = source.id;
+    f.store.release(owned);
+    await app.initialize();
+    app.session.workspace = origin;
+    app.conversations.link(app.session, sourceRun);
+    app.session.context = {
+      pins: [],
+      decisions: [],
+      openQuestions: [],
+      constraints: [],
+      instructions: [],
+      sourceIds: [],
+      imageIds: [],
+      redactedImageIds: [`img-${"a".repeat(64)}`],
+      originalRunIds: [],
+      compactions: [],
+      workingState: {
+        checks: [],
+        hashes: {},
+        artifacts: [],
+        operations: [],
+        history: [],
+      },
+    };
+    app.save();
+    await app.submit("Explain this repository");
+    await app.waitForIdle();
+    const run = app.currentRun()!;
+    assert.equal(run.state, "succeeded", run.reason);
+    assert.ok(
+      !f.store
+        .artifacts(run.id)
+        .some((artifact) => artifact.metadata.format === "git"),
+    );
+    const snapshot = await readSnapshot(f.store.runDir(run.id));
+    assert.ok(snapshot.redactedPaths?.includes("inputs/git.patch"));
+    assert.ok(snapshot.redactedPaths?.includes("aliases/git-copy.patch"));
+    await assert.rejects(
+      readFile(join(f.store.runDir(run.id), "work", "inputs", "git.patch")),
+      { code: "ENOENT" },
+    );
+    assert.equal(
+      await readFile(
+        join(f.store.runDir(run.id), "baseline", "inputs", "git.patch"),
+        "utf8",
+      ),
+      gitBytes.toString(),
+    );
+    assert.equal(
+      await readFile(join(origin, "inputs", "git.patch"), "utf8"),
+      gitBytes.toString(),
+    );
+    assert.equal(runtime.requests.length, 1);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
 test("a waiting provider run resumes explicitly with the same request budget", async () => {
   const { AgentError } = await import("../src/types.js");
   const runtime = new ScriptedRuntime(async (_request, index) => {
@@ -570,6 +1334,47 @@ test("a waiting provider run resumes explicitly with the same request budget", a
     assert.equal(app.currentRun()?.id, first.id);
     assert.equal(app.currentRun()?.state, "succeeded");
     assert.equal(f.store.usage(first.id).requests, 2);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test("resume rejects a conversation redaction set that differs from the run", async () => {
+  const { AgentError } = await import("../src/types.js");
+  const runtime = new ScriptedRuntime(async () => {
+    throw new AgentError("PROVIDER", "offline");
+  });
+  const f = await fixture(runtime),
+    app = new Application(f.config, f.p, f.store, f.root, async () => runtime);
+  try {
+    await app.initialize();
+    await app.submit("質問");
+    await app.waitForIdle();
+    assert.equal(app.currentRun()?.state, "waiting_input");
+    app.session.context ??= {
+      pins: [],
+      decisions: [],
+      openQuestions: [],
+      constraints: [],
+      instructions: [],
+      sourceIds: [],
+      imageIds: [],
+      redactedImageIds: [],
+      originalRunIds: [],
+      compactions: [],
+      workingState: {
+        checks: [],
+        hashes: {},
+        artifacts: [],
+        operations: [],
+        history: [],
+      },
+    };
+    app.session.context.redactedImageIds = [`img-${"b".repeat(64)}`];
+    app.save();
+    await assert.rejects(app.resume(), { code: "IMAGE_REDACTED" });
+    assert.equal(runtime.requests.length, 1);
   } finally {
     await app.close();
     await f.cleanup();
@@ -742,10 +1547,11 @@ test("real Pi SDK keeps worker and reviewer sessions and events distinct in one 
     await app.waitForIdle();
     const run = app.currentRun()!;
     assert.equal(run.state, "succeeded", run.reason);
-    assert.deepEqual(started, ["worker", "reviewer"]);
-    assert.equal(calls, 3);
+    assert.deepEqual(started, ["worker", "reviewer", "worker"]);
+    assert.equal(calls, 4);
     assert.notEqual(run.tasks[0]!.sessionFile, run.tasks[1]!.sessionFile);
-    assert.equal(f.store.usage(run.id).requests, 3);
+    assert.equal(run.tasks.at(-1)?.purpose, "synthesis");
+    assert.equal(f.store.usage(run.id).requests, 4);
   } finally {
     await app.close();
     await f.cleanup();

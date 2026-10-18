@@ -1,17 +1,24 @@
 import {
-  readdir,
   lstat,
   mkdir,
   readFile,
   chmod,
   rm,
   copyFile,
+  opendir,
 } from "node:fs/promises";
 import { join, dirname, relative, resolve } from "node:path";
 import { createTwoFilesPatch } from "diff";
 import { AgentError } from "./types.js";
 import type { Config } from "./config.js";
-import { atomicWrite, canonical, safePath, sha256, within } from "./util.js";
+import {
+  atomicWrite,
+  canonical,
+  readBoundedFile,
+  safePath,
+  sha256,
+  within,
+} from "./util.js";
 import { cleanEnvironment, runProcess } from "./process.js";
 
 export interface FileEntry {
@@ -25,6 +32,7 @@ export interface Snapshot {
   head?: string;
   includeUntracked: boolean;
   files: Record<string, FileEntry>;
+  redactedPaths?: string[];
 }
 export interface Change {
   path: string;
@@ -55,11 +63,24 @@ export function secretPath(path: string): boolean {
 export async function inventory(
   root: string,
   maxBytes: number,
+  bounds: { maxFiles?: number; deadline?: number } = {},
 ): Promise<Record<string, FileEntry>> {
   const files: Record<string, FileEntry> = {};
   let total = 0;
+  let visited = 0;
+  let count = 0;
   async function walk(directory: string): Promise<void> {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+    for await (const entry of await opendir(directory)) {
+      if (Date.now() > (bounds.deadline ?? Infinity))
+        throw new AgentError(
+          "WORKSPACE_TIMEOUT",
+          "Workspace inventory timed out",
+        );
+      if (++visited > (bounds.maxFiles ?? Infinity) * 2)
+        throw new AgentError(
+          "WORKSPACE_SIZE",
+          "Workspace has too many entries",
+        );
       const path = join(directory, entry.name),
         rel = relative(root, path);
       if (secretPath(rel))
@@ -79,6 +100,11 @@ export async function inventory(
         );
       if (stat.isDirectory()) await walk(path);
       else {
+        if (++count > (bounds.maxFiles ?? Infinity))
+          throw new AgentError(
+            "WORKSPACE_SIZE",
+            "Workspace has too many files",
+          );
         total += stat.size;
         if (total > maxBytes)
           throw new AgentError(
@@ -86,7 +112,9 @@ export async function inventory(
             "Workspace exceeds its configured byte limit",
           );
         files[rel] = {
-          hash: sha256(await readFile(path)),
+          hash: sha256(
+            await readBoundedFile(path, maxBytes, { expectedBytes: stat.size }),
+          ),
           mode: stat.mode & 0o777,
           bytes: stat.size,
         };
@@ -140,6 +168,7 @@ export async function snapshotWorkspace(
   includeUntracked: boolean,
   config: Config,
   extraPaths: string[] = [],
+  redactedHashes: string[] = [],
 ): Promise<Snapshot> {
   const base = join(runDir, "baseline"),
     work = join(runDir, "work");
@@ -150,6 +179,7 @@ export async function snapshotWorkspace(
     includeUntracked,
     files: {},
     ...(extraPaths.length ? { extraPaths } : {}),
+    redactedPaths: [],
   };
   let total = 0;
   if (origin) {
@@ -189,10 +219,14 @@ export async function snapshotWorkspace(
         mode: stat.mode & 0o777,
         bytes: content.length,
       };
-      for (const destination of [join(base, path), join(work, path)]) {
-        await atomicWrite(destination, content);
-        await chmod(destination, stat.mode & 0o777);
+      await atomicWrite(join(base, path), content);
+      await chmod(join(base, path), stat.mode & 0o777);
+      if (redactedHashes.includes(snapshot.files[path]!.hash)) {
+        snapshot.redactedPaths!.push(path);
+        continue;
       }
+      await atomicWrite(join(work, path), content);
+      await chmod(join(work, path), stat.mode & 0o777);
     }
   }
   await atomicWrite(
@@ -227,6 +261,32 @@ export async function continueWorkspace(
   );
   await atomicWrite(join(runDir, "snapshot.json"), JSON.stringify(snapshot));
 }
+export async function sanitizeWorkCopy(
+  runDir: string,
+  hashes: string[],
+  maxBytes: number,
+): Promise<void> {
+  const snapshot = await readSnapshot(runDir);
+  const work = join(runDir, "work"),
+    current = await inventory(work, maxBytes),
+    redacted = new Set(snapshot.redactedPaths ?? []);
+  for (const path of new Set([
+    ...Object.keys(snapshot.files),
+    ...Object.keys(current),
+  ])) {
+    const target = join(work, path);
+    if (redacted.has(path)) {
+      await rm(target, { recursive: true, force: true });
+      continue;
+    }
+    if (current[path] && hashes.includes(current[path]!.hash)) {
+      await rm(target);
+      redacted.add(path);
+    }
+  }
+  snapshot.redactedPaths = [...redacted].sort();
+  await atomicWrite(join(runDir, "snapshot.json"), JSON.stringify(snapshot));
+}
 export function changes(
   before: Record<string, FileEntry>,
   after: Record<string, FileEntry>,
@@ -245,7 +305,25 @@ export async function workspaceDiff(
 ): Promise<{ changes: Change[]; patch: string }> {
   const snapshot = await readSnapshot(runDir);
   const current = await inventory(join(runDir, "work"), maxBytes);
-  const delta = changes(snapshot.files, current);
+  const redacted = new Set(snapshot.redactedPaths ?? []);
+  for (const path of redacted) {
+    try {
+      await lstat(join(runDir, "work", path));
+      throw new AgentError(
+        "IMAGE_REDACTED",
+        `A redacted image path was reintroduced into the working copy: ${path}`,
+      );
+    } catch (error) {
+      if (
+        error instanceof AgentError ||
+        (error as NodeJS.ErrnoException).code !== "ENOENT"
+      )
+        throw error;
+    }
+  }
+  const delta = changes(snapshot.files, current).filter(
+    (change) => !redacted.has(change.path),
+  );
   let patch = "";
   for (const change of delta) {
     const before = change.before
@@ -327,6 +405,12 @@ export async function applyFiles(
   beforeWrite: () => void = () => {},
 ): Promise<Change[]> {
   const snapshot = await readSnapshot(runDir);
+  const redacted = new Set(snapshot.redactedPaths ?? []);
+  if (Object.keys(approved).some((path) => redacted.has(path)))
+    throw new AgentError(
+      "IMAGE_REDACTED",
+      "A protected image path cannot be reintroduced into the working copy",
+    );
   await verifyOriginal(snapshot);
   const work = join(runDir, "work");
   if (
@@ -337,7 +421,9 @@ export async function applyFiles(
       "ARTIFACT_CHANGED",
       "Working copy changed after validation",
     );
-  const delta = changes(snapshot.files, approved);
+  const delta = changes(snapshot.files, approved).filter(
+    (change) => !redacted.has(change.path),
+  );
   const origin = snapshot.origin!;
   // Check every target before touching any file, including previously untracked destinations.
   for (const change of delta) {

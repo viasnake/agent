@@ -1,7 +1,9 @@
 import { applyRun, exportArtifacts } from "../artifacts.js";
 import { workspaceDiff } from "../workspace.js";
 import type { CliContext } from "./context.js";
+import { registerWritingCommands } from "./writing.js";
 export function registerArtifactsCommands(cli: CliContext): void {
+  registerWritingCommands(cli);
   const { program, print, context } = cli;
   program
     .command("artifacts <run-id>")

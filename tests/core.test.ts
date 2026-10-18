@@ -4,6 +4,7 @@ import { writeFile, symlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { validateConfig } from "../src/config.js";
 import { validatePlan, parseResult } from "../src/plan.js";
+import { collaborationResultInstruction } from "../src/collaboration-prompts.js";
 import { assertDisclosure, selectModel, reserveModel } from "../src/policy.js";
 import { safePath, sha256 } from "../src/util.js";
 import { Store } from "../src/storage.js";
@@ -215,8 +216,12 @@ test("an invented artifact never produces a successful run", async () => {
   }
 });
 test("separate reviewer sees evidence but has no file writer tool", async () => {
+  let workers = 0;
   const runtime = new ScriptedRuntime(async (request) => {
+    assert.ok(request.system.includes(collaborationResultInstruction));
+    assert.match(request.system, /untrusted evidence, not authorization/);
     if (request.role === "worker") {
+      if (workers++ > 0) return completed();
       await call(request, "write_file", {
         path: "answer.md",
         content: "review me",
@@ -250,7 +255,7 @@ test("separate reviewer sees evidence but has no file writer tool", async () => 
     assert.equal((await f.harness.execute(run.id)).state, "succeeded");
     assert.deepEqual(
       runtime.requests.map((r) => r.model),
-      ["worker", "reviewer"],
+      ["worker", "reviewer", "worker"],
     );
   } finally {
     await f.cleanup();

@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { chmodSync, existsSync, lstatSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Paths } from "./config.js";
 import {
@@ -12,6 +12,10 @@ import {
   type RunState,
 } from "./types.js";
 import { atomicWrite, canonical, id, sha256 } from "./util.js";
+import {
+  confirmHistoryDeletion,
+  previewHistoryDeletion,
+} from "./history-deletion.js";
 
 interface RunRow {
   payload: string;
@@ -32,8 +36,17 @@ export interface UsageSummary {
   knownCostUsd: number;
   unknownCostRequests: number;
   heldUsd: number;
-  input: number;
-  output: number;
+  input: number | null;
+  output: number | null;
+  usageComplete: boolean;
+}
+export interface RequestReservation {
+  id: string;
+  connection: string;
+  model: string;
+  reservedUsd: number;
+  costUsd: number | null;
+  status: string;
 }
 export class Store {
   readonly db: DatabaseSync;
@@ -54,7 +67,7 @@ export class Store {
     const version = this.db.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
-    if (version.user_version > 2)
+    if (version.user_version > 4)
       throw new AgentError(
         "SCHEMA_VERSION",
         "Database was created by a newer agent",
@@ -87,8 +100,8 @@ export class Store {
       CREATE INDEX IF NOT EXISTS requests_connection_time ON requests(quota_scope, at);
       CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);
     `);
-    if (version.user_version === 1) {
-      const backup = `${paths.database}.v1-${id()}.bak`;
+    if (version.user_version > 0 && version.user_version < 4) {
+      const backup = `${paths.database}.v${version.user_version}-${id()}.bak`;
       this.db.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
       chmodSync(backup, 0o600);
     }
@@ -112,12 +125,158 @@ export class Store {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS conversations_workspace ON conversations(workspace, updated_at);
       CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, seq);
-      PRAGMA user_version=2;
+      CREATE TABLE IF NOT EXISTS boundaries (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES conversations(id),
+        message_seq INTEGER NOT NULL, hash TEXT NOT NULL, payload TEXT NOT NULL,
+        state_available INTEGER NOT NULL, created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS message_boundaries (
+        session_id TEXT NOT NULL REFERENCES conversations(id),
+        message_seq INTEGER NOT NULL, boundary_id TEXT NOT NULL REFERENCES boundaries(id),
+        PRIMARY KEY(session_id, message_seq)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS boundary_artifacts (
+        boundary_id TEXT NOT NULL REFERENCES boundaries(id) ON DELETE CASCADE,
+        artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+        PRIMARY KEY(boundary_id, artifact_id)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS fork_lineages (
+        child_session_id TEXT PRIMARY KEY REFERENCES conversations(id),
+        parent_session_id TEXT NOT NULL REFERENCES conversations(id),
+        source_message_seq INTEGER NOT NULL, mode TEXT NOT NULL,
+        checkpoint_id TEXT, policy_floor TEXT NOT NULL, created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS boundaries_session_seq ON boundaries(session_id, message_seq);
+      CREATE TABLE IF NOT EXISTS deletion_queue (
+        id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, payload TEXT NOT NULL
+      ) STRICT;
+      PRAGMA user_version=4;
     `),
     );
   }
   close(): void {
     this.db.close();
+  }
+  saveBoundary(record: {
+    id: string;
+    sessionId: string;
+    messageSeq: number;
+    hash: string;
+    payload: string;
+    stateAvailable: boolean;
+    artifactIds: string[];
+  }): void {
+    this.db
+      .prepare("INSERT INTO boundaries VALUES (?,?,?,?,?,?,?)")
+      .run(
+        record.id,
+        record.sessionId,
+        record.messageSeq,
+        record.hash,
+        record.payload,
+        record.stateAvailable ? 1 : 0,
+        Date.now(),
+      );
+    this.db
+      .prepare("INSERT INTO message_boundaries VALUES (?,?,?)")
+      .run(record.sessionId, record.messageSeq, record.id);
+    for (const artifactId of record.artifactIds)
+      this.db
+        .prepare("INSERT INTO boundary_artifacts VALUES (?,?)")
+        .run(record.id, artifactId);
+  }
+  linkBoundary(
+    sessionId: string,
+    messageSeq: number,
+    boundaryId: string,
+  ): void {
+    this.db
+      .prepare("INSERT INTO message_boundaries VALUES (?,?,?)")
+      .run(sessionId, messageSeq, boundaryId);
+  }
+  boundary(sessionId: string, messageSeq: number) {
+    return this.db
+      .prepare(
+        "SELECT b.id,b.session_id,mb.message_seq,b.hash,CASE WHEN length(CAST(b.payload AS BLOB))<=4194304 THEN b.payload ELSE '' END AS payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND mb.message_seq=?",
+      )
+      .get(sessionId, messageSeq) as
+      | {
+          id: string;
+          session_id: string;
+          message_seq: number;
+          hash: string;
+          payload: string;
+          state_available: number;
+          created_at: number;
+        }
+      | undefined;
+  }
+  boundaryById(boundaryId: string) {
+    return this.db
+      .prepare(
+        "SELECT id,session_id,message_seq,hash,CASE WHEN length(CAST(payload AS BLOB))<=4194304 THEN payload ELSE '' END AS payload,state_available,created_at FROM boundaries WHERE id=?",
+      )
+      .get(boundaryId) as
+      | {
+          id: string;
+          session_id: string;
+          message_seq: number;
+          hash: string;
+          payload: string;
+          state_available: number;
+          created_at: number;
+        }
+      | undefined;
+  }
+  boundaries(sessionId: string, before = Number.MAX_SAFE_INTEGER, limit = 30) {
+    return this.db
+      .prepare(
+        "SELECT b.id,b.session_id,mb.message_seq,b.hash,CASE WHEN length(CAST(b.payload AS BLOB))<=4194304 THEN b.payload ELSE '' END AS payload,b.state_available,b.created_at FROM boundaries b JOIN message_boundaries mb ON mb.boundary_id=b.id WHERE mb.session_id=? AND mb.message_seq<? ORDER BY mb.message_seq DESC LIMIT ?",
+      )
+      .all(sessionId, before, limit) as Array<{
+      id: string;
+      session_id: string;
+      message_seq: number;
+      hash: string;
+      payload: string;
+      state_available: number;
+      created_at: number;
+    }>;
+  }
+  setLineage(value: {
+    childSessionId: string;
+    parentSessionId: string;
+    sourceMessageSeq: number;
+    mode: "state" | "history";
+    checkpointId?: string;
+    policyFloor: string;
+  }): void {
+    this.db
+      .prepare("INSERT INTO fork_lineages VALUES (?,?,?,?,?,?,?)")
+      .run(
+        value.childSessionId,
+        value.parentSessionId,
+        value.sourceMessageSeq,
+        value.mode,
+        value.checkpointId ?? null,
+        value.policyFloor,
+        Date.now(),
+      );
+  }
+  lineage(sessionId: string) {
+    return this.db
+      .prepare("SELECT * FROM fork_lineages WHERE child_session_id=?")
+      .get(sessionId) as
+      | {
+          child_session_id: string;
+          parent_session_id: string;
+          source_message_seq: number;
+          mode: "state" | "history";
+          checkpoint_id: string | null;
+          policy_floor: string;
+          created_at: number;
+        }
+      | undefined;
   }
   transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
@@ -156,7 +315,12 @@ export class Store {
       .prepare("SELECT payload,generation FROM runs WHERE id=?")
       .get(runId) as unknown as RunRow | undefined;
     if (!row) throw new AgentError("NOT_FOUND", `Unknown run: ${runId}`);
-    return { ...JSON.parse(row.payload), generation: row.generation } as Run;
+    const run = JSON.parse(row.payload) as Run;
+    return {
+      ...run,
+      access: run.access ?? (run.kind === "chat" ? "read-only" : "change"),
+      generation: row.generation,
+    };
   }
   list(limit: number | null = 100): Run[] {
     return (
@@ -177,12 +341,18 @@ export class Store {
         "This run is owned by another process or has been released",
       );
   }
-  claim(runId: string, allowSucceeded = false, reconcileTerminal = false): Run {
+  claim(
+    runId: string,
+    allowSucceeded = false,
+    reconcileTerminal = false,
+    beforeClaim?: (run: Run) => void,
+  ): Run {
     return this.transaction(() => {
       const row = this.db
         .prepare("SELECT * FROM runs WHERE id=?")
         .get(runId) as unknown as RunRow | undefined;
       const run = this.get(runId);
+      beforeClaim?.(run);
       if (
         terminalStates.includes(run.state) &&
         !(allowSucceeded && run.state === "succeeded") &&
@@ -231,6 +401,13 @@ export class Store {
       .run(Date.now(), JSON.stringify(run), run.id, run.generation);
     return this.cancelRequested(run.id);
   }
+  heartbeatLease(runId: string, generation: number): boolean {
+    this.assertLease(runId, generation);
+    this.db
+      .prepare("UPDATE runs SET heartbeat=? WHERE id=? AND generation=?")
+      .run(Date.now(), runId, generation);
+    return this.cancelRequested(runId);
+  }
   save(
     run: Run,
     event = "run_updated",
@@ -240,14 +417,20 @@ export class Store {
     this.transaction(() => {
       this.assertLease(run.id, run.generation);
       commit?.();
-      run.updatedAt = Date.now();
-      this.db
-        .prepare(
-          "UPDATE runs SET state=?,payload=? WHERE id=? AND generation=?",
-        )
-        .run(run.state, JSON.stringify(run), run.id, run.generation);
-      this.event(run.id, event, detail);
+      this.saveInTransaction(run, event, detail);
     });
+  }
+  saveInTransaction(
+    run: Run,
+    event = "run_updated",
+    detail: Record<string, unknown> = {},
+  ): void {
+    this.assertLease(run.id, run.generation);
+    run.updatedAt = Date.now();
+    this.db
+      .prepare("UPDATE runs SET state=?,payload=? WHERE id=? AND generation=?")
+      .run(run.state, JSON.stringify(run), run.id, run.generation);
+    this.event(run.id, event, detail);
   }
   transition(run: Run, state: RunState, reason?: string): void {
     if (terminalStates.includes(run.state) && run.state !== state)
@@ -270,9 +453,52 @@ export class Store {
     if (row.heartbeat !== null && Date.now() - row.heartbeat < 15000)
       throw new AgentError("RUN_BUSY", "Run is still owned by a live process");
   }
-  inheritSources(parentId: string, runId: string): void {
-    for (const source of this.artifacts(parentId).filter(
-      (a) => a.kind === "source",
+  inheritSources(
+    parentId: string,
+    runId: string,
+    directOnly = false,
+    excludeGit = false,
+    excludeIds: readonly string[] = [],
+    excludeHashes: readonly string[] = [],
+    excludeUrls: readonly string[] = [],
+  ): void {
+    const sources = directOnly
+      ? (
+          this.db
+            .prepare(
+              "SELECT payload FROM artifacts WHERE run_id=? ORDER BY rowid",
+            )
+            .all(parentId) as { payload: string }[]
+        ).map((row) => JSON.parse(row.payload) as Artifact)
+      : this.artifacts(parentId);
+    const authorized = sources.filter(
+      (artifact) =>
+        artifact.kind === "source" &&
+        !(excludeGit && artifact.metadata.format === "git"),
+    );
+    const excludedIdSet = new Set(excludeIds),
+      excludedHashSet = new Set(excludeHashes),
+      excludedUrlSet = new Set(excludeUrls);
+    const filtered = authorized.filter(
+      (artifact) =>
+        !excludedIdSet.has(artifact.id) &&
+        !excludedHashSet.has(artifact.sha256) &&
+        !excludedHashSet.has(String(artifact.metadata.rawSha256 ?? "")) &&
+        !excludedHashSet.has(String(artifact.metadata.selectedSha256 ?? "")) &&
+        !excludedUrlSet.has(String(artifact.metadata.url ?? "")) &&
+        !excludedUrlSet.has(String(artifact.metadata.requestedUrl ?? "")),
+    );
+    const rawIds = new Set(
+      filtered
+        .map((artifact) => artifact.metadata.rawArtifactId)
+        .filter((value): value is string => typeof value === "string"),
+    );
+    for (const source of sources.filter(
+      (artifact) =>
+        (artifact.kind === "source" ||
+          (artifact.kind === "source-raw" && rawIds.has(artifact.id))) &&
+        (artifact.kind !== "source" ||
+          filtered.some((candidate) => candidate.id === artifact.id)),
     ))
       this.db
         .prepare("INSERT OR IGNORE INTO source_links VALUES (?,?)")
@@ -352,6 +578,18 @@ export class Store {
   ): void {
     this.transaction(() => {
       this.assertLease(run.id, run.generation);
+      if (
+        this.operations(run.id).some(
+          (operation) =>
+            operation.id === operationId &&
+            operation.name === "process_start" &&
+            operation.status === "unknown",
+        )
+      )
+        throw new AgentError(
+          "PROCESS_CLEANUP_REQUIRED",
+          "Use agent process stop to verify managed-process cleanup; a manual outcome cannot replace cleanup",
+        );
       const changed = this.db
         .prepare(
           "UPDATE operations SET status=?,result=? WHERE id=? AND run_id=? AND status='unknown'",
@@ -364,6 +602,40 @@ export class Store {
         outcome,
         reason,
       });
+    });
+  }
+  assertManagedProcessesStopped(run: Run): void {
+    if (
+      this.operations(run.id).some(
+        (operation) =>
+          operation.name === "process_start" &&
+          ["prepared", "dispatched", "unknown"].includes(operation.status),
+      )
+    )
+      throw new AgentError(
+        "PROCESS_CLEANUP_REQUIRED",
+        "Managed-process cleanup is unresolved; use agent process stop before continuing",
+      );
+  }
+  managedProcessState(
+    run: Run,
+    operationId: string,
+    status: "unknown" | "completed",
+    result: string,
+  ): void {
+    this.transaction(() => {
+      this.assertLease(run.id, run.generation);
+      const changed = this.db
+        .prepare(
+          "UPDATE operations SET status=?,result=? WHERE id=? AND run_id=? AND name='process_start' AND status IN ('dispatched','unknown')",
+        )
+        .run(status, result, operationId, run.id);
+      if (!changed.changes)
+        throw new AgentError(
+          "OPERATION",
+          "Unresolved managed-process operation not found",
+        );
+      this.event(run.id, "managed_process_" + status, { operationId, result });
     });
   }
   reserve(
@@ -451,25 +723,73 @@ export class Store {
       .run(connection, until);
   }
   usage(runId: string): UsageSummary {
-    return this.db
+    const row = this.db
       .prepare(
         `SELECT count(*) AS requests, coalesce(sum(cost_usd),0) AS knownCostUsd,
       coalesce(sum(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END),0) AS unknownCostRequests,
       coalesce(sum(CASE WHEN cost_usd IS NULL THEN reserved_usd ELSE 0 END),0) AS heldUsd,
-      coalesce(sum(input_tokens),0) AS input, coalesce(sum(output_tokens),0) AS output FROM requests WHERE run_id=?`,
+      sum(input_tokens) AS input, sum(output_tokens) AS output,
+      sum(CASE WHEN input_tokens IS NULL THEN 1 ELSE 0 END) AS unknownInputRequests,
+      sum(CASE WHEN output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownOutputRequests,
+      sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownUsageRequests
+      FROM requests WHERE run_id=?`,
       )
-      .get(runId) as unknown as UsageSummary;
+      .get(runId) as unknown as UsageSummary & {
+      unknownUsageRequests: number;
+      unknownInputRequests: number;
+      unknownOutputRequests: number;
+    };
+    return {
+      requests: row.requests,
+      knownCostUsd: row.knownCostUsd,
+      unknownCostRequests: row.unknownCostRequests,
+      heldUsd: row.heldUsd,
+      input: row.requests && !row.unknownInputRequests ? row.input : null,
+      output: row.requests && !row.unknownOutputRequests ? row.output : null,
+      usageComplete: Boolean(row.requests && !row.unknownUsageRequests),
+    };
   }
-  usageByConnection(runId: string): Array<Record<string, unknown>> {
+  requestLedger(runId: string): RequestReservation[] {
     return this.db
       .prepare(
-        `SELECT connection,model,count(*) AS requests,coalesce(sum(input_tokens),0) AS inputTokens,
-      coalesce(sum(output_tokens),0) AS outputTokens,sum(cost_usd) AS knownCostUsd,
+        "SELECT id,connection,model,reserved_usd AS reservedUsd,cost_usd AS costUsd,status FROM requests WHERE run_id=? ORDER BY at,id",
+      )
+      .all(runId) as unknown as RequestReservation[];
+  }
+  usageByConnection(runId: string): Array<Record<string, unknown>> {
+    const rows = this.db
+      .prepare(
+        `SELECT connection,model,count(*) AS requests,sum(input_tokens) AS inputTokens,
+      sum(output_tokens) AS outputTokens,
+      sum(CASE WHEN input_tokens IS NULL THEN 1 ELSE 0 END) AS unknownInputRequests,
+      sum(CASE WHEN output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownOutputRequests,
+      sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) AS unknownUsageRequests,
+      sum(cost_usd) AS knownCostUsd,
       sum(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unknownCostRequests,
       sum(CASE WHEN cost_usd IS NULL THEN reserved_usd ELSE 0 END) AS heldUsd
       FROM requests WHERE run_id=? GROUP BY connection,model`,
       )
-      .all(runId);
+      .all(runId) as unknown as Array<{
+      connection: string;
+      model: string;
+      requests: number;
+      inputTokens: number | null;
+      outputTokens: number | null;
+      unknownUsageRequests: number;
+      unknownInputRequests: number;
+      unknownOutputRequests: number;
+      knownCostUsd: number | null;
+      unknownCostRequests: number;
+      heldUsd: number | null;
+    }>;
+    return rows.map((row) => ({
+      ...row,
+      inputTokens:
+        row.requests && !row.unknownInputRequests ? row.inputTokens : null,
+      outputTokens:
+        row.requests && !row.unknownOutputRequests ? row.outputTokens : null,
+      usageComplete: Boolean(row.requests && !row.unknownUsageRequests),
+    }));
   }
   events(
     runId: string,
@@ -496,6 +816,7 @@ export class Store {
     kind: Artifact["kind"],
     content: string | Buffer,
     metadata: Record<string, unknown> = {},
+    commit?: (artifact: Artifact) => void,
   ): Promise<Artifact> {
     this.assertLease(run.id, run.generation);
     const artifact: Artifact = {
@@ -523,6 +844,7 @@ export class Store {
         kind,
         sha256: artifact.sha256,
       });
+      commit?.(artifact);
     });
     return artifact;
   }
@@ -555,6 +877,11 @@ export class Store {
         .prepare(
           "SELECT 1 FROM source_links s JOIN artifacts a ON a.id=s.artifact_id WHERE a.run_id=?",
         )
+        .get(runId) ||
+      this.db
+        .prepare(
+          "SELECT 1 FROM boundary_artifacts ba JOIN artifacts a ON a.id=ba.artifact_id WHERE a.run_id=?",
+        )
         .get(runId)
     )
       throw new AgentError(
@@ -578,11 +905,22 @@ export class Store {
     });
     const heartbeat = setInterval(() => this.heartbeat(run), 1000);
     try {
-      await rm(this.runDir(runId), { recursive: true, force: true });
-      this.transaction(() => {
-        this.assertLease(runId, run.generation);
-        this.db.prepare("DELETE FROM runs WHERE id=?").run(runId);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const preview = previewHistoryDeletion(
+        this,
+        undefined,
+        { kind: "selection", conversationIds: [], runIds: [runId] },
+        { lease: { runId, generation: run.generation } },
+      );
+      const result = await confirmHistoryDeletion(this, undefined, preview, {
+        lease: { runId, generation: run.generation },
+        beforeCommit: () => clearInterval(heartbeat),
       });
+      if (result.pendingCleanup.length)
+        throw new AgentError(
+          "DELETE_CLEANUP",
+          "Metadata was removed but run files remain pending cleanup",
+        );
     } finally {
       clearInterval(heartbeat);
       this.release(run);

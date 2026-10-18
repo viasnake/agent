@@ -1,5 +1,10 @@
 import { Option } from "commander";
 import type { CliContext } from "./context.js";
+import {
+  confirmContextReview,
+  previewContextReview,
+} from "../context-review.js";
+import { AgentError } from "../types.js";
 export function registerRunsCommands(cli: CliContext): void {
   const {
     program,
@@ -12,6 +17,30 @@ export function registerRunsCommands(cli: CliContext): void {
     status,
     exitForRun,
   } = cli;
+  program
+    .command("context-review <run-id>")
+    .option("--confirm <binding>", "exact preview binding to acknowledge")
+    .option("--note <text>", "explicit human review note")
+    .action((runId: string, options) =>
+      context(async (_config, _p, store) => {
+        const preview = previewContextReview(store, runId);
+        if (!options.confirm) {
+          print(preview);
+          return;
+        }
+        if (options.confirm !== preview.binding)
+          throw new AgentError(
+            "CONTEXT_REVIEW_STALE",
+            "Preview binding is stale",
+          );
+        if (!options.note?.trim())
+          throw new AgentError(
+            "CONTEXT_REVIEW",
+            "--note is required with --confirm",
+          );
+        print(confirmContextReview(store, preview, options.note));
+      }),
+    );
   program
     .command("run")
     .argument("<objective>", "what you want to accomplish")
@@ -35,7 +64,12 @@ export function registerRunsCommands(cli: CliContext): void {
     )
     .option("--workspace <path>", "source Git repository")
     .option("--include-untracked", "include non-ignored untracked files")
-    .option("--input <file>", "input document (repeatable)", collect, [])
+    .option(
+      "--input <file>",
+      "input document, or skill:workspace-relative/SKILL.md (repeatable)",
+      collect,
+      [],
+    )
     .option("--check <id>", "trusted required check (repeatable)", collect, [])
     .option(
       "--preserve <literal>",

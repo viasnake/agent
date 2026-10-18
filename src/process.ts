@@ -30,7 +30,8 @@ export async function runProcess(
     });
     let stdout = Buffer.alloc(0),
       stderr = Buffer.alloc(0),
-      truncated = false,
+      stdoutTruncated = false,
+      stderrTruncated = false,
       stopping = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const max = options.maxBytes ?? 64000;
@@ -56,7 +57,9 @@ export async function runProcess(
     options.signal?.addEventListener("abort", stop, { once: true });
     const append = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const value = stream === "stdout" ? stdout : stderr;
-      if (value.length + chunk.length > max) truncated = true;
+      const truncated = value.length + chunk.length > max;
+      if (stream === "stdout") stdoutTruncated ||= truncated;
+      else stderrTruncated ||= truncated;
       const next = Buffer.concat([
         value,
         chunk.subarray(0, Math.max(0, max - value.length)),
@@ -90,15 +93,21 @@ export async function runProcess(
       else
         resolve({
           code: code ?? 1,
-          stdout: stdout.toString("utf8"),
-          stderr: stderr.toString("utf8"),
-          truncated,
+          stdout: decodeCaptured(stdout, stdoutTruncated),
+          stderr: decodeCaptured(stderr, stderrTruncated),
+          truncated: stdoutTruncated || stderrTruncated,
         });
     });
     child.stdin.on("error", () => {});
     child.stdin.end(options.input);
   });
 }
+
+function decodeCaptured(bytes: Buffer, truncated: boolean): string {
+  if (!truncated) return bytes.toString("utf8");
+  return new TextDecoder("utf-8").decode(bytes, { stream: true });
+}
+
 export const cleanEnvironment: Record<string, string> = {
   PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
   LANG: "C.UTF-8",

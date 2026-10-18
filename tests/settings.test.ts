@@ -11,6 +11,67 @@ import { safeText } from "../src/tui/components.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { testConfig } from "./helpers.js";
 
+test("thinking profile edits are staged, cancellable and removable without adding defaults", async () => {
+  for (const approve of [false, true]) {
+    let config = testConfig();
+    let saves = 0;
+    const errors: string[] = [];
+    const path = (field: string) => JSON.stringify(["models", "worker", field]);
+    const edits: SettingsEdit[] = [
+      { value: path("reasoning"), text: "true" },
+      { value: path("thinkingLevel"), text: "high" },
+    ];
+    const app = {
+      get config() {
+        return config;
+      },
+      session: {
+        checks: [],
+        dataClass: "private",
+        localOnly: false,
+        includeUntracked: false,
+      },
+      async saveConfiguration(raw: unknown) {
+        config = validateConfig(raw);
+        saves++;
+      },
+    } as unknown as Application;
+    const ui: SettingsUi = {
+      edit: async (_title, fields) => {
+        assert.ok(fields.some((field) => field.value === path("reasoning")));
+        assert.ok(
+          fields.some((field) => field.value === path("thinkingLevel")),
+        );
+        return edits.shift();
+      },
+      choose: async () => undefined,
+      prompt: async () => undefined,
+      confirm: async () => approve,
+      notify: (message) => errors.push(message),
+    };
+    await new SettingsDialog(app, ui).open();
+    assert.deepEqual(errors, approve ? [] : ["2 件の変更を破棄しました。"]);
+    assert.equal(saves, approve ? 1 : 0);
+    assert.equal(
+      config.models.worker!.thinkingLevel,
+      approve ? "high" : undefined,
+    );
+    assert.equal(config.models.worker!.reasoning, approve ? true : undefined);
+    assert.equal("thinkingLevel" in config.models.reviewer!, false);
+    if (approve) {
+      edits.push(
+        { value: path("thinkingLevel"), text: "" },
+        { value: path("reasoning"), text: "false" },
+      );
+      await new SettingsDialog(app, ui).open();
+      assert.equal("thinkingLevel" in config.models.worker!, false);
+      assert.equal(config.models.worker!.reasoning, false);
+      assert.equal(saves, 2);
+      assert.deepEqual(errors, []);
+    }
+  }
+});
+
 test("pending edits apply in one batch when closing confirms them", async () => {
   let config = testConfig();
   const edits: SettingsEdit[] = [

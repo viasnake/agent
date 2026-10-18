@@ -5,12 +5,41 @@ import sharp from "sharp";
 import type { Paths } from "./config.js";
 import { AgentError, type DataClass, type ImageReference } from "./types.js";
 import { atomicWrite, privateDirectory, sha256 } from "./util.js";
+import { pinSharedBlobs } from "./shared-blobs.js";
 
 export const maxImageBytes = 5_000_000;
 export const maxImageSide = 2048;
 export const maxImagePixels = 4_194_304;
 export const maxConversationImages = 8;
 export const maxConversationImageBytes = 20_000_000;
+
+export function mergeImageReferences(
+  ...groups: readonly ImageReference[][]
+): ImageReference[] {
+  const levels: DataClass[] = ["public", "private", "restricted"];
+  const merged = new Map<string, ImageReference>();
+  for (const reference of groups.flat()) {
+    const existing = merged.get(reference.id);
+    if (!existing) {
+      merged.set(reference.id, { ...reference });
+      continue;
+    }
+    merged.set(reference.id, {
+      ...existing,
+      ...reference,
+      dataClass:
+        levels.indexOf(existing.dataClass) > levels.indexOf(reference.dataClass)
+          ? existing.dataClass
+          : reference.dataClass,
+      localOnly: existing.localOnly || reference.localOnly,
+      sourceId: reference.sourceId ?? existing.sourceId,
+      documentId: reference.documentId ?? existing.documentId,
+      transformation: reference.transformation ?? existing.transformation,
+      comparisonOrder: reference.comparisonOrder ?? existing.comparisonOrder,
+    });
+  }
+  return [...merged.values()];
+}
 
 const formats = {
   ".png": { format: "png", mimeType: "image/png" },
@@ -24,6 +53,8 @@ export type ValidatedImage = {
   mimeType: string;
   width: number;
   height: number;
+  editWidth: number;
+  editHeight: number;
   sha256: string;
 };
 
@@ -97,6 +128,12 @@ export async function validateImage(
       mimeType: signature,
       width: metadata.width,
       height: metadata.height,
+      editWidth: [5, 6, 7, 8].includes(metadata.orientation ?? 0)
+        ? metadata.height
+        : metadata.width,
+      editHeight: [5, 6, 7, 8].includes(metadata.orientation ?? 0)
+        ? metadata.width
+        : metadata.height,
     };
   } catch (error) {
     if (error instanceof AgentError) throw error;
@@ -119,6 +156,8 @@ export function imageReference(
     mimeType: validated.mimeType,
     width: validated.width,
     height: validated.height,
+    editWidth: validated.editWidth,
+    editHeight: validated.editHeight,
     bytes: validated.bytes.length,
     sha256: validated.sha256,
     dataClass,
@@ -166,7 +205,9 @@ function hasApngAnimationControl(bytes: Buffer): boolean {
 export async function isImageFileSignature(path: string): Promise<boolean> {
   const file = await open(
     path,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
   );
   try {
     const stat = await file.stat();
@@ -186,7 +227,9 @@ export async function isImageFileSignature(path: string): Promise<boolean> {
 export async function readBoundedImage(path: string): Promise<Buffer> {
   const file = await open(
     path,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
   );
   try {
     const initial = await file.stat();
@@ -218,7 +261,8 @@ export async function readBoundedImage(path: string): Promise<Buffer> {
       final.size !== initial.size ||
       final.ino !== initial.ino ||
       final.dev !== initial.dev ||
-      final.mtimeMs !== initial.mtimeMs
+      final.mtimeMs !== initial.mtimeMs ||
+      (process.getuid && final.uid !== process.getuid())
     )
       throw new AgentError("IMAGE_READ", "Image changed while it was read");
     return buffer.subarray(0, length);
@@ -245,6 +289,7 @@ export async function saveImage(
   const directory = join(paths.home, "images");
   await privateDirectory(directory);
   const target = join(directory, `${digest}.img`);
+  await pinSharedBlobs(paths, [`images/${digest}.img`]);
   const existing = await lstat(target).catch(() => undefined);
   if (!existing) await atomicWrite(target, bytes);
   else {
@@ -262,6 +307,87 @@ export async function saveImage(
       throw new AgentError("IMAGE_HASH", "Image blob integrity check failed");
   }
   return reference;
+}
+
+export async function transformImage(
+  paths: Paths,
+  source: ImageReference,
+  operation: "crop" | "mask",
+  bounds: { x: number; y: number; width: number; height: number },
+): Promise<ImageReference> {
+  for (const value of Object.values(bounds))
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new AgentError(
+        "IMAGE_BOUNDS",
+        "Image bounds must be non-negative integers",
+      );
+  if (!bounds.width || !bounds.height)
+    throw new AgentError(
+      "IMAGE_BOUNDS",
+      "Image crop or mask must have positive dimensions",
+    );
+  const bytes = await loadStoredImage(paths, source);
+  try {
+    const rotated = sharp(bytes, {
+      failOn: "warning",
+      limitInputPixels: maxImagePixels,
+    })
+      .toColourspace("srgb")
+      .rotate();
+    const { data, info } = await rotated
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (
+      bounds.x + bounds.width > info.width ||
+      bounds.y + bounds.height > info.height
+    )
+      throw new AgentError(
+        "IMAGE_BOUNDS",
+        `Image bounds exceed the orientation-corrected ${info.width}×${info.height} image`,
+      );
+    let output: Buffer;
+    if (operation === "crop") {
+      output = await sharp(data, { raw: info })
+        .extract({
+          left: bounds.x,
+          top: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+        })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+    } else {
+      const masked = Buffer.from(data);
+      for (let y = bounds.y; y < bounds.y + bounds.height; y++)
+        for (let x = bounds.x; x < bounds.x + bounds.width; x++) {
+          const offset = (y * info.width + x) * info.channels;
+          if (info.channels === 4) {
+            masked.fill(0, offset, offset + 3);
+            masked[offset + 3] = 255;
+          } else if (info.channels === 3) masked.fill(0, offset, offset + 3);
+          else masked[offset] = 0;
+        }
+      output = await sharp(masked, { raw: info })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+    }
+    const result = await saveImage(
+      paths,
+      `${source.name}-${operation}.png`,
+      output,
+      source.dataClass,
+      source.localOnly,
+    );
+    return {
+      ...result,
+      sourceId: source.id,
+      documentId: source.documentId,
+      transformation: JSON.stringify({ type: operation, bounds }),
+    };
+  } catch (error) {
+    if (error instanceof AgentError) throw error;
+    throw new AgentError("IMAGE_EDIT", "Image could not be transformed safely");
+  }
 }
 
 export function validateImageReference(ref: ImageReference): void {
@@ -301,6 +427,7 @@ export async function loadStoredImage(
   )
     throw new AgentError("IMAGE_STORAGE", "Image storage is unavailable");
   const path = join(directory, `${ref.sha256}.img`);
+  await pinSharedBlobs(paths, [`images/${ref.sha256}.img`]);
   const pathStat = await lstat(path).catch(() => undefined);
   if (
     !pathStat?.isFile() ||
