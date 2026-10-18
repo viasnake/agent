@@ -1,10 +1,12 @@
 import { readdir, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute } from "node:path";
 import type {
   AutocompleteItem,
   AutocompleteProvider,
   AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
+import { safePath } from "../util.js";
+import { secretPath } from "../workspace.js";
 
 const maxSuggestions = 50;
 
@@ -99,13 +101,15 @@ export class AttachmentAutocompleteProvider implements AutocompleteProvider {
     const slash = rawPath.lastIndexOf("/");
     const directoryPrefix = slash >= 0 ? rawPath.slice(0, slash + 1) : "";
     const basenamePrefix = rawPath.slice(slash + 1);
-    let root: string, directory: string;
+    let directory: string;
     try {
-      root = await realpath(this.workspace());
-      const candidate = resolve(root, directoryPrefix || ".");
-      if (!this.isWithin(root, candidate)) return null;
-      directory = await realpath(candidate);
-      if (!this.isWithin(root, directory)) return null;
+      const workspace = this.workspace();
+      if (directoryPrefix) {
+        if (secretPath(directoryPrefix)) return null;
+        directory = await safePath(workspace, directoryPrefix);
+      } else {
+        directory = await realpath(workspace);
+      }
     } catch {
       return null;
     }
@@ -125,6 +129,7 @@ export class AttachmentAutocompleteProvider implements AutocompleteProvider {
           !entry.isSymbolicLink() &&
           (entry.isFile() || entry.isDirectory()) &&
           !entry.name.includes('"') &&
+          !secretPath(`${directoryPrefix}${entry.name}`) &&
           entry.name.toLowerCase().startsWith(basenamePrefix.toLowerCase()),
       )
       .sort(
@@ -145,13 +150,5 @@ export class AttachmentAutocompleteProvider implements AutocompleteProvider {
       };
     });
     return { items, prefix };
-  }
-
-  private isWithin(root: string, candidate: string): boolean {
-    const path = relative(root, candidate);
-    return (
-      path === "" ||
-      (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path))
-    );
   }
 }
