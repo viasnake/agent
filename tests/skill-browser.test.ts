@@ -28,12 +28,14 @@ test("skill browser preserves drafts on cancel or stale view, and stages only ex
     let active = true;
     let changeDuringShow = false;
     const shown: string[] = [];
+    const accepts: string[] = [];
     const dialogs = {
       choose: async () => choices.shift(),
-      show: async (text: string) => {
+      show: async (text: string, _title: string, accept: string) => {
         shown.push(text);
+        accepts.push(accept);
         if (changeDuringShow) app.session.draft = "変更済み";
-        return true;
+        return Boolean(accept);
       },
       confirm: async () => confirm,
       notice: () => {},
@@ -52,6 +54,7 @@ test("skill browser preserves drafts on cancel or stale view, and stages only ex
     changeDuringShow = true;
     await assert.rejects(browser.select(path), /選び直し/);
     assert.equal(app.session.draft, "変更済み");
+    assert.deepEqual(accepts, Array(3).fill("参照資料の選択へ進む"));
     active = false;
     await assert.rejects(browser.select(path), /選び直し/);
   } finally {

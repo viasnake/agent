@@ -12,7 +12,7 @@ interface Dialogs {
     title: string,
     choices: { value: string; label: string; description?: string }[],
   ): Promise<string | undefined>;
-  show(text: string, title?: string): Promise<boolean>;
+  show(text: string, title: string, accept: string): Promise<boolean>;
   confirm(text: string): Promise<boolean>;
   notice(text: string): void;
   active(): boolean;
@@ -72,6 +72,7 @@ export class SkillBrowser {
       !(await this.dialogs.show(
         `${skill.path}\nSHA-256: ${skill.sha256}\n${skill.bytes} bytes\n\n下書きへの選択だけです。送信・script実行・権限変更は行いません。送信時に原本を読み直して内容と送信先を確認します。\n\n${fence}\n${skill.text}\n${fence}`,
         "Skillの手順を確認",
+        "参照資料の選択へ進む",
       ))
     )
       return;
