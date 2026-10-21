@@ -6,6 +6,7 @@ import {
   matchesKey,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
+import { AttachmentAutocompleteProvider } from "./attachment-autocomplete.js";
 import { SettingsDialog } from "./settings.js";
 import { confirmToolOperation } from "./tool-approval.js";
 import type { ToolApprovalRequest } from "../tool-approval.js";
@@ -127,7 +128,10 @@ export class TerminalApp {
     this.layout.scroll.onOlder = (remaining) => this.loadOlder(remaining);
     this.tui.setFocus(this.input);
     this.input.setAutocompleteProvider(
-      new CombinedAutocompleteProvider(commands, process.cwd(), null),
+      new AttachmentAutocompleteProvider(
+        new CombinedAutocompleteProvider(commands, process.cwd(), null),
+        () => this.app?.session.workspace ?? process.cwd(),
+      ),
     );
     this.input.onSubmit = (text) => {
       if (this.draftTimer) clearTimeout(this.draftTimer);
@@ -1748,6 +1752,7 @@ export class TerminalApp {
         this.tui.start();
         this.tui.invalidate();
         this.render();
+        this.tui.requestRender(true);
       }
     }
   }
