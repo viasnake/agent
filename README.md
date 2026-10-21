@@ -2,13 +2,12 @@
 
 コード変更・調査・文書作成を続けて依頼できる、個人用の対話型ターミナル AI Agent です。コードは作業コピーで変更・検査し、差分を確認してから元のリポジトリへ適用します。
 
-Node.js 24 以上と Git が必要です。主な利用対象は Linux の端末・SSH 接続です。Shell と検査には Bubblewrap または rootless Podman を使います。macOS での隔離実行には Podman の Linux VM が必要です。
+Node.js 24 以上と Git が必要です。主な利用対象は Linux の端末・SSH 接続です。Shell と検査には Bubblewrap を使います。隔離実行は Linux のみで、他の OS では `execution.backend: "disabled"` と同じ扱いです。
 
 ## 現時点の制限と検証範囲
 
 - 独立した読み取りタスクは並列実行できますが、書き込みタスクは読み取りを含む他のタスクと排他実行します。独立した書き込みの並列実行・自動マージはありません。
-- 管理対象の長時間 Podman プロセスには所有確認・停止・回収記録があります。一方、通常の単発 Podman 実行には同等の永続回収記録がなく、Agent の強制終了後にコンテナが残る可能性があります。通常終了時の後始末と、強制終了後の回収保証は異なります。
-- 隔離方式間で資源上限は同一ではありません。Bubblewrap の CPU・メモリ制限や、書き込み可能な作業領域の実行中ディスク容量制限は、Podman の制限と同等とは扱いません。
+- Bubblewrap には CPU・メモリの資源上限や、書き込み可能な作業領域の実行中ディスク容量制限がありません。
 - 推論の境界には SDK 非依存の契約がありますが、本番の推論・TUI・MCP は引き続き Pi に依存します。別 SDK への完全な交換を検証したものではありません。
 - 自動テスト・Linux/macOS の CI と、実画面での受入確認・実モデルによる品質確認は別です。新しい TUI 操作には実画面での確認が未実施のものがあり、実モデルでの画像理解・協調品質比較も未検証です。
 
@@ -127,7 +126,7 @@ Git 添付の差分は保存された raw bytes を比較し、Git attributes・
 
 最初のコピーには未コミット変更を含む追跡済みファイルを使います。未追跡ファイルは会話設定の `includeUntracked` で追加できます。元のファイルや HEAD が外部で変わった場合は競合として停止します。
 
-検査の `protectedPaths` に既存テストや設定を登録すると、それらの変更を不合格にします。Shell はネットワークを使えません。必要な実行環境・依存は事前に用意し、Bubblewrap では `execution.runtimePaths` で読み取り専用に公開し、Podman ではダイジェスト固定の `execution.image` に含めます。
+検査の `protectedPaths` に既存テストや設定を登録すると、それらの変更を不合格にします。Shell はネットワークを使えません。必要な実行環境・依存は事前に用意し、`execution.runtimePaths` で読み取り専用に公開します。
 
 ### オフラインの依存導入・ビルド
 
@@ -145,13 +144,13 @@ execution:
         npm ci --offline --ignore-scripts --no-audit --no-fund --cache /opt/npm-cache
 ```
 
-これは設定例です。Node/npm と完全なオフラインキャッシュを事前に用意し、`/opt/npm-cache` を固定イメージに含めるか、Bubblewrap の読み取り専用 `runtimePaths` で公開してください。不足時にネットワークを開いたりホストへ導入したりはしません。読み取り専用キャッシュへの書込みが必要なツールでは、プロファイル内でキャッシュを `/runtime` へコピーしてから使用してください。ワークスペース・`file:` 依存や native addon を含むプロジェクトは、パスと事前ビルドを含め個別のコマンド設定が必要です。
+これは設定例です。Node/npm と完全なオフラインキャッシュを事前に用意し、`/opt/npm-cache` を読み取り専用 `runtimePaths` で公開してください。不足時にネットワークを開いたりホストへ導入したりはしません。読み取り専用キャッシュへの書込みが必要なツールでは、プロファイル内でキャッシュを `/runtime` へコピーしてから使用してください。ワークスペース・`file:` 依存や native addon を含むプロジェクトは、パスと事前ビルドを含め個別のコマンド設定が必要です。
 
 `/runtime` は成果物とは別のタスク専用領域です。`run_profile` だけが書き込め、同じ担当の後続 `shell` は読み取り専用で再利用します。例えば `node /runtime/app/node_modules/typescript/bin/tsc` のように配置先を明示します。依存を通常の `/workspace/node_modules` として自動公開したり、PATH を書き換えたりはしません。ソースを別ビルドディレクトリに複製する必要がある場合も、プロファイルで明示してください。成果物は `/workspace` に戻して通常の差分検査・適用を行います。既存の作業コピーにおける秘密ファイル・リンク・`node_modules` 等の拒否は維持します。
 
 Reviewer は別の runtime と使い捨ての作業コピーを使います。固定検査、別担当、別 Run、分岐、バックアップには runtime を引き継ぎません。資料除外の条件が変わった場合も新しい領域に切り替え、古い領域を再公開しません。古い領域は即時消去せず Run の履歴削除時に回収されます。依存やロックの変更に対する自動再導入・自動実行はありません。
 
-実行時間と出力の上限は通常の Shell と同じです。runtime は実行前後に最大20,000項目・10秒、`limits.maxWorkspaceBytes` 以下か走査し、リンクをホストから辿りません。この検査はディスクのリアルタイム quota ではなく、超過した領域は再利用を拒否します。Bubblewrap に Podman と同じ CPU・メモリ・ディスク制限があるとは扱いません。長時間プロセス管理もこの機能には含みません。
+実行時間と出力の上限は通常の Shell と同じです。runtime は実行前後に最大20,000項目・10秒、`limits.maxWorkspaceBytes` 以下か走査し、リンクをホストから辿りません。この検査はディスクのリアルタイム quota ではなく、超過した領域は再利用を拒否します。Bubblewrap には CPU・メモリ・ディスクの資源上限がありません。
 
 失敗時は `/status` と `/artifacts` で理由を確認します。待機・クラッシュした作業は `/resume`、結果未確定の操作は実際の結果を確認して `/reconcile` で照合します。中断・失敗で終了した作業の続きは、新しい依頼として入力してください。停止・失敗・再起動後の待機入力は自動実行せず `/queue` に残ります。
 
@@ -221,29 +220,6 @@ job ID だけを再試行できます。共有画像・準備済み文書・chec
 バックアップ内の pending job は記録として保存されますが、cleanup は実行されません。
 
 開発・検証方法は [docs/architecture.md](docs/architecture.md)、保守用 CLI は `agent --help` を参照してください。
-
-## 管理プロセス
-
-長時間動作する開発サーバーは、`execution.backend: "podman"` と固定 digest
-イメージを設定し、`agent process provision` で作成した停止中の engine anchor を
-`execution.managedProcesses.engineAnchor` に明示してから利用します。設定はプロセスを
-自動起動・再起動せず、通常の coding writer の task にだけ bounded な
-`process_start`、`process_status`、`process_logs`、`process_stop` を公開します。
-`agent process list/status/logs/stop` は保存済みの run を対象にします。異常終了後は
-`agent process stop <run-id> <process-id>` で所有証明を再確認してから回収してください。
-Task の成功・失敗・キャンセルを返す前にも finally cleanup を行います。未解決の
-cleanup は成功として隠さず、再開・適用・削除などの操作を停止します。エンジンの
-anchor は、未解決の job をすべて回収するまで削除・置換しないでください。
-
-プロセスは network 無し、live な作業コピーを read-only で公開する `/workspace` と
-task-local の read-only `/runtime`、`/tmp` の 64 MiB tmpfs、`/dev/shm` の 16 MiB、
-Podman/conmon の独立した lifetime deadline、bounded logs を使います。workspace の
-変更は process から見えますが、process からは書き込めません。cgroup v2 の memory、
-pid、CPU 制限が検証できない環境では user command を実行しません。既定の lifetime
-`maxSeconds` は 600 秒、同時実行 `maxProcesses` は 1 です。ホストの資格情報や環境変数を渡さず、
-PID kill や host fallback も行いません。管理サーバーは host browser からアクセスできず、
-framework cache は `/tmp` に置いてください。これは live disk quota、通常の one-shot
-Bubblewrap、または完全な resource parity を提供する機能ではありません。
 
 ## Collaboration backend
 

@@ -216,11 +216,7 @@ async function configuration(paths: Paths, input?: Config) {
       .map((connection) => connection.type);
     return {
       status: "available",
-      backend: bucket(config.execution.backend, [
-        "bubblewrap",
-        "podman",
-        "disabled",
-      ]),
+      backend: bucket(config.execution.backend, ["bubblewrap", "disabled"]),
       routing: bucket(config.routing.mode, ["rules", "shadow", "assisted"]),
       models: Object.keys(config.models).length,
       enabledConnections: histogram(types, connectionTypes),

@@ -23,7 +23,7 @@ Selection is scoped to the current request, not a permanently enabled plugin. Th
 
 Skill text, frontmatter, links and scripts are untrusted references. They do not grant tools, credentials, network access or write permission, and cannot override user constraints or approval/disclosure policies. Frontmatter is not interpreted as executable configuration. Referenced files are never automatically attached, and scripts are not automatically executed. SDK skill/extension discovery remains disabled. Absolute paths, traversal, links, special files and protected locations (including `.agents`) remain unavailable; place the intended procedure in a safe workspace `skills/` directory rather than enabling implicit global/project configuration loading.
 
-PDF conversion requires Poppler inside the configured Bubblewrap or rootless Podman sandbox. There is no host-process fallback or automatic download. If the sandbox tools are missing, configure `pdfinfo`, `pdftotext`, and `pdftoppm` inside the sandbox image before selecting PDF content.
+PDF conversion requires Poppler inside the configured Bubblewrap sandbox. There is no host-process fallback or automatic download. If the sandbox tools are missing, install `pdfinfo`, `pdftotext`, and `pdftoppm` or expose them via `execution.runtimePaths` before selecting PDF content.
 
 `@git:status`, `@git:working`, `@git:staged`, `@git:commit:<full-hash>`, and `@git:<full-hash>..<full-hash>` attach bounded read-only repository context. `/git` displays branch, status, and recent commits. Git input never applies, commits, or resets changes; paths identified as secret or protected are rejected.
 

@@ -108,13 +108,7 @@ export const configSchema = z.strictObject({
     .prefault({}),
   execution: z
     .strictObject({
-      backend: z
-        .enum(["bubblewrap", "podman", "disabled"])
-        .default(defaultBackend),
-      image: z
-        .string()
-        .regex(/^[^\s]+@sha256:[a-f0-9]{64}$/)
-        .optional(),
+      backend: z.enum(["bubblewrap", "disabled"]).default(defaultBackend),
       runtimePaths: z.array(z.string().startsWith("/")).default([]),
       commandTimeoutSeconds: z.number().int().min(1).max(3600).default(120),
       maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(64000),
@@ -126,16 +120,6 @@ export const configSchema = z.strictObject({
             command: z.string().min(1).max(8000),
           }),
         )
-        .optional(),
-      managedProcesses: z
-        .strictObject({
-          engineAnchor: z.strictObject({
-            containerId: z.string().regex(/^[a-f0-9]{64}$/),
-            token: z.uuid(),
-          }),
-          maxSeconds: z.number().int().min(1).max(3600).default(600),
-          maxProcesses: z.number().int().min(1).max(2).default(1),
-        })
         .optional(),
     })
     .prefault({}),

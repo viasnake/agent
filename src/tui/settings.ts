@@ -202,8 +202,7 @@ export class SettingsDialog {
       "limits.maxFileBytes": "読み込める 1 ファイルの最大バイト数",
       "limits.maxWorkspaceBytes": "作業コピー全体の最大バイト数",
       "limits.requestTimeoutSeconds": "要求のタイムアウト (秒)",
-      "execution.backend": "隔離実行方式 bubblewrap/podman/disabled",
-      "execution.image": "Podman イメージ（ダイジェスト固定）",
+      "execution.backend": "隔離実行方式 bubblewrap/disabled",
       "execution.runtimePaths": "隔離環境へ読み取り専用で公開するパス",
       "execution.commandTimeoutSeconds": "検査コマンドのタイムアウト (秒)",
       "execution.maxOutputBytes": "検査出力の最大バイト数",
@@ -249,11 +248,9 @@ export class SettingsDialog {
         const optional =
           path[0] === "connections" && path.length === 2
             ? ["secretEnv", "accountEnv", "endpoint"]
-            : path.join(".") === "execution"
-              ? ["image"]
-              : path.join(".") === "routing"
-                ? ["classifier"]
-                : [];
+            : path.join(".") === "routing"
+              ? ["classifier"]
+              : [];
         for (const key of optional)
           if (!(key in node)) visit("", [...path, key]);
         if (path[0] === "models" && path.length === 2 && !("images" in node))
@@ -374,7 +371,6 @@ export class SettingsDialog {
         keys[0] === "mcp" &&
         keys[2] === "tools" &&
         field === "effect") ||
-      keys.join(".") === "execution.image" ||
       keys.join(".") === "routing.classifier";
     const remove = !session && optional && text === "";
     if (!session) {

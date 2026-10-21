@@ -253,68 +253,9 @@ test("development profile and shell mount runtime with distinct write permission
   }
 });
 
-test("development runtime Podman mounts retain network and workspace isolation", async () => {
-  const f = await developmentFixture();
-  try {
-    const runtime = await developmentDirectory(
-      f.store.runDir(f.run.id),
-      f.run,
-      f.task,
-    );
-    const argsSeen: string[][] = [];
-    const sandbox = new Sandbox(
-      {
-        ...f.config.execution,
-        backend: "podman",
-        runtimePaths: [],
-        image: `localhost/test@sha256:${"a".repeat(64)}`,
-      },
-      "darwin",
-      async (_command, args) => {
-        argsSeen.push(args);
-        return {
-          code: 0,
-          stdout: args[0] === "info" ? "true" : "",
-          stderr: "",
-          truncated: false,
-        };
-      },
-    );
-    for (const readOnly of [false, true])
-      await sandbox.execute(
-        f.root,
-        "true",
-        new AbortController().signal,
-        false,
-        { path: runtime, readOnly },
-      );
-    const runs = argsSeen.filter((args) => args[0] === "run");
-    assert.equal(runs.length, 2);
-    for (const [index, args] of runs.entries()) {
-      assert.ok(args.includes("--network=none"));
-      assert.ok(args.includes("--pull=never"));
-      assert.ok(
-        args.some((arg) => arg.endsWith(`:/runtime:${index ? "ro" : "rw"}`)),
-      );
-    }
-    await assert.rejects(
-      () =>
-        sandbox.execute(f.root, "true", new AbortController().signal, false, {
-          path: f.root,
-          readOnly: false,
-        }),
-      { code: "SANDBOX" },
-    );
-  } finally {
-    await f.cleanup();
-  }
-});
-
 test("real Linux development profile installs offline dependencies and builds across isolated calls", async (t) => {
   if (process.platform !== "linux")
-    return t.skip(
-      "Bubblewrap integration is Linux-only; Podman arguments are tested separately",
-    );
+    return t.skip("Bubblewrap integration is Linux-only");
   const f = await developmentFixture();
   try {
     const probe = await f.sandbox.probe(f.root);

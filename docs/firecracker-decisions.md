@@ -43,7 +43,7 @@ guest RAM とは別に固定 VMM overhead を host memory cap へ加える（初
 | -------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `src/tools.ts`                   | 権限、予算、operation journal、ツール引数検査                           | list/read/search/write/edit/delete と Shell はすべて同一 workspace。PR 2 で一括統合 |
 | `src/workspace.ts`               | 元 Git の HEAD/状態取得、安全な初期コピー、適用競合判定                 | 開発用 inventory/diff の入力取得は環境 API 経由。元 `.git` や認証情報を共有しない   |
-| `src/sandbox/`, `src/sandbox.ts` | 従来の明示的 Bubblewrap/Podman バックエンド                             | 新規 VM は別の ExecutionEnvironment。既存 Sandbox の黙示的分岐に混ぜない            |
+| `src/sandbox/`, `src/sandbox.ts` | 従来の明示的 Bubblewrap バックエンド                                    | 新規 VM は別の ExecutionEnvironment。既存 Sandbox の黙示的分岐に混ぜない            |
 | `src/mcp.ts`                     | schema pinning、認可、リモート接続の認証情報                            | stdio MCP の実行・実体ハッシュ検証はゲスト側。ホスト MCP への抜け道は作らない       |
 | `src/validation.ts`              | 検査ポリシー、保護対象、成功判定と Manifest 固定                        | 実行検査は編集環境から独立した microVM。PR 5                                        |
 | `src/artifacts.ts`               | ハッシュ再検証、確認と journal 付き `/diff`・`/apply`、元 repo との照合 | バイナリを含む成果物を制限付き転送。ゲストのディスクをホストで mount/extract しない |

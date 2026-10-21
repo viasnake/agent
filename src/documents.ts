@@ -206,7 +206,7 @@ export async function prepareDocument(
     if (!options.sandbox || !options.signal)
       throw new AgentError(
         "PDF_PREREQUISITE",
-        "PDF selection requires sandboxed Poppler tools; configure Bubblewrap or a pinned rootless Podman image containing pdfinfo, pdftotext and pdftoppm.",
+        "PDF selection requires sandboxed Poppler tools; install pdfinfo, pdftotext and pdftoppm or expose them to the Bubblewrap sandbox via execution.runtimePaths.",
       );
     selected = await extractPdf(
       paths,

@@ -522,7 +522,7 @@ test("archive reader pages exact Japanese messages and resolves original source 
         linked.id,
         linked.generation,
         "worker",
-        "process_start",
+        "external_write",
         "hash",
         "unknown",
         null,

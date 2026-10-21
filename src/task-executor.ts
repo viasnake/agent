@@ -24,7 +24,6 @@ import { taskFailureState } from "./run-state.js";
 import { Sandbox } from "./sandbox.js";
 import { Store } from "./storage.js";
 import { TaskTools } from "./tools.js";
-import type { ManagedProcessRunner } from "./managed-processes.js";
 import {
   AgentError,
   type Run,
@@ -53,7 +52,6 @@ export class TaskExecutor {
     readonly runtime: Runtime,
     readonly sandbox: Sandbox,
     readonly notify: (type: string, detail: Record<string, unknown>) => void,
-    readonly managedProcessRunner?: ManagedProcessRunner,
   ) {}
   async schedule(
     run: Run,
@@ -210,8 +208,6 @@ export class TaskExecutor {
         task,
         join(this.store.runDir(run.id), "work"),
         this.sandbox,
-        undefined,
-        this.managedProcessRunner,
       );
       if (resultFormat === "structured")
         await dispatcher.validateArtifacts(result.artifacts);
@@ -319,8 +315,6 @@ export class TaskExecutor {
         task,
         join(directory, "work"),
         this.sandbox,
-        undefined,
-        this.managedProcessRunner,
       );
     const repositoryReadOnly =
       run.access === "read-only" && !!run.workspace && run.kind === "chat";

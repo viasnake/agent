@@ -85,7 +85,7 @@ export function doctorSummary(
     safeText(report.sandbox.detail),
     ...(!report.sandbox.ok
       ? [
-          "Bubblewrap または rootless Podman を準備し、/settings → 詳細設定 → execution を確認してください。",
+          "Bubblewrap を準備し、/settings → 詳細設定 → execution を確認してください。",
         ]
       : []),
     "## 接続",

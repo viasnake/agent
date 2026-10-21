@@ -1,34 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configSchema, validateConfig } from "../src/config.js";
-import {
-  defaultBackend,
-  defaultHome,
-  podmanEnvironment,
-} from "../src/platform.js";
+import { defaultBackend, defaultHome } from "../src/platform.js";
 import { Sandbox } from "../src/sandbox.js";
-import { type ProcessOptions, type ProcessResult } from "../src/process.js";
-import { AgentError } from "../src/types.js";
+import { sha256 } from "../src/util.js";
 
-const image = `localhost/agent-fixture@sha256:${"a".repeat(64)}`;
 const execution = () =>
   configSchema.parse({
     schemaVersion: 1,
-    execution: { backend: "podman", image },
+    execution: { backend: "bubblewrap" },
   }).execution;
-const ok = (stdout = ""): ProcessResult => ({
-  code: 0,
-  stdout,
-  stderr: "",
-  truncated: false,
-});
 
 test("OS defaults select a usable sandbox and conventional private storage without changing explicit policies", () => {
-  assert.equal(defaultBackend("darwin"), "podman");
   assert.equal(defaultBackend("linux"), "bubblewrap");
+  assert.equal(defaultBackend("darwin"), "disabled");
+  assert.equal(defaultBackend("win32"), "disabled");
   assert.equal(
     defaultHome("darwin", "/Users/me"),
     "/Users/me/Library/Application Support/Local Agent",
@@ -44,7 +33,7 @@ test("OS defaults select a usable sandbox and conventional private storage witho
   );
   const config = validateConfig({
     schemaVersion: 1,
-    execution: { backend: "podman", image },
+    execution: { backend: "bubblewrap" },
     mcp: {
       docs: {
         transport: "stdio",
@@ -57,203 +46,69 @@ test("OS defaults select a usable sandbox and conventional private storage witho
   assert.equal(config.mcp.docs?.transport, "stdio");
 });
 
-test("Podman host credentials are limited to its connection and never become container environment arguments", async () => {
-  const env = podmanEnvironment({
-    HOME: "/Users/test",
-    PATH: "/opt/homebrew/bin:/usr/bin",
-    SSH_AUTH_SOCK: "/private/socket",
-    OPENAI_API_KEY: "fixture-secret",
-    AWS_SECRET_ACCESS_KEY: "fixture-secret",
-  });
-  assert.equal(env.HOME, "/Users/test");
-  assert.equal(env.SSH_AUTH_SOCK, "/private/socket");
-  assert.equal(env.OPENAI_API_KEY, undefined);
-  assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
-  const root = await mkdtemp(join(tmpdir(), "agent podman "));
-  const calls: Array<{ args: string[]; options: ProcessOptions }> = [];
-  const runner = async (
-    _command: string,
-    args: string[],
-    options: ProcessOptions = {},
-  ) => {
-    calls.push({ args, options });
-    return args[0] === "info" ? ok("true\n") : ok("tool output");
-  };
-  try {
-    const sandbox = new Sandbox(execution(), "darwin", runner);
-    assert.equal(
-      (
-        await sandbox.execute(
-          root,
-          "printf hello",
-          new AbortController().signal,
-          true,
-        )
-      ).stdout,
-      "tool output",
-    );
-    const args = calls[1]!.args;
-    assert.ok(args.includes("--network=none"));
-    assert.ok(args.includes("--pull=never"));
-    assert.ok(args.includes("--interactive"));
-    assert.ok(args.includes("--entrypoint=/bin/sh"));
-    assert.ok(args.some((arg) => arg.endsWith(":/workspace:ro")));
-    assert.deepEqual(
-      args.filter((arg) => arg.startsWith("--env=")),
-      ["--env=HOME=/tmp", "--env=TMPDIR=/tmp"],
-    );
-    assert.deepEqual(args.slice(-3), [image, "-c", "printf hello"]);
-    const name = args.find((arg) => arg.startsWith("--name="))!.slice(7);
-    assert.deepEqual(calls[2]!.args, ["rm", "--force", "--ignore", name]);
-    assert.equal(calls[2]!.options.signal, undefined);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("Podman cancels remote containers even when the local client aborts", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agent-cancel-"));
-  const calls: string[][] = [];
-  const controller = new AbortController();
-  const runner = async (_command: string, args: string[]) => {
-    calls.push(args);
-    if (args[0] === "run") {
-      controller.abort();
-      throw new AgentError("CANCELLED", "cancelled");
-    }
-    return ok("true");
-  };
-  try {
-    await assert.rejects(
-      () =>
-        new Sandbox(execution(), "darwin", runner).execute(
-          root,
-          "sleep 30",
-          controller.signal,
-        ),
-      /cancelled/,
-    );
-    assert.equal(calls.at(-1)?.[0], "rm");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("failed Podman cleanup cannot report a successful tool result", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agent-cleanup-"));
-  try {
-    const sandbox = new Sandbox(
-      execution(),
-      "darwin",
-      async (_command, args) =>
-        args[0] === "rm" ? { ...ok(), code: 125 } : ok("true"),
-    );
-    await assert.rejects(
-      () => sandbox.execute(root, "true", new AbortController().signal),
-      (error: unknown) =>
-        error instanceof AgentError && error.code === "SANDBOX_CLEANUP",
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("unsupported backends, rootful engines and host runtime mounts fail before dispatch", async () => {
+test("non-Linux platforms and disabled backends fail before dispatch", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-backend-"));
   try {
     await assert.rejects(
-      () =>
-        new Sandbox(
-          { ...execution(), backend: "bubblewrap" },
-          "darwin",
-        ).invocation(root, ["/bin/sh"]),
+      () => new Sandbox(execution(), "darwin").invocation(root, ["/bin/sh"]),
+      /requires Linux/,
+    );
+    await assert.rejects(
+      () => new Sandbox(execution(), "win32").invocation(root, ["/bin/sh"]),
       /requires Linux/,
     );
     await assert.rejects(
       () =>
-        new Sandbox(execution(), "darwin", async () => ok("false")).invocation(
-          root,
-          ["/bin/sh"],
-        ),
-      /rootless/,
-    );
-    await assert.rejects(
-      () =>
         new Sandbox(
-          { ...execution(), runtimePaths: ["/opt/node"] },
-          "darwin",
+          { ...execution(), backend: "disabled" },
+          "linux",
         ).invocation(root, ["/bin/sh"]),
-      /pinned Linux image/,
-    );
-    await assert.rejects(
-      () =>
-        new Sandbox({ ...execution(), image: undefined }, "darwin").invocation(
-          root,
-          ["/bin/sh"],
-        ),
-      /pinned by sha256/,
+      /disabled/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("Podman MCP hashes the image executable and rejects changed or mutable programs", async () => {
+test("verifyExecutable hashes the host program and rejects changed programs", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-image-"));
-  const calls: string[][] = [];
-  const digest = "b".repeat(64);
-  const runner = async (_command: string, args: string[]) => {
-    calls.push(args);
-    return ok(args[0] === "run" ? `${digest}  /usr/bin/server\n` : "true");
-  };
   try {
-    const sandbox = new Sandbox(execution(), "darwin", runner);
-    const signal = new AbortController().signal;
-    await sandbox.verifyExecutable(root, "/usr/bin/server", digest, signal);
-    assert.ok(calls[1]!.includes("--entrypoint=/usr/bin/sha256sum"));
-    assert.deepEqual(calls[1]!.slice(-3), [image, "--", "/usr/bin/server"]);
+    const command = join(root, "server");
+    await writeFile(command, "fixture");
+    const sandbox = new Sandbox(execution(), "linux", async () => ({
+      code: 0,
+      stdout: "",
+      stderr: "",
+      truncated: false,
+    }));
+    await sandbox.verifyExecutable(command, sha256("fixture"));
     await assert.rejects(
-      () =>
-        sandbox.verifyExecutable(
-          root,
-          "/usr/bin/server",
-          "c".repeat(64),
-          signal,
-        ),
+      () => sandbox.verifyExecutable(command, "c".repeat(64)),
       /pinned hash/,
     );
     await assert.rejects(
-      () => sandbox.verifyExecutable(root, "/workspace/server", digest, signal),
-      /immutable image/,
+      () => sandbox.verifyExecutable("server", sha256("fixture")),
+      /absolute path/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("real Podman isolates commands and preserves host workspace changes", async (t) => {
-  const configuredImage = process.env.AGENT_TEST_PODMAN_IMAGE;
-  if (!configuredImage) {
-    if (process.env.AGENT_REQUIRE_PODMAN === "1")
-      assert.fail(
-        "Set AGENT_TEST_PODMAN_IMAGE to a preloaded digest-pinned Linux image",
-      );
-    t.skip("AGENT_TEST_PODMAN_IMAGE is not configured");
-    return;
-  }
-  // On macOS this directory must be shared with Podman machine at the same path.
-  const root = await mkdtemp(
-    join(
-      process.env.AGENT_TEST_PODMAN_DIRECTORY ?? tmpdir(),
-      "agent-podman-live-",
-    ),
-  );
+test("real Bubblewrap isolates commands and preserves host workspace changes", async (t) => {
+  if (process.platform !== "linux")
+    return t.skip("Bubblewrap integration is Linux-only");
+  const root = await mkdtemp(join(tmpdir(), "agent-bwrap-live-"));
   const work = join(root, "work");
   await mkdir(work);
   try {
-    const sandbox = new Sandbox({ ...execution(), image: configuredImage });
+    const sandbox = new Sandbox(execution());
     const probe = await sandbox.probe(work);
-    assert.equal(probe.ok, true, probe.detail);
+    if (!probe.ok) {
+      if (process.env.AGENT_REQUIRE_SANDBOX === "1") assert.fail(probe.detail);
+      t.skip(probe.detail);
+      return;
+    }
     const signal = new AbortController().signal;
     assert.equal(
       (await sandbox.execute(work, "printf changed > result.txt", signal)).code,
@@ -269,7 +124,7 @@ test("real Podman isolates commands and preserves host workspace changes", async
       0,
     );
     assert.notEqual(
-      (await sandbox.execute(work, "printf denied > /etc/host-test", signal))
+      (await sandbox.execute(work, "printf denied > /usr/host-test", signal))
         .code,
       0,
     );
