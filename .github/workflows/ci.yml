@@ -6,11 +6,7 @@ permissions:
   contents: read
 jobs:
   verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-15, macos-15-intel]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
@@ -18,15 +14,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux
       - run: npm ci --ignore-scripts
       - run: npm run format:check
       - run: npm run check
       - run: npm run build
-      - if: runner.os == 'Linux'
-        name: Run the Firecracker helper and guest runner unit tests
+      - name: Run the Firecracker helper and guest runner unit tests
         run: python3 -m unittest discover -s tests/firecracker -p 'test_*.py'
       - run: npm test
         env:
-          AGENT_REQUIRE_SANDBOX: ${{ runner.os == 'Linux' && '1' || '0' }}
+          AGENT_REQUIRE_SANDBOX: "1"
