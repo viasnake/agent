@@ -1,5 +1,5 @@
-import { readdir, realpath } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { lstat, readdir, realpath } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import type {
   AutocompleteItem,
   AutocompleteProvider,
@@ -129,6 +129,7 @@ export class AttachmentAutocompleteProvider implements AutocompleteProvider {
           !entry.isSymbolicLink() &&
           (entry.isFile() || entry.isDirectory()) &&
           !entry.name.includes('"') &&
+          !/[\u0000-\u001f\u007f]/.test(entry.name) &&
           !secretPath(`${directoryPrefix}${entry.name}`) &&
           entry.name.toLowerCase().startsWith(basenamePrefix.toLowerCase()),
       )
@@ -136,19 +137,32 @@ export class AttachmentAutocompleteProvider implements AutocompleteProvider {
         (a, b) =>
           Number(b.isDirectory()) - Number(a.isDirectory()) ||
           a.name.localeCompare(b.name),
+      );
+    const items: AutocompleteItem[] = [];
+    for (const entry of matching) {
+      if (items.length >= maxSuggestions) break;
+      if (
+        entry.isFile() &&
+        !(await this.isAttachableFile(join(directory, entry.name)))
       )
-      .slice(0, maxSuggestions);
-    if (!matching.length) return null;
-
-    const items = matching.map((entry) => {
+        continue;
       const path = `${directoryPrefix}${entry.name}${entry.isDirectory() ? "/" : ""}`;
       const needsQuotes = quoted || /\s/.test(path);
       const value = needsQuotes ? `@"${path}"` : `@${path}`;
-      return {
+      items.push({
         value,
         label: `${entry.name}${entry.isDirectory() ? "/" : ""}`,
-      };
-    });
-    return { items, prefix };
+      });
+    }
+    return items.length ? { items, prefix } : null;
+  }
+
+  private async isAttachableFile(path: string): Promise<boolean> {
+    try {
+      const info = await lstat(path);
+      return info.isFile() && !info.isSymbolicLink() && info.nlink === 1;
+    } catch {
+      return false;
+    }
   }
 }

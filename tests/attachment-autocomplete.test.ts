@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ test("attachment autocomplete falls back to safe workspace directory suggestions
   try {
     await writeFile(join(workspace, "notes.md"), "");
     await writeFile(join(workspace, "my file.md"), "");
+    await writeFile(join(workspace, "line\nbreak.md"), "");
     await mkdir(join(workspace, "dir"));
     await writeFile(join(workspace, "dir", "a.txt"), "");
     await symlink(join(workspace, "dir"), join(workspace, "inside-link"));
@@ -34,6 +35,14 @@ test("attachment autocomplete falls back to safe workspace directory suggestions
       (await suggestions("@no"))?.items.map((item) => item.value),
       ["@notes.md"],
     );
+    await link(join(workspace, "notes.md"), join(workspace, "hard.md"));
+    assert.equal(await suggestions("@ha"), null);
+    assert.ok(
+      !(await suggestions("@no"))?.items.some(
+        (item) => item.value === "@notes.md",
+      ),
+    );
+    assert.equal(await suggestions("@li"), null);
     assert.deepEqual(
       (await suggestions('@"my'))?.items.map((item) => item.value),
       ['@"my file.md"'],
