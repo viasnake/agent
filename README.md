@@ -21,7 +21,7 @@ cd /path/to/your-repository
 agent
 ```
 
-依存関係が無い・古い場合は `npm run build` が自動で `npm ci --ignore-scripts` を実行します。
+依存関係が無い・古い場合は `npm run build` が自動で package-lock.json どおりにインストールします。
 
 初回は接続が無効です。Ctrl+P →「接続・権限・上限」（`/settings`）で準備します。
 未設定時だけ設定への案内を表示します。設定後は会話と入力を中心に、モデル・担当構成・送信区分を入力欄の下にまとめます。設定済みであっても、実モデルの疎通を確認したことにはなりません。
