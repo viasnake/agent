@@ -555,7 +555,7 @@ test("doctor summarizes failures with next actions rather than only JSON", () =>
   });
   assert.match(report, /モデルは呼び出していません/);
   assert.match(report, /隔離環境: 要対応/);
-  assert.match(report, /Bubblewrap.*Podman/);
+  assert.match(report, /Bubblewrap/);
   assert.match(report, /ローカル接続（認証の疎通は未確認）/);
   assert.doesNotMatch(report, /起動環境に設定あり/);
 });

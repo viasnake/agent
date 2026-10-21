@@ -198,7 +198,7 @@ export async function extractPdf(
     if (error instanceof AgentError) throw error;
     throw new AgentError(
       "PDF_PREREQUISITE",
-      `Sandboxed Poppler conversion is unavailable: ${error instanceof Error ? error.message : "unknown error"}. Configure Bubblewrap or a pinned rootless Podman image containing pdfinfo, pdftotext and pdftoppm.`,
+      `Sandboxed Poppler conversion is unavailable: ${error instanceof Error ? error.message : "unknown error"}. Install pdfinfo, pdftotext and pdftoppm or expose them to the Bubblewrap sandbox via execution.runtimePaths.`,
     );
   } finally {
     await rm(scratch, { recursive: true, force: true });

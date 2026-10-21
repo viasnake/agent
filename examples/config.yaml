@@ -92,9 +92,8 @@ limits:
   requestTimeoutSeconds: 180
 
 execution:
-  # Defaults to bubblewrap on Linux and podman on macOS.
-  # backend: podman
-  # image: registry.example/agent-runtime@sha256:REPLACE_WITH_DIGEST
+  # Defaults to bubblewrap on Linux and disabled on other platforms.
+  # backend: bubblewrap
   # Add only trusted language installations needed inside the sandbox.
   # Example: [/opt/node/24]
   runtimePaths: []

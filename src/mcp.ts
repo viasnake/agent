@@ -67,10 +67,8 @@ export class McpTools {
           "Network-isolated stdio servers do not receive secret environment variables; use HTTP for authenticated remote services",
         );
       await this.sandbox.verifyExecutable(
-        this.root,
         server.command!,
         server.commandSha256!,
-        this.signal,
       );
       const invocation = await this.sandbox.invocation(
         this.root,

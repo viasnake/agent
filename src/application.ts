@@ -3701,8 +3701,7 @@ export class Application extends EventEmitter {
           }),
         ),
         inference: "未実行。/probe で明示的に実行",
-        isolation:
-          "ネットワークなし。依存は runtimePaths または固定コンテナへ事前準備",
+        isolation: "ネットワークなし。依存は runtimePaths で事前準備",
       };
     } finally {
       await rm(directory, { recursive: true, force: true });

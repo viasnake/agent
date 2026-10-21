@@ -5,7 +5,6 @@ import { AgentError } from "./types.js";
 import { runProcess, type ProcessResult } from "./process.js";
 import { privateDirectory, sha256, within } from "./util.js";
 import { bubblewrapInvocation } from "./sandbox/bubblewrap.js";
-import { podmanInvocation } from "./sandbox/podman.js";
 import type { SandboxInvocation, SandboxRuntime } from "./sandbox/types.js";
 
 export class Sandbox {
@@ -24,11 +23,8 @@ export class Sandbox {
   ): Promise<SandboxInvocation> {
     if (!command.length || !command[0])
       throw new AgentError("SANDBOX", "A sandbox command is required");
-    if (!["linux", "darwin"].includes(this.platform))
-      throw new AgentError(
-        "SANDBOX",
-        "Command isolation supports Linux and macOS",
-      );
+    if (this.platform !== "linux")
+      throw new AgentError("SANDBOX", "Bubblewrap requires Linux");
     if (this.config.backend === "disabled")
       throw new AgentError("SANDBOX", "Command execution is disabled");
     const root = await realpath(workspace);
@@ -42,20 +38,6 @@ export class Sandbox {
         );
       runtime = { ...runtime, path };
     }
-    if (this.config.backend === "podman")
-      return podmanInvocation(
-        this.config,
-        root,
-        command,
-        readOnly,
-        this.processRunner,
-        runtime,
-      );
-    if (this.platform !== "linux")
-      throw new AgentError(
-        "SANDBOX",
-        "Bubblewrap requires Linux; configure Podman on macOS",
-      );
     return bubblewrapInvocation(
       this.config,
       root,
@@ -128,44 +110,13 @@ export class Sandbox {
     });
   }
 
-  async verifyExecutable(
-    workspace: string,
-    command: string,
-    digest: string,
-    signal: AbortSignal,
-  ): Promise<void> {
+  async verifyExecutable(command: string, digest: string): Promise<void> {
     if (posix.normalize(command) !== command || !command.startsWith("/"))
       throw new AgentError(
         "MCP_CHANGED",
         "MCP command must be a normalized absolute path",
       );
-    let actual: string;
-    if (this.config.backend === "podman") {
-      // macOS executables cannot run in a Linux VM. Verify the image's program.
-      if (
-        ["/workspace", "/tmp", "/proc", "/dev"].some(
-          (p) => command === p || command.startsWith(`${p}/`),
-        )
-      )
-        throw new AgentError(
-          "MCP_CHANGED",
-          "MCP executable must belong to the immutable image",
-        );
-      const result = await this.run(
-        workspace,
-        ["/usr/bin/sha256sum", "--", command],
-        signal,
-        true,
-      );
-      if (result.code !== 0)
-        throw new AgentError(
-          "MCP_CHANGED",
-          "Cannot hash the MCP executable in the pinned image",
-        );
-      actual = result.stdout.split(/\s/)[0]!;
-    } else {
-      actual = sha256(await readFile(command));
-    }
+    const actual = sha256(await readFile(command));
     if (actual !== digest)
       throw new AgentError(
         "MCP_CHANGED",
@@ -186,8 +137,7 @@ export class Sandbox {
       });
       const marker = join(markerDirectory, "host-only");
       await writeFile(marker, "host-only", { mode: 0o600 });
-      const hidden = [marker, "/var/run/docker.sock"];
-      if (this.config.backend === "bubblewrap") hidden.push("/etc/shadow");
+      const hidden = [marker, "/var/run/docker.sock", "/etc/shadow"];
       const quote = (path: string) => "'" + path.replace(/'/g, "'\\''") + "'";
       const result = await this.execute(
         workspace,

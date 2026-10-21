@@ -6,11 +6,7 @@ permissions:
   contents: read
 jobs:
   verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-15, macos-15-intel]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
@@ -18,39 +14,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap podman tmux
-      - if: runner.os == 'Linux'
-        name: Delegate cgroup controllers to the rootless runner
-        run: |
-          user_unit="user@$(id -u).service"
-          sudo systemctl start "$user_unit"
-          sudo mkdir -p "/etc/systemd/system/$user_unit.d"
-          printf '[Service]\nDelegate=cpu cpuset memory pids\n' | sudo tee "/etc/systemd/system/$user_unit.d/delegate.conf"
-          sudo systemctl daemon-reload
-          # Realize the updated cgroup configuration without restarting user services.
-          sudo systemctl set-property --runtime "$user_unit" CPUAccounting=yes
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-          control_group=$(systemctl show "$user_unit" --property=ControlGroup --value)
-          test -n "$control_group"
-          cat "/sys/fs/cgroup$control_group/cgroup.controllers"
-          for controller in cpu cpuset memory pids; do
-            grep -qw "$controller" "/sys/fs/cgroup$control_group/cgroup.controllers"
-          done
-      - if: runner.os == 'Linux'
-        name: Prepare the rootless container integration fixture
-        run: |
-          podman pull docker.io/library/alpine:3.22
-          fixture_image=$(podman image inspect docker.io/library/alpine:3.22 --format '{{index .RepoDigests 0}}')
-          echo "AGENT_TEST_PODMAN_IMAGE=$fixture_image" >> "$GITHUB_ENV"
-          echo "AGENT_REQUIRE_PODMAN=1" >> "$GITHUB_ENV"
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux
       - run: npm ci --ignore-scripts
       - run: npm run format:check
       - run: npm run check
       - run: npm run build
-      - if: runner.os == 'Linux'
-        name: Run the Firecracker helper and guest runner unit tests
+      - name: Run the Firecracker helper and guest runner unit tests
         run: python3 -m unittest discover -s tests/firecracker -p 'test_*.py'
       - run: npm test
         env:
-          AGENT_REQUIRE_SANDBOX: ${{ runner.os == 'Linux' && '1' || '0' }}
+          AGENT_REQUIRE_SANDBOX: "1"
