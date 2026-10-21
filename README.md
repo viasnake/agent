@@ -15,12 +15,13 @@ Node.js 24 以上と Git が必要です。主な利用対象は Linux の端末
 ## 起動と設定
 
 ```sh
-npm ci --ignore-scripts
 npm run build
 npm link
 cd /path/to/your-repository
 agent
 ```
+
+依存関係が無い・古い場合は `npm run build` が自動で `npm ci --ignore-scripts` を実行します。
 
 初回は接続が無効です。Ctrl+P →「接続・権限・上限」（`/settings`）で準備します。
 未設定時だけ設定への案内を表示します。設定後は会話と入力を中心に、モデル・担当構成・送信区分を入力欄の下にまとめます。設定済みであっても、実モデルの疎通を確認したことにはなりません。

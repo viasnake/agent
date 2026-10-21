@@ -21,6 +21,7 @@
     "examples"
   ],
   "scripts": {
+    "prebuild": "node scripts/ensure-dependencies.mjs",
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "test": "tsc --outDir .test-dist && node --test --experimental-test-isolation=none --test-concurrency=1 .test-dist/tests/*.test.js",
