@@ -18,20 +18,25 @@ export async function interactiveLogin(
   ui: LoginInteraction,
 ): Promise<void> {
   const { login } = await import("./runtime/providers.js");
+  // The prompt overlay replaces whatever ui.show displayed, so the last auth
+  // link is repeated inside the prompt itself for the login to be completable.
+  let authLink = "";
   await login(config, paths, name, {
     signal: ui.signal,
     notify: (event) => {
-      if (event.type === "auth_url")
-        ui.show(`${event.url}\n${event.instructions ?? ""}`);
-      else if (event.type === "device_code")
-        ui.show(`${event.verificationUri}\n${event.userCode}`);
-      else ui.show(event.message);
+      if (event.type === "auth_url") {
+        authLink = `${event.url}\n${event.instructions ?? ""}`.trimEnd();
+        ui.show(authLink);
+      } else if (event.type === "device_code") {
+        authLink = `${event.verificationUri}\n${event.userCode}`;
+        ui.show(authLink);
+      } else ui.show(event.message);
     },
     prompt: (prompt) => {
       if (prompt.type === "secret")
         throw new AgentError("AUTH", "API キーは環境変数で指定してください。");
       return ui.prompt(
-        prompt.message,
+        authLink ? `${prompt.message}\n\n${authLink}` : prompt.message,
         prompt.type === "select" ? prompt.options : undefined,
         prompt.signal,
       );
