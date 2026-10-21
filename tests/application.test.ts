@@ -276,6 +276,15 @@ test("explicit no-change prohibitions take precedence over change verbs", () => 
   );
   assert.equal(inferAccess("fix this bug"), "change");
   assert.equal(inferAccess("実装して"), "change");
+  assert.equal(
+    inferAccess(
+      "次の文書改訂案を確認し、新しい文書として保存してください。まだ検査していません。\n参照元: {...}\n改訂内容の本文です。",
+    ),
+    "change",
+  );
+  assert.equal(inferAccess("改訂して"), "change");
+  assert.equal(inferAccess("変更せず保存して"), "read-only");
+  assert.equal(inferAccess("保存方法を説明して"), "read-only");
   assert.equal(inferAccess("ambiguous follow-up"), "read-only");
 });
 

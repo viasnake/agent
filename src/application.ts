@@ -222,7 +222,7 @@ export function inferAccess(
   if (explicitReadOnly.test(text) || exploratoryRequest.test(text))
     return "read-only";
   if (
-    /実装して|修正して|変更して|作って|作成して|調査して|整文して|執筆して|追加して|削除して|直して|\b(?:fix|implement|refactor|add|remove|change|write|draft)\b/i.test(
+    /実装して|修正して|変更して|作って|作成して|調査して|整文して|執筆して|追加して|削除して|保存して|改訂して|直して|\b(?:fix|implement|refactor|add|remove|change|write|draft)\b/i.test(
       text,
     )
   )
