@@ -1400,13 +1400,8 @@ test("configuration forms save through the schema, back up, and reject external 
   try {
     await writeFile(f.p.config, stringify(f.config), { mode: 0o600 });
     await app.initialize();
-    const picks = ["local", "manual"],
-      answers = [
-        "second-local",
-        "http://127.0.0.1:8080/v1",
-        "second-model",
-        "fixture-model",
-      ];
+    const picks = ["local", "skip"],
+      answers = ["second-local", "http://127.0.0.1:8080/v1", "fixture-model"];
     let editCount = 0;
     await new SettingsDialog(app, {
       edit: async () =>
@@ -1418,8 +1413,8 @@ test("configuration forms save through the schema, back up, and reject external 
     }).open();
     const saved = await loadConfig(f.p);
     assert.equal(saved.connections["second-local"]!.enabled, false);
-    assert.equal(saved.models["second-model"]!.id, "fixture-model");
-    assert.equal(saved.models["second-model"]!.tools, false);
+    assert.equal(saved.models["fixture-model"]!.id, "fixture-model");
+    assert.equal(saved.models["fixture-model"]!.tools, true);
     assert.equal(runtime.requests.length, 0);
     assert.ok(await readFile(`${f.p.config}.bak`, "utf8"));
     const unsafe = structuredClone(app.config);

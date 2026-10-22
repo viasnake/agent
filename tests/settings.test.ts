@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { Application } from "../src/application.js";
-import { validateConfig } from "../src/config.js";
+import { paths, validateConfig } from "../src/config.js";
 import { SettingsDialog, type SettingsUi } from "../src/tui/settings.js";
 import {
   SettingsEditor,
@@ -10,6 +13,218 @@ import {
 import { safeText } from "../src/tui/components.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { testConfig } from "./helpers.js";
+
+function modelSettings(config = testConfig(), home = "/unused") {
+  const notices: string[] = [];
+  let saves = 0;
+  const app = {
+    get config() {
+      return config;
+    },
+    paths: paths(home),
+    session: {
+      checks: [],
+      dataClass: "private",
+      localOnly: false,
+      includeUntracked: false,
+    },
+    async saveConfiguration(raw: unknown) {
+      config = validateConfig(raw);
+      saves++;
+    },
+  } as unknown as Application;
+  return {
+    app,
+    notices,
+    get saves() {
+      return saves;
+    },
+    async add(
+      action: "model" | "connection",
+      dialogs: Pick<SettingsUi, "choose" | "prompt">,
+    ) {
+      let opened = false;
+      await new SettingsDialog(app, {
+        ...dialogs,
+        edit: async () => {
+          if (opened) return;
+          opened = true;
+          return { value: action };
+        },
+        confirm: async () => {
+          assert.fail("registration needs no extra confirmation");
+        },
+        run: async () => {
+          assert.fail("registration must not run a probe");
+        },
+        notify: (text) => notices.push(text),
+      }).open();
+    },
+  };
+}
+
+test("manual model registration needs only connection and ID, with no probe or tool activation", async () => {
+  for (const enabled of [true, false]) {
+    const config = testConfig();
+    config.connections.local!.enabled = enabled;
+    const originalModels = structuredClone(config.models);
+    const fixture = modelSettings(config);
+    const choices: string[] = [],
+      prompts: string[] = [];
+    await fixture.add("model", {
+      choose: async (title) => {
+        choices.push(title);
+        return "local";
+      },
+      prompt: async (title) => {
+        prompts.push(title);
+        return " org/model.v1:latest ";
+      },
+    });
+    assert.deepEqual(choices, ["接続"]);
+    assert.deepEqual(prompts, ["モデル ID"]);
+    assert.equal(fixture.saves, 1);
+    assert.deepEqual(fixture.notices, [
+      "モデル org/model.v1:latest を保存しました。",
+    ]);
+    const added = Object.values(fixture.app.config.models).find(
+      (m) => m.id === "org/model.v1:latest",
+    )!;
+    assert.equal(added.tools, true);
+    assert.equal(added.connection, "local");
+    assert.equal(fixture.app.config.connections.local!.enabled, enabled);
+    for (const [key, entry] of Object.entries(originalModels))
+      assert.deepEqual(fixture.app.config.models[key], entry);
+    await fixture.add("model", {
+      choose: async () => "local",
+      prompt: async () => "org/model.v1:latest",
+    });
+    assert.equal(fixture.saves, 1);
+    assert.match(fixture.notices.at(-1)!, /登録済み/);
+  }
+});
+
+test("generated model keys preserve colliding IDs, other connections and legacy profiles", async () => {
+  const config = testConfig();
+  config.connections.other = { ...config.connections.local! };
+  const fixture = modelSettings(config);
+  for (const [connection, id] of [
+    ["local", "worker"],
+    ["local", "org/a.b"],
+    ["local", "org/a-b"],
+    ["other", "org/a.b"],
+    ["local", "x".repeat(200)],
+  ]) {
+    await fixture.add("model", {
+      choose: async () => connection,
+      prompt: async () => id,
+    });
+  }
+  assert.equal(fixture.saves, 5);
+  assert.equal(Object.keys(fixture.app.config.models).length, 7);
+  assert.equal(fixture.app.config.models.worker!.id, "worker-fixture");
+  assert.deepEqual(
+    Object.values(fixture.app.config.models)
+      .map((m) => [m.connection, m.id])
+      .slice(2),
+    [
+      ["local", "worker"],
+      ["local", "org/a.b"],
+      ["local", "org/a-b"],
+      ["other", "org/a.b"],
+      ["local", "x".repeat(200)],
+    ],
+  );
+});
+
+test("catalog opens directly and selection or manual entry saves without network requests", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "agent-model-settings-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    requests++;
+    throw new Error("Model registration must remain offline");
+  });
+  for (const type of ["chatgpt", "gemini"] as const) {
+    for (const manual of [false, true]) {
+      const config = testConfig();
+      config.connections.provider = {
+        type,
+        enabled: true,
+        account: "fixture",
+        billing: type === "chatgpt" ? "subscription" : "api",
+        allowedData: ["public"],
+        requestsPerMinute: 60,
+        maxRequestUsd: 0,
+      };
+      const fixture = modelSettings(config, home);
+      const titles: string[] = [];
+      let chosen: string | undefined;
+      await fixture.add("model", {
+        choose: async (title, choices) => {
+          titles.push(title);
+          if (title === "接続") return "provider";
+          assert.ok(choices.length > 1);
+          assert.equal(choices.at(-1)!.value, "@manual");
+          chosen = manual ? "custom-model.v1" : choices[0]!.value;
+          return manual ? "@manual" : chosen;
+        },
+        prompt: async (title) => {
+          assert.equal(manual, true);
+          assert.equal(title, "モデル ID");
+          return chosen;
+        },
+      });
+      assert.deepEqual(titles, ["接続", "モデルを選択"]);
+      assert.equal(fixture.saves, 1, fixture.notices.join("\n"));
+      assert.equal(
+        Object.values(fixture.app.config.models).find((m) => m.id === chosen)!
+          .tools,
+        true,
+      );
+      assert.deepEqual(fixture.notices, [`モデル ${chosen} を保存しました。`]);
+    }
+  }
+  assert.equal(requests, 0);
+});
+
+test("cancelling model registration leaves configuration unchanged", async () => {
+  for (const cancelConnection of [true, false]) {
+    const fixture = modelSettings();
+    await fixture.add("model", {
+      choose: async () => (cancelConnection ? undefined : "local"),
+      prompt: async () => undefined,
+    });
+    assert.equal(fixture.saves, 0);
+    assert.deepEqual(fixture.notices, []);
+    assert.deepEqual(fixture.app.config, testConfig());
+  }
+});
+
+test("adding a connection with its model offers activation without a probe", async () => {
+  const fixture = modelSettings();
+  const answers = ["second", "http://127.0.0.1:8080/v1", "fixture.v1"];
+  const titles: string[] = [];
+  await fixture.add("connection", {
+    choose: async (title, choices) => {
+      titles.push(title);
+      assert.ok(choices.every((choice) => choice.value !== "probe"));
+      return title === "接続の種類" ? "local" : "enable";
+    },
+    prompt: async () => answers.shift(),
+  });
+  assert.deepEqual(titles, ["接続の種類", "second を有効にしますか？"]);
+  assert.equal(fixture.saves, 1);
+  assert.equal(fixture.app.config.connections.second!.enabled, true);
+  const model = Object.values(fixture.app.config.models).find(
+    (m) => m.connection === "second",
+  )!;
+  assert.equal(model.id, "fixture.v1");
+  assert.equal(model.tools, true);
+  assert.deepEqual(fixture.notices, [
+    "second とモデル fixture.v1 を保存しました。",
+  ]);
+});
 
 test("thinking profile edits are staged, cancellable and removable without adding defaults", async () => {
   for (const approve of [false, true]) {
