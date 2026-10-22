@@ -13,7 +13,6 @@ import {
   ScrollBoxRenderable,
   TextareaRenderable,
   TextRenderable,
-  TextAttributes,
   defaultTextareaKeyBindings,
   type CliRenderer,
   type KeyBinding,
@@ -426,7 +425,7 @@ export class Picker extends BoxRenderable {
     title: string,
     items: PickerItem[],
     searchable: boolean,
-    rows: () => number = () => ctx.height,
+    private readonly rows: () => number = () => ctx.height,
   ) {
     super(ctx, {
       border: true,
@@ -468,11 +467,8 @@ export class Picker extends BoxRenderable {
   }
 
   get maxVisible(): number {
-    return Math.max(3, Math.min(8, this.panelHeight() - 6));
-  }
-
-  private panelHeight(): number {
-    return typeof this.height === "number" ? this.height : 20;
+    // 自身の描画高ではなく端末高から出す（内容高に自己制限されて常時3件になるのを防ぐ）
+    return Math.max(3, Math.min(10, this.rows() - 8));
   }
 
   private query(): string {
@@ -499,13 +495,10 @@ export class Picker extends BoxRenderable {
     const ctx = this.ctx as CliRenderer;
     this.filtered.slice(start, start + this.maxVisible).forEach((item, i) => {
       const selected = start + i === this.index;
+      const label = `${selected ? "▸" : " "} ${item.label}`;
       const line = new TextRenderable(ctx, {
         content: new StyledText([
-          {
-            __isChunk: true,
-            text: `${selected ? "▸" : " "} ${item.label}`,
-            ...(selected ? { attributes: TextAttributes.INVERSE } : {}),
-          },
+          selected ? theme.selected(label) : { __isChunk: true, text: label },
         ]),
       });
       this.listBox.add(line);
@@ -648,12 +641,18 @@ export class Reader extends BoxRenderable {
     });
     this.scroll = new ScrollBoxRenderable(ctx, {
       flexGrow: 1,
+      flexShrink: 1,
+      minHeight: 0, // 内容高をそのまま取ってフッターへ滲まないよう縮小を許す
       scrollY: true,
       stickyScroll: false,
       viewportCulling: true,
     });
+    // クリックでスクロールがフォーカスを奪い、本文のキー入力が吞まれるのを防ぐ
+    this.scroll.focusable = false;
+    this.scroll.verticalScrollBar.focusable = false;
     this.body = markdown(ctx, "");
     this.footer = new StatusLine(ctx, "");
+    this.footer.flexShrink = 0;
     this.scroll.add(this.body);
     this.add(this.scroll);
     this.add(this.footer);
@@ -776,13 +775,17 @@ export class ConversationScroll extends ScrollBoxRenderable {
   constructor(ctx: CliRenderer) {
     super(ctx, {
       flexGrow: 1,
+      flexShrink: 1,
+      minHeight: 0,
       scrollY: true,
       stickyScroll: true,
       stickyStart: "bottom",
       viewportCulling: true,
       paddingX: 1,
+      focusable: false, // クリックで入力欄からフォーカスを奪わない
       live: true, // onUpdate でレイアウト確定後のスクロール補正を行う
     });
+    this.verticalScrollBar.focusable = false;
     // onUpdate はレイアウト前に走るため、同フレーム内で scrollHeight が
     // 伸びたケース（prepend / 追従）は renderAfter でも適用する。
     this.renderAfter = () => this.applyPending();

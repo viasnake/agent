@@ -65,9 +65,9 @@ export const theme = {
   /** 強調（太字）。 */
   strong: (text: string): TextChunk =>
     chunk(text, { attributes: TextAttributes.BOLD }),
-  /** 選択行（反転）。 */
+  /** 選択行（アクセント背景 + 濃字）。INVERSE は端末依存で文字が潰れるため使わない。 */
   selected: (text: string): TextChunk =>
-    chunk(text, { attributes: TextAttributes.INVERSE }),
+    chunk(text, { fg: RGBA.fromHex("#0b0f14"), bg: RGBA.fromHex("#56b6c2") }),
   /** パネル背景（端末配色からの混合色）。検出できない場合は背景なし。 */
   panel: (text: string): TextChunk =>
     panelColor ? chunk(text, { bg: panelColor }) : chunk(text),
