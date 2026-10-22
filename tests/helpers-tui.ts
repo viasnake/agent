@@ -43,3 +43,47 @@ export function chunksToText(lines: TextChunk[][]): string {
     .map((line) => line.map((chunk) => chunk.text).join(""))
     .join("\n");
 }
+
+import { keyEventFromId, keyIdFromSequence } from "../src/tui/keys.js";
+import { safeText } from "../src/tui/text.js";
+import { Composer, Picker } from "../src/tui/components.js";
+import { SettingsEditor } from "../src/tui/settings-editor.js";
+
+/**
+ * 生シーケンスをコンポーネントへ流すテスト用ヘルパ。
+ * 制御シーケンスは handleKeyPress 経由、貼り付けと通常文字列は
+ * 対象の入力欄へ挿入する（実端末入力の再現）。
+ */
+export function feedInput(
+  target: Composer | Picker | SettingsEditor,
+  data: string,
+): void {
+  const paste = data.match(/\x1b\[200~([\s\S]*?)\x1b\[201~/);
+  if (!paste) {
+    const id = keyIdFromSequence(data);
+    if (id) {
+      target.handleKeyPress(keyEventFromId(id));
+      return;
+    }
+  }
+  const text = safeText(paste ? paste[1]! : data);
+  if (!text) return;
+  const input =
+    target instanceof Composer
+      ? target.textarea
+      : target instanceof SettingsEditor
+        ? target.editing
+          ? target.input
+          : target.picker.input
+        : target.input;
+  input.insertText(text);
+  if (target instanceof Picker) target.rebuild();
+  if (target instanceof SettingsEditor) {
+    if (target.editing) {
+      const clean = safeText(target.input.value);
+      if (clean !== target.input.value) target.input.value = clean;
+    } else {
+      target.picker.rebuild();
+    }
+  }
+}

@@ -330,12 +330,6 @@ export class ConversationView extends BoxRenderable {
       Buffer.byteLength(message.source) > message.limit;
     return true;
   }
-
-  /** テスト互換: 表示中メッセージの本文プレーンテキスト。 */
-  messageText(seq: number): string {
-    const view = this.messages.find((m) => m.seq === seq);
-    return view ? view.source : "";
-  }
 }
 
 export interface ActivityItem {

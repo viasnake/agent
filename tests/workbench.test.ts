@@ -21,7 +21,7 @@ import {
 import { fixture, ScriptedRuntime, testConfig } from "./helpers.js";
 import { TerminalApp } from "../src/tui/app.js";
 import { Application } from "../src/application.js";
-import { makeScreen, chunksToText } from "./helpers-tui.js";
+import { makeScreen, chunksToText, feedInput } from "./helpers-tui.js";
 
 test("saved drafts survive slash commands and selecting the same conversation", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -289,30 +289,30 @@ test("picker searches Japanese labels, partial values and descriptions without l
   picker.onSelect = (item) => {
     selected = item?.value ?? "";
   };
-  picker.handleInput("差分");
-  picker.handleInput("\r");
+  feedInput(picker, "差分");
+  feedInput(picker, "\r");
   assert.equal(selected, "diff");
-  picker.handleInput("\x15");
-  picker.handleInput("odel");
-  assert.equal(picker.list.getSelectedItem()?.value, "model");
-  picker.handleInput("\x15");
-  picker.handleInput("利用量");
-  assert.equal(picker.list.getSelectedItem()?.value, "status");
-  picker.handleInput("存在しない項目");
+  feedInput(picker, "\x15");
+  feedInput(picker, "odel");
+  assert.equal(picker.selected?.value, "model");
+  feedInput(picker, "\x15");
+  feedInput(picker, "利用量");
+  assert.equal(picker.selected?.value, "status");
+  feedInput(picker, "存在しない項目");
   assert.match(
     safeText((await screen.frame(picker)).join("\n")),
     /一致する項目がありません/,
   );
-  picker.handleInput("\x15");
-  picker.handleInput("\x1b[B");
-  picker.handleInput("\r");
+  feedInput(picker, "\x15");
+  feedInput(picker, "\x1b[B");
+  feedInput(picker, "\r");
   assert.equal(selected, "model");
   assert.ok(
     (await screen.frame(picker, 40, 11)).every(
       (line) => visibleWidth(line) <= 40,
     ),
   );
-  assert.equal(picker.list.getSelectedItem()?.value, "model");
+  assert.equal(picker.selected?.value, "model");
   for (const width of [20, 40, 80, 120])
     for (const line of await screen.frame(picker, width, 24))
       assert.ok(visibleWidth(line) <= width);
@@ -359,12 +359,12 @@ test("composer uses Enter to send, Shift+Enter to add a line, and preserves past
     const input = editor(screen.renderer);
     const sent: string[] = [];
     input.onSubmit = (text) => sent.push(text);
-    input.handleInput("一行目");
-    input.handleInput(newline);
-    input.handleInput("\x1b[200~二行目\n三行目\x1b[201~");
+    feedInput(input, "一行目");
+    feedInput(input, newline);
+    feedInput(input, "\x1b[200~二行目\n三行目\x1b[201~");
     assert.deepEqual(sent, [], "newline and paste must not submit");
     assert.equal(input.getExpandedText(), "一行目\n二行目\n三行目");
-    input.handleInput("\r");
+    feedInput(input, "\r");
     assert.deepEqual(sent, ["一行目\n二行目\n三行目"]);
   }
   await screen.dispose();
@@ -450,7 +450,7 @@ test("open overlays resize without reopening and retain search and focus", async
   );
   const overlay = new ResponsiveOverlay(screen.renderer, picker);
   picker.focus();
-  picker.handleInput("接続");
+  feedInput(picker, "接続");
   for (const width of [36, 120, 48, 88]) {
     const lines = await screen.frame(overlay, width, 24);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));

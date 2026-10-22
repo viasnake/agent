@@ -4,7 +4,7 @@ import {
   type CliRenderer,
   type KeyEvent,
 } from "@opentui/core";
-import { keyEventFromId, keyIdFromEvent, keyIdFromSequence } from "./keys.js";
+import { keyIdFromEvent } from "./keys.js";
 import { Picker, safeText } from "./components.js";
 import { TextRenderable, StyledText } from "@opentui/core";
 import { theme } from "./theme.js";
@@ -31,8 +31,8 @@ export interface SettingsEdit {
  */
 export class SettingsEditor extends BoxRenderable {
   readonly picker: Picker;
-  private editing?: SettingsField;
-  private readonly input: InputRenderable;
+  editing?: SettingsField;
+  readonly input: InputRenderable;
   private readonly inputBox: BoxRenderable;
   onSubmit?: (edit: SettingsEdit) => void;
 
@@ -137,27 +137,5 @@ export class SettingsEditor extends BoxRenderable {
       return handled;
     }
     return this.picker.handleKeyPress(key);
-  }
-
-  /** テスト用: 生シーケンス入力。 */
-  handleInput(data: string): void {
-    if (keyIdFromSequence(data) === "escape" && this.cancel()) return;
-    if (this.editing) {
-      const id = keyIdFromSequence(data);
-      if (id === "enter") {
-        this.commitInput();
-        return;
-      }
-      if (id) {
-        // 編集キー（移動・削除）は InputRenderable のバインディングに委譲する
-        this.input.handleKeyPress(keyEventFromId(id));
-      } else {
-        this.input.insertText(safeText(data));
-      }
-      const clean = safeText(this.input.value);
-      if (clean !== this.input.value) this.input.value = clean;
-    } else {
-      this.picker.handleInput(data);
-    }
   }
 }

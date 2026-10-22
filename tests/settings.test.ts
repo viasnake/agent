@@ -9,7 +9,7 @@ import {
 } from "../src/tui/settings-editor.js";
 import { safeText } from "../src/tui/components.js";
 import { visibleWidth } from "../src/tui/text.js";
-import { makeScreen } from "./helpers-tui.js";
+import { makeScreen, feedInput } from "./helpers-tui.js";
 import { testConfig } from "./helpers.js";
 
 test("thinking profile edits are staged, cancellable and removable without adding defaults", async () => {
@@ -422,7 +422,7 @@ test("settings inline edit retains search, cancels one level and fits narrow CJK
     submitted = edit;
   };
   panel.focus();
-  panel.handleInput("\r");
+  feedInput(panel, "\r");
   assert.match(
     safeText((await screen.frame(panel, 59, 29)).join("\n")),
     /値:.*100/,
@@ -430,11 +430,11 @@ test("settings inline edit retains search, cancels one level and fits narrow CJK
   assert.equal(panel.cancel(), true);
   assert.equal(submitted, undefined);
   assert.equal(panel.picker.input.value, "予算");
-  panel.handleInput("\r");
-  panel.handleInput("\x05");
-  panel.handleInput("\x15");
-  panel.handleInput("200");
-  panel.handleInput("\r");
+  feedInput(panel, "\r");
+  feedInput(panel, "\x05");
+  feedInput(panel, "\x15");
+  feedInput(panel, "200");
+  feedInput(panel, "\r");
   assert.deepEqual(submitted, { value: "budget", text: "200" });
   for (const width of [20, 59, 157]) {
     for (const line of await screen.frame(panel, width, 29))

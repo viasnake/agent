@@ -32,7 +32,7 @@ import {
   visibleWidth,
   wrapLines,
 } from "./text.js";
-import { keyIdFromEvent, keyIdFromSequence, type KeyId } from "./keys.js";
+import { keyIdFromEvent, type KeyId } from "./keys.js";
 import type {
   AutocompleteItem,
   AutocompleteProvider,
@@ -245,87 +245,6 @@ export class Composer extends BoxRenderable {
     const handled = this.textarea.handleKeyPress(key);
     this.changed();
     return handled;
-  }
-
-  /** テスト用: 生シーケンスでの入力を再現する。 */
-  handleInput(data: string): void {
-    const paste = data.match(/\x1b\[200~([\s\S]*?)\x1b\[201~/);
-    if (paste) {
-      this.insertPasteText(paste[1]!);
-      return;
-    }
-    if (data === "\x1bOM") {
-      this.textarea.newLine();
-      this.changed();
-      return;
-    }
-    const id = keyIdFromSequence(data);
-    if (id) {
-      this.dispatchId(id);
-      return;
-    }
-    // 通常テキスト（日本語を含む）
-    this.textarea.insertText(safeText(data));
-    this.changed();
-  }
-
-  private insertPasteText(text: string): void {
-    const clean = safeText(text);
-    if (clean) this.textarea.insertText(clean);
-    this.changed();
-  }
-
-  private dispatchId(id: KeyId): void {
-    switch (id) {
-      case "enter":
-        this.submit();
-        return;
-      case "shift+enter":
-        this.textarea.newLine();
-        break;
-      case "up":
-        if (this.isShowingAutocomplete()) this.moveAutocomplete(-1);
-        else if (!this.recallHistory(1)) this.textarea.moveCursorUp();
-        break;
-      case "down":
-        if (this.isShowingAutocomplete()) this.moveAutocomplete(1);
-        else if (!this.recallHistory(-1)) this.textarea.moveCursorDown();
-        break;
-      case "left":
-        this.textarea.moveCursorLeft();
-        break;
-      case "right":
-        this.textarea.moveCursorRight();
-        break;
-      case "home":
-        this.textarea.gotoLineHome();
-        break;
-      case "end":
-        this.textarea.gotoLineEnd();
-        break;
-      case "backspace":
-        this.textarea.deleteCharBackward();
-        break;
-      case "delete":
-        this.textarea.deleteChar();
-        break;
-      case "tab":
-        if (this.isShowingAutocomplete()) this.acceptAutocomplete();
-        else void this.updateAutocomplete(true);
-        return;
-      case "escape":
-        if (this.isShowingAutocomplete()) this.hideAutocomplete();
-        return;
-      case "ctrl+u" as KeyId:
-        this.textarea.deleteToLineStart();
-        break;
-      case "ctrl+e" as KeyId:
-        this.textarea.gotoLineEnd();
-        break;
-      default:
-        return;
-    }
-    this.changed();
   }
 
   private recallHistory(direction: 1 | -1): boolean {
@@ -560,7 +479,8 @@ export class Picker extends BoxRenderable {
     return this.input.value;
   }
 
-  private rebuild(): void {
+  /** クエリ・選択・一覧・フッターの表示を最新状態へ反映する。 */
+  rebuild(): void {
     const q = this.query().toLowerCase();
     this.filtered = this.all.filter(
       (item) =>
@@ -650,45 +570,6 @@ export class Picker extends BoxRenderable {
     return handled;
   }
 
-  /** テスト用: 生シーケンス入力。 */
-  handleInput(data: string): void {
-    const id = keyIdFromSequence(data);
-    if (id) {
-      switch (id) {
-        case "up":
-          this.index = Math.max(0, this.index - 1);
-          break;
-        case "down":
-          this.index = Math.min(this.filtered.length - 1, this.index + 1);
-          break;
-        case "pageUp":
-          this.index = Math.max(0, this.index - this.maxVisible);
-          break;
-        case "pageDown":
-          this.index = Math.min(
-            this.filtered.length - 1,
-            this.index + this.maxVisible,
-          );
-          break;
-        case "enter":
-          this.selectCurrent();
-          return;
-        case "ctrl+u" as KeyId:
-          this.input.value = "";
-          break;
-        case "ctrl+e" as KeyId:
-          this.input.gotoLineEnd();
-          break;
-        default:
-          break;
-      }
-      this.rebuild();
-      return;
-    }
-    this.input.insertText(safeText(data));
-    this.rebuild();
-  }
-
   /** クエリと選択を復元する（ページングで同じ項目を再選択する際に使用）。 */
   restore(query: string, value?: string): void {
     this.input.value = query;
@@ -702,20 +583,14 @@ export class Picker extends BoxRenderable {
     }
   }
 
-  /** テスト互換: 旧 list API。 */
-  get list(): {
-    getSelectedItem: () => PickerItem | null;
-    getItems: () => PickerItem[];
-    selectedIndex: number;
-  } {
-    const self = this;
-    return {
-      getSelectedItem: () => self.filtered[self.index] ?? null,
-      getItems: () => self.filtered,
-      get selectedIndex() {
-        return self.index;
-      },
-    };
+  /** 現在選択中の項目（絞り込み後）。 */
+  get selected(): PickerItem | null {
+    return this.filtered[this.index] ?? null;
+  }
+
+  /** 絞り込み済みの項目一覧。 */
+  get items(): readonly PickerItem[] {
+    return this.filtered;
   }
 }
 
@@ -741,10 +616,6 @@ export class Dialog extends BoxRenderable {
   }
   override handleKeyPress(key: KeyEvent): boolean {
     return this.control?.handleKeyPress?.(key) ?? false;
-  }
-  /** テスト互換 */
-  handleInput(data: string): void {
-    (this.control as Composer | undefined)?.handleInput?.(data);
   }
 }
 
