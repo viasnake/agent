@@ -1,140 +1,131 @@
 # Local Agent
 
-コード変更・調査・文書作成を続けて依頼できる、個人用の対話型ターミナル AI Agent です。コードは作業コピーで変更・検査し、差分を確認してから元のリポジトリへ適用します。
+コード変更・調査・文書作成を依頼できる、個人用の対話型ターミナル AI Agent です。コードは作業コピーで変更・検査し、差分を確認してから元のリポジトリへ適用します。
 
-Node.js 24 以上と Git が必要です。主な利用対象は Linux の端末・SSH 接続です。Shell と検査には Bubblewrap を使います。隔離実行は Linux のみで、他の OS では `execution.backend: "disabled"` と同じ扱いです。
+## インストールと起動
 
-## 現時点の制限と検証範囲
-
-- 独立した読み取りタスクは並列実行できますが、書き込みタスクは読み取りを含む他のタスクと排他実行します。独立した書き込みの並列実行・自動マージはありません。
-- Bubblewrap には CPU・メモリの資源上限や、書き込み可能な作業領域の実行中ディスク容量制限がありません。
-- 推論の境界には SDK 非依存の契約がありますが、本番の推論・TUI・MCP は引き続き Pi に依存します。別 SDK への完全な交換を検証したものではありません。
-- 自動テスト・Linux の CI と、実画面での受入確認・実モデルによる品質確認は別です。新しい TUI 操作には実画面での確認が未実施のものがあり、実モデルでの画像理解・協調品質比較も未検証です。
-
-## 起動と設定
+Node.js 24 以上、npm、Git が必要です。主な利用対象は Linux の端末・SSH 接続です。コードの実行・検査には Bubblewrap が必要です。macOS では隔離実行が無効になり、Shell や隔離環境を必要とする機能は使えません。
 
 ```sh
+git clone https://github.com/viasnake/agent.git
+cd agent
 npm run build
 npm link
 cd /path/to/your-repository
 agent
 ```
 
-依存関係が無い・古い場合は `npm run build` が自動で package-lock.json どおりにインストールします。
+`npm run build` は依存関係をインストールしてからビルドします。更新する場合は、このソースディレクトリで変更を取得して再度ビルドしてください。
 
-初回は接続が無効です。Ctrl+P →「接続・権限・上限」（`/settings`）で準備します。
-未設定時だけ設定への案内を表示します。設定後は会話と入力を中心に、モデル・担当構成・送信区分を入力欄の下にまとめます。設定済みであっても、実モデルの疎通を確認したことにはなりません。
+Ubuntu では `sudo apt-get install bubblewrap` で Bubblewrap を導入できます。起動後に `/doctor` で隔離環境を確認してください。Shell はネットワークを使えず、Bubblewrap には CPU・メモリ・実行中のディスク容量の上限がありません。
 
-1. **接続を追加**すると、その接続のモデル登録へ続きます。送信許可（`allowedData`）・有効化・`/login`（ChatGPT）や `/probe` の実行をフロー内の選択肢でまとめて決め、接続とモデルを一度に保存します。モデルは tools 無効で登録されます。通常の会話は `private` です。従量 API は `limits.maxApiUsd` と接続の `maxRequestUsd` をともに正数にします。
-2. ChatGPT は `/login` で認証します。API キーは起動環境へ渡し、`secretEnv` には環境変数の名前だけを登録します。
-3. **モデルを追加**し、提供元の ID を入力するか SDK カタログから選びます。`/probe` で疎通・ツールの往復を確認してから、そのモデルの `tools` を有効にします。
-4. コード変更には **検査コマンドを追加**し、会話の必須検査に指定します。`/doctor` で隔離環境を確認してください。
+## 接続と権限の設定
 
-起動と `/doctor` はモデルを呼びません。`/probe` は利用枠・予算を消費します。設定例は [examples/config.yaml](examples/config.yaml) にあります。
-一覧での値の変更と検査の追加は保留され、設定を閉じる際に差分一覧を一度だけ確認してからまとめて保存します。変更は次の依頼から反映します。
+初回は接続が無効です。Ctrl+P →「接続・権限・上限」（`/settings`）から準備します。
 
-ローカル推論には OpenAI Chat Completions 互換サーバーを用意し、接続先を `127.0.0.1` または `::1` にします。`restricted` と `localOnly` はローカル接続専用、Sarashina は `public` 専用です。
+1. **接続を追加**し、モデル、送信を許可するデータ区分、有効化を設定します。通常の会話は `private` です。接続の `allowedData` に必要な区分を指定してください。
+2. ChatGPT は `/login` で認証します。API キーを使う接続では、キーを起動環境へ渡し、`secretEnv` に環境変数名だけを登録します。従量 API は `limits.maxApiUsd` と接続の `maxRequestUsd` をともに正数にします。
+3. モデルはツール無効で登録されます。`/probe` で疎通・ツールの往復を確認してから、そのモデルの `tools` を有効にしてください。
+4. コード変更には**検査コマンドを追加**し、会話の必須検査に指定します。`/doctor` で隔離環境を確認します。
+
+設定一覧で変更した値は、閉じる際に差分を確認してまとめて保存します。変更は次の依頼から反映されます。起動と `/doctor` はモデルを呼びません。`/probe` は利用枠・予算を消費します。
+
+設定例は [examples/config.yaml](examples/config.yaml) にあります。ローカル推論には OpenAI Chat Completions 互換サーバーを用意し、接続先を `127.0.0.1` または `::1` にします。`restricted` と `localOnly` はローカル接続専用、Sarashina は `public` 専用です。
+
+### モデルと担当構成
+
+Ctrl+L で次の依頼のモデルと担当構成を選びます。単独実行の `single`、レビュー付きの `reviewed`、分担する `assisted` を使えます。独立した読み取りタスクは並列実行できますが、書き込みタスクは他のタスクと排他実行します。
+
+モデルの別名ごとに `roles`・`kinds`・`tools`・`images`・`maxOutputTokens` を設定できます。同じ提供元モデルを別名で登録すると、作業担当とレビュー担当に異なる設定を使えます。`thinkingLevel` は `off / minimal / low / medium / high`、空欄は未指定です。推論の深さは品質・速度・費用を保証せず、提供元によって意味が異なります。
+
+互換・ローカル接続では、サーバーが `reasoning_effort` に対応する場合だけ `reasoning: true` を設定してください。未対応の深さを明示すると推論前に停止します。出力上限の強制は API の対応範囲に限られ、ChatGPT 接続では `max_output_tokens` を送信しません。
+
+待機中の作業で担当モデルを変更するには `/model-change [task-id]` を使います。対象と影響する作業、送信先、予算を確認して確定し、その後 `/resume` で再開します。変更の確定だけでは推論を開始しません。`/model` は次の依頼の設定です。
+
+### MCP の外部操作
+
+MCP の読み取り専用ツールには `readOnly: true`、更新・投稿・削除には `readOnly: false` を指定します。必要に応じて `effect: change|publish|delete|dangerous` を設定します。分類の未指定は危険操作として扱います。
+
+変更操作は TUI で送信先・ツール・引数を確認し、「この1回だけ実行する」を選びます。設定の保存だけでは承認されず、一括承認や自動再実行もありません。非対話 CLI では変更操作を実行できません。結果が不明な操作が残る場合は、実際の結果を確認して照合するまで次の外部変更を実行できません。
+
+HTTP 接続の変更ツールでは URL にクエリを含めず、資格情報を OAuth または `bearerEnv` で管理してください。読み取り専用の宣言や操作分類は、外部サーバーの実装を保証するものではありません。
 
 ## 日常の操作
 
-### ロール別モデルプロファイル
+| 操作                                            | 動作                                             |
+| ----------------------------------------------- | ------------------------------------------------ |
+| Enter / Shift+Enter                             | 送信 / 改行。実行中の Enter は追加指示           |
+| Alt+Enter                                       | 現在の作業が成功した後の依頼を保存               |
+| Ctrl+P / Ctrl+L                                 | 操作の検索 / 次の依頼のモデル・担当構成          |
+| Esc                                             | メニューを取消。会話画面では実行を中断           |
+| PgUp / PgDn                                     | 会話領域をスクロール                             |
+| Ctrl+O / `/tools list`                          | 最新ツール結果の開閉 / 結果を選択                |
+| `/expand [番号]` / `/history`                   | 長文の続き / 同じ会話の過去の発言                |
+| `/sessions` / `/new` / `/continue`              | 会話を選択 / 新規作成 / 前回の会話を開く         |
+| `/queue` / `/next`                              | 待機入力の管理 / 実行中に次の依頼を準備          |
+| `/tasks` / `/status`                            | 担当・検査 / 利用量・エラーの詳細                |
+| `/artifacts` / `/diff` / `/apply`               | 成果物 / 差分 / 元リポジトリへの適用             |
+| `/search [文字列]` / `/fork [会話名]`           | ローカル履歴の検索 / 過去の時点から分岐          |
+| `/pins` / `/context` / `/compact`               | 固定メモ / 会話の条件・原文 / 長い会話の引き継ぎ |
+| `/sources` / `/research` / `/versions [文書名]` | 資料 / 調査記録 / 文書の版と差分                 |
+| `/help` / `/quit`                               | 全操作の一覧 / 保存して終了                      |
 
-`models` の別名ごとに `roles`・`kinds`・`tools`・`maxOutputTokens` を設定できます。同じ接続・提供元モデル ID を別名で登録し、worker と reviewer に異なる上限や推論設定を使うこともできます。`/settings` の `thinkingLevel` は `off / minimal / low / medium / high`、空欄は未指定です。未指定では従来の SDK に `off` を渡す動作を維持します。既存設定に新しい既定値を追加しません。
+メニューでは日本語やコマンド名で検索し、↑↓ と Enter で選択します。Tab でパス・コマンドを補完できます。複数行の貼り付けでは送信しません。日本語変換には OS・端末の IME を使うため、IME と Shift+Enter を扱える端末が必要です。一部端末のテンキー Enter も改行として扱います。色を無効にするには `NO_COLOR=1 agent` で起動します。
 
-互換・ローカル接続では、接続先が OpenAI 形式の `reasoning_effort` に対応することを確認してから `reasoning: true` を設定してください。これは利用者による能力宣言で、接続試験ではありません。ChatGPT・Gemini は SDK カタログの対応範囲も確認します。明示した深さが SDK の対応範囲外なら推論前に停止し、別モデルへの切替や深さの自動補正はしません。設定変更は次に作成する実行へ反映され、既存実行の設定整合性チェックは維持します。設定の保存だけでは通信しません。
+`/keys` で割当を確認し、`/keys palette ctrl+g` のように変更できます。キーを省略すると解除、`/keys reset` で既定へ戻ります。SSH・tmux が先に消費するキーには別の割当を選んでください。
 
-推論の深さは品質・速度・費用を保証せず、提供元によって意味や内部実装が異なります。`off` も提供元内部の推論が完全に無効になる保証ではありません。出力上限の強制も API の対応範囲に限られます（ChatGPT 接続では `max_output_tokens` を送信しません）。選択した別名・SDK に適用した深さ・出力上限は `model_profile` イベントに記録します。利用量・費用は通常の予算制御と提供元の報告を使い、未報告をゼロとみなしません。実モデルによる品質比較は未検証です。
+`/editor` は下書きを外部エディタで編集し、`/editor artifact` は保存済み文書の改訂案を下書きへ戻します。`/editor-config ["nvim","-f"]` のように設定します。既定は `vi`、GUI エディタには `--wait` 等を指定してください。エディタは利用者の権限でホスト上で動きます。編集だけでは送信せず、元の成果物も上書きしません。
 
-### MCP の外部操作を個別確認
+## 資料・画像・手順の添付
 
-MCP ツール設定の既存 `readOnly: true` は維持できます。更新・投稿・削除には明示的に `readOnly: false` を設定し、必要に応じて `effect: change|publish|delete|dangerous` を指定します。未指定は危険操作扱いです。設定だけでは実行を承認せず、TUI で送信先・ツール・引数全文を確認し、「この1回だけ実行する」を選ぶ必要があります。取消が既定で、一括承認・承認の保存・自動再実行はありません。確認画面を開けない場合や非対話 CLI では実行を拒否します。
+作業ディレクトリ内のファイルを `@src/file.ts`、空白を含む場合は `@"notes/my file.md"` で指定します。絶対パス、秘密ファイル、リンクは添付できません。送信前のプレビューで対象と送信先を確認してください。実行中の新しい添付は `/next` を使います。
 
-変更ツールは変更アクセスを持つ通常の Worker の書き込みタスクだけが利用でき、Reviewer・委任・統合・読み取り専用タスクには公開しません。承認後もスキーマ、接続設定、権限、実行所有権を再確認します。承認待ちの操作は未送信として記録し、送信後の不明な結果は `unknown` のまま残します。未確定・送信中の操作が残る間は別の外部変更も拒否するため、利用者による確認・解決が必要です。同じ引数の完了済み操作があれば、再承認時に重複の警告を表示します。
+| 入力         | 例                                                                                                                      |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| 文書全体     | `@notes.md`                                                                                                             |
+| 行・見出し   | `@"README.md::lines=10-30"`、`@"manual.md::heading=Setup"`                                                              |
+| PDF          | `@"report.pdf::pages=2-3::images=yes"`                                                                                  |
+| 表・スライド | `@"book.xlsx::sheet=売上::rows=2-20"`、`@"slides.pptx::slides=1-3"`                                                     |
+| CSV・TSV     | `@"data.csv::rows=2-20"`                                                                                                |
+| Git          | `@git:status`、`@git:working`、`@git:staged`、`@git:commit:<完全なハッシュ>`、`@git:<完全なハッシュ>..<完全なハッシュ>` |
 
-引数は32,000 bytesまで、送信先は2,000文字までです。変更用HTTP接続のURLにはクエリを含めず、資格情報は OAuth / `bearerEnv` で管理してください。承認イベントには引数本文ではなくハッシュを記録します。操作分類や読み取り専用宣言は設定上の契約であり、外部サーバーの実装を保証しません。ローカル stdio のネットワーク隔離・読み取り専用マウントも変更しません。実際の外部投稿・削除と実画面での受入確認は未実施です。
+文書は TXT、Markdown、JSON、YAML、CSV、TSV、PDF、DOCX、PPTX、XLSX に対応し、元ファイルは20 MBまでです。表計算の数式は再計算しません。PDF は最大20ページを選択でき、変換には Bubblewrap 内の `pdfinfo`・`pdftotext`・`pdftoppm`（Poppler）が必要です。事前にインストールするか `execution.runtimePaths` で公開してください。自動ダウンロードはしません。
 
-### コードの定義・参照・限定診断
+`/git` はブランチ・状態・最近のコミットを表示します。Git 添付はコミットや適用を行いません。差分はファイルのバイト列を比較し、Git のフィルターや改行正規化は適用しません。未追跡ファイルの内容は添付しません。
 
-`code_info` はモデルが利用できる読み取り専用ツールです。作業コピー内の TypeScript/JavaScript に対して `definition`・`references`・`diagnostics` を指定できます。位置は1始まりの行・UTF-16列、結果の終端は排他的です。読み取り専用レビューでも利用でき、シェル・ネットワーク・プロジェクトのプラグインやスクリプトは実行しません。各結果にファイルのハッシュ、全体に解析入力のハッシュを含め、後続の編集と区別します。
+### 画像
 
-**プロジェクトの型検査やビルドの代わりではありません。** 固定した ES2022・ESNext/Bundler・strict・allowJs/checkJs・JSX preserve 設定で解析し、プロジェクトの tsconfig、依存パッケージ、パス別名は読み込みません。標準ライブラリのみ同梱 TypeScript 5.9.3 を使います。依存や独自設定によって定義解決・診断は変わり得るため、結果には常に制限を表示します。空の診断結果も「検査成功」には扱わず、正式な確認には登録済みの隔離検査を実行してください。TypeScript/JavaScript 以外は既存のファイル検索・隔離コマンド・承認済み MCP を使用します。
+PNG・JPEG・WebP の静止画像を `@path` で添付できます。対応モデルの設定で `images` を有効にしてください。1画像5,000,000 bytes・各辺2048 px・4,194,304 pixels、会話ごとに8画像・合計20,000,000 bytesまでです。画像を縮小・再圧縮して送ることはありません。
 
-解析は最大512ソース・1ファイル512,000 bytes・合計4,000,000 bytes（設定されたファイル・作業コピー上限も適用）、出力は100件・結果配列の内容32,000 bytesまでです。省略は `truncated`、標準ライブラリ内の一致は `libraryMatches` で区別します。リンク・保護パス・非UTF-8・取得中の変更は拒否します。取得・解析は10秒の期限を持ち、解析専用 Worker の V8 ヒープ上限は256MiBです（プロセス全体のメモリ上限の保証ではありません）。中断・失敗時も変更やコード生成は行いません。
+`/images` で保持された画像を確認できます。`/images add "画像.png"` は送信せずに保存します。参照 ID を使って `/images crop <id> <x> <y> <width> <height>`、`/images mask <id> <x> <y> <width> <height>` で編集し、`/images remove <id>` で除外できます。`/images compare <before-id> <after-id>` は比較順序を指定します。除外・マスクは送信済みの内容を取り消しません。
 
-| 操作                      | 動作                                                   |
-| ------------------------- | ------------------------------------------------------ |
-| Enter / Shift+Enter       | 送信 / 改行。実行中の Enter は追加指示                 |
-| Alt+Enter                 | 現在の作業が成功した後の依頼を保存                     |
-| Ctrl+P / Ctrl+L           | 操作の検索 / 次の依頼のモデル・担当構成を選択          |
-| Esc                       | メニュー・閲覧を取消。会話画面では実行を中断           |
-| Ctrl+O / `/history`       | 最新ツール結果の開閉 / 同じ会話に履歴を追加読込        |
-| `/tools list` / `/expand` | ツール結果を選ぶ / 長文の続きをその場で表示            |
-| PgUp / PgDn               | 会話領域を上 / 下へスクロール                          |
-| `/sessions` / `/new`      | 会話を開く / 新しい会話                                |
-| `/search [文字列]`        | 会話・依頼・イベント・資料・作業ファイルをローカル検索 |
-| `/fork [新しい会話名]`    | 過去の時点から保存状態ごと／本文のみで新しい会話へ分岐 |
-| `/continue`               | 前回の会話を開く（下書き・モデルも復元）               |
-| `/queue`                  | 待機入力の編集・取消・実行                             |
-| `/tasks` / `/status`      | 担当・検査 / 利用量・エラーの詳細                      |
-| `/artifacts` / `/compact` | 成果物・ログの閲覧 / 長い会話の引き継ぎ                |
-| `/sources` / `/research`  | 資料の本文・除外 / 調査メモ・検索履歴・検索設定        |
-| `/versions [文書名]`      | 保存済み文書の版・Markdown表示・差分・来歴・検査       |
-| `/pins` / `/context`      | 固定メモ・会話の制約 / 原文・圧縮記録の確認            |
-| `/context-review`         | 条件・矛盾・反復の検知内容と確認メモ（自動再開なし）   |
-| `/quit` / `/help`         | 保存して終了 / 全操作とキーの一覧                      |
+`/clipboard` は Linux の `wl-paste` または `xclip`、macOS の `pngpaste` から PNG を下書き用に取り込みます。対応コマンドがない場合はファイルへ保存して添付してください。SSH 接続では `scp`・`sftp` などで作業ディレクトリへ転送します。
 
-メニューでは日本語やコマンド名で検索し、↑↓ と Enter で選択します。Ctrl+P / Ctrl+L から戻っても下書きは残ります。`NO_COLOR=1 agent` で色なしにできます。
-入力は Slack の標準操作と同じく Enter で送信、Shift+Enter で改行します。複数行の貼り付けでは送信しません。Konsole の Shift+Enter に対応するため、同じキー列（SS3 M）を送る一部端末のテンキー Enter も誤送信防止のため改行として扱います。
-日本語変換は端末が対応するOSのIMEを利用します。変換候補の選択・確定はIME側で処理し、確定した文字を入力欄で編集できます。Shift+Enterを区別できるキー設定とIME対応の端末が必要です。アプリ独自の変換辞書やIME切替キーは設けません。
-画面は端末の幅と高さ全体を使い、本文だけの入力欄を下部に固定します。モデル・構成・送信区分は `/status`、操作説明は `/help` または Ctrl+P から確認できます。会話領域はマウスホイールや PgUp / PgDn でスクロールでき、上端を越えると過去の発言を30件ずつ追加します。末尾では新しい出力に追従します。`/history` でも過去の発言を読み込めます。長文は冒頭を表示し、表示された `/expand 番号` で続きを同じ位置に展開します（番号省略時は直近の長文）。ツール結果・作業詳細も会話内で開き、Esc で閉じます。ツール結果の続きも `/expand` で読めます。待機中の終了は下書きを保存して直ちに元の端末へ戻り、作業中だけ確認します。
-メニューは1項目1行とし、選択中の説明だけ表示します。`/settings` は接続・モデル・会話・詳細設定を検索できる一覧です。Enter で値をその場で編集し、保存・取消後も検索と選択位置を維持します。Esc は編集中なら編集だけを取り消し、一覧なら設定を閉じます。値の変更と検査の追加は保留され、閉じる際に `path: before → after` の差分一覧を一度だけ確認します（保留がなければ確認しません）。承認でまとめて保存し、取消で破棄します。`/doctor` は日本語の診断要約を表示し、Enter で技術詳細（JSON）を開きます。
+### 手順ファイル
 
-`@src/file.ts`、空白を含む場合は `@"notes/my file.md"` で添付します。Tab でパス・コマンドを補完できます。実行中の新しい添付は `/next` を使います。依頼の種類が自動判定と合わなければ `/kind` で変更してください。
+`/skills` で作業ディレクトリの `skills/<name>/SKILL.md` を選びます。内容と必要な参照ファイルを確認して添付すると、下書きに `@"skill:skills/<name>/SKILL.md"` が入ります。別の場所は `/skills relative/path/SKILL.md` で指定できます。
 
-PNG・JPEG・WebP 画像も同じ `@path` 形式で添付できます。対応モデルの `/settings` で `images` を有効にすると、送信前プレビューに画像と送信先が表示されます。1画像5,000,000 bytes・各辺2048 px・4,194,304 pixels、会話ごとに8画像・合計20,000,000 bytesまでです。画像は縮小・再圧縮せず元のバイト列を送ります。対応形式・プライバシー条件を満たすモデルがない場合は送信しません。
+手順は64,000 bytesまでの空でない UTF-8 ファイルです。選択はその依頼だけに適用され、次の依頼で使う場合は再添付します。選択だけでは送信せず、スクリプトの実行や追加権限の許可にもなりません。`.agents` などの保護された場所ではなく、作業ディレクトリ内の `skills/` に置いてください。
 
-画像は会話をまたいで `~/.local/share/local-agent/images`（macOS は `~/Library/Application Support/Local Agent/images`）に権限制限付きで保存され、会話・run・イベントには参照とメタデータだけを保持します。バックアップには `images/` も含めてください。Pi の非公開セッション履歴には provider の正規履歴として画像バイト列が含まれる場合があります。画像コンテキスト予算は履歴中の画像出現ごとに8,192 tokens相当を加算する保守的な見積もりで、プロバイダー共通の上限・実使用量・コンテキスト適合を保証するものではありません。実際の利用量はプロバイダーの応答を参照してください。詳細は [docs/images.md](docs/images.md) を参照してください。
-`/images` で会話に保持された画像参照を確認できます。ライブプロバイダーでの画像受け入れ確認は未実施です。
+## コード変更と復旧
 
-`/images add "画像のパス.png"` は画像を送信せずに保存します。参照 ID を使って `/images crop|mask` で編集してから依頼を送信できます。除外・マスクは、既に送信した内容を取り消す操作ではありません。
+説明・調査・レビューの依頼は読み取り専用です。コードを変更したい場合は明示的に依頼してください。種類の自動判定が合わない場合は `/kind` で選択します。
 
-`/editor` は未送信の下書きを外部エディタで編集し、終了後に TUI に戻します。`/editor artifact` は保存済み文書の改訂案を編集して下書きへ戻します。元の成果物は変更せず、送信・改訂版の作成・検査は別操作です。`/editor-config ["nvim","-f"]` のように実行ファイルと引数の JSON 配列で設定します（既定は `vi`、GUI エディタは `--wait` 等を指定）。シェル展開は行いません。これは利用者が明示的に選ぶホスト上の操作であり、エディタは利用者自身の権限で動作します。モデル用の認証環境変数は渡しません。
+検査完了後に `/diff` で差分を開き、Enter で適用確認へ進みます。`/apply` でも同じ画面が開きます。未適用の変更は次の依頼へ引き継ぎます。最初の作業コピーには未コミット変更を含む追跡済みファイルを使い、未追跡ファイルは会話設定の `includeUntracked` で追加できます。元ファイルや HEAD が外部で変わった場合は競合として停止します。
 
-`/keys` で現在のキー割当を確認し、`/keys palette ctrl+g` のように変更できます。キーを省略するとその操作の割当を解除し、`/keys reset` で全割当を既定へ戻します。通常の文字入力・改行と Ctrl+J は保護され、ダイアログは Esc でも閉じられます。設定は非公開保存先の `terminal.json` に保存し、モデルや課金の設定とは分離します。SSH・tmux が先に消費するキーには、別の割当を選んでください。
+検査の `protectedPaths` に既存テストや設定を登録すると、それらの変更を不合格にできます。TypeScript/JavaScript の定義・参照・限定診断も利用できますが、プロジェクト固有の設定や依存を読み込まないため、登録した型検査・ビルドの代わりにはなりません。
 
-`@path` で文書を選択して添付できます。形式・選択子・Git 入力・PDF sandbox 要件・clipboard fallback は [docs/attachments.md](docs/attachments.md) を参照してください。
-Git 添付の差分は保存された raw bytes を比較し、Git attributes・filters・working-tree encoding・改行正規化は適用しません。未追跡ファイルは名前のみを示し、内容は添付しません。
+失敗時は `/status` と `/artifacts` を確認します。待機・クラッシュした作業は `/resume`、結果未確定の操作は実際の結果を確認して `/reconcile` で照合します。中断・失敗で終了した作業は新しい依頼で続けてください。待機入力は `/queue` に残り、自動実行しません。
 
-会話にはユーザーが追加した固定メモ・決定・未解決の質問と、元の指示、作業結果・検査・出典・画像参照を個別に保存します。`/pins add|edit|remove` と `/context add|edit|constraint` でユーザー所有の記録を編集できます。`/context` は会話原文、参照 ID、圧縮記録を表示し、`/context original <seq>` と `/context read <archive-id>` で保存済みの原文を範囲付きで読み返せます。編集は会話が idle のときだけ行え、接続許可・送信区分は変更しません。これらの記録は会話ごとであり、会話をまたぐ恒久メモリではありません。
-
-`/search` は同じ作業ディレクトリのローカル記録を、正規表現ではない文字列で検索します。会話名、依頼・担当タスク、会話本文、実行イベント、保存済み資料・成果物、現在の作業コピーを別々に選べます。他プロジェクト、資格情報の保管先、Pi の内部セッション、HTTP 原文バイナリは検索しません。検索ページごとに件数・読込量を制限し、未検索の候補と省略を表示します。結果の閲覧や会話切替は、モデル・ツールの実行や通信を開始しません。除外済みの原本・発言がローカル履歴から消去されるわけではありません。
-
-リポジトリの説明・調査・レビューは read-only として扱い、元リポジトリまたは最新の未適用作業コピーの隔離スナップショットに対して限定された読取ツールを使います。明示的な変更依頼でのみ作業コピーへの書込みが有効になります。`まだ変更しない` や `do not change` は変更動詞より優先されます。通常の挨拶は引き続きツールを使いません。
-
-長いモデル履歴は安全なリクエスト境界でホストが決定的に圧縮します。80%で検討し、60%以下を目標に古い verbose な tool result だけをアーカイブ参照付きの抜粋に置き換えます。正確な圧縮前コンテキストは会話専用の非公開アーカイブに保存され、`read_context` と `/context read` から上限付きで取得できます。推定式は `min(maxInputBytes, max(0, (contextWindow - maxOutputTokens) * 3))` と `images × 8,192 tokens相当` のヒューリスティックです。プロバイダーごとの実使用量・適合性の保証ではなく、プロバイダー報告の使用量が優先されます。ユーザー指示・制約などの保護対象が収まらない場合は `CONTEXT_LIMIT` で停止し、切り捨てません。SDK 自動圧縮・再試行は無効のままです。
-
-`/fork` は過去の発言を30件ずつ表示し、選択点を含む本文を新しい会話へコピーします。「保存状態ごと」はその時点の固定条件・資料・画像参照・作業コピーも復元し、「会話本文のみ」はそれらを復元しません。旧履歴や安全に保存できなかった発言は理由を表示し、本文のみを選べます。送信区分・ローカル限定・現在の資料除外やマスクは弱めずに引き継ぎます。待機入力・下書き・後から追加した成果物・provider 内部履歴はコピーしません。
-
-分岐前に復元範囲と制約を表示し、最後に作成を確認します。分岐の閲覧・作成ではモデル・ツールの実行や通信を行わず、元の会話も変更しません。保存状態の復元は推論結果や検査成功ではありません。分岐先は読み取り専用を既定として開き、作業の再開・検証・適用には新しい通常の依頼が必要です。元リポジトリが変わっていれば、引き続き競合チェックで停止します。チェックポイントは非公開保存領域の `checkpoints/` に保存するため、バックアップでは会話DB・成果物・画像・資料と一緒に保持してください。
-
-## 変更の確認と復旧
-
-`/context-review` は条件の見落とし・矛盾についてのモデル申告（未検証）と、同一の調査を繰り返すホスト検知を表示します。検知中は後続のツール・推論・最終回答を停止し、再起動後も確認待ちを保持します。根拠と維持する条件を読み、確認メモを入力・確認して明示確定してください。メモは監査記録であり、条件や権限を変更する指示ではありません。確定しても自動再開・待機入力の実行はしません。同じ作業は `/resume`、条件の修正は新しい依頼で明示します。一般的な意味の矛盾を網羅的に検出する保証はありません。CLI・検知範囲は [docs/context-review.md](docs/context-review.md) を参照してください。
-
-調査では、検索結果と実際に取得した根拠を分けて保存します。検索は明示的な許可先を設定した場合だけ利用でき、既定の外部検索サービスはありません。`/research` の閲覧は通信しません。`/sources` では行番号付き本文を読み、同じ原資料を今後の送信から除外できます。除外は原本・過去の発言や引用・送信済みデータの削除ではありません。`/versions` では成功・失敗した文書の版を比較し、実際の検査記録を確認できます。意味・事実の正しさを自動で保証するものではありません。設定・制約は [docs/research.md](docs/research.md) を参照してください。
-
-検査完了後に `/diff` を開き、Enter で適用確認へ進みます。Esc は取消です。`/apply` でも同じ画面が開きます。未適用の変更は次の依頼へ引き継ぎ、元リポジトリからの累積差分を表示します。
-
-最初のコピーには未コミット変更を含む追跡済みファイルを使います。未追跡ファイルは会話設定の `includeUntracked` で追加できます。元のファイルや HEAD が外部で変わった場合は競合として停止します。
-
-検査の `protectedPaths` に既存テストや設定を登録すると、それらの変更を不合格にします。Shell はネットワークを使えません。必要な実行環境・依存は事前に用意し、`execution.runtimePaths` で読み取り専用に公開します。
+適用はファイル単位で、全ファイル一括ではありません。途中で失敗した場合は照合が必要です。バイナリ変更、symlink、hardlink、submodule は扱いません。
 
 ### オフラインの依存導入・ビルド
 
-`execution.profiles` を設定すると、coding の通常 Worker と独立 Reviewer は `run_profile` で登録済みコマンドを選べます。モデルはプロファイルのコマンドを変更できません。読み取り専用の依頼、委任先、統合担当では利用できず、設定変更後は新しい Run が必要です。未指定なら従来の設定形式・ハッシュを保ちます。
+必要な実行環境・依存は事前に用意し、`execution.runtimePaths` で読み取り専用に公開します。`execution.profiles` に固定コマンドを登録すると、コード変更の作業担当と独立レビュー担当が実行できます。
 
 ```yaml
 execution:
+  runtimePaths: [/opt/node/24, /opt/npm-cache]
   profiles:
     dependencies:
       description: ロック済み依存を事前配置したキャッシュから導入
@@ -145,38 +136,93 @@ execution:
         npm ci --offline --ignore-scripts --no-audit --no-fund --cache /opt/npm-cache
 ```
 
-これは設定例です。Node/npm と完全なオフラインキャッシュを事前に用意し、`/opt/npm-cache` を読み取り専用 `runtimePaths` で公開してください。不足時にネットワークを開いたりホストへ導入したりはしません。読み取り専用キャッシュへの書込みが必要なツールでは、プロファイル内でキャッシュを `/runtime` へコピーしてから使用してください。ワークスペース・`file:` 依存や native addon を含むプロジェクトは、パスと事前ビルドを含め個別のコマンド設定が必要です。
+パスは実際の Node/npm と完全なオフラインキャッシュの配置先に置き換えてください。読み取り専用キャッシュへの書込みが必要な場合は、プロファイル内で `/runtime` にコピーします。不足時にネットワークを開いたり、ホストへ導入したりはしません。
 
-`/runtime` は成果物とは別のタスク専用領域です。`run_profile` だけが書き込め、同じ担当の後続 `shell` は読み取り専用で再利用します。例えば `node /runtime/app/node_modules/typescript/bin/tsc` のように配置先を明示します。依存を通常の `/workspace/node_modules` として自動公開したり、PATH を書き換えたりはしません。ソースを別ビルドディレクトリに複製する必要がある場合も、プロファイルで明示してください。成果物は `/workspace` に戻して通常の差分検査・適用を行います。既存の作業コピーにおける秘密ファイル・リンク・`node_modules` 等の拒否は維持します。
+依存は `/workspace/node_modules` に自動公開されません。後続コマンドでは `node /runtime/app/node_modules/typescript/bin/tsc` のように配置先を指定し、成果物を `/workspace` へ戻します。`file:` 依存やネイティブ拡張には個別の配置・ビルド設定が必要です。担当・実行・会話の分岐間で依存環境を引き継がず、ロックファイルを変更しても自動再導入はしません。
 
-Reviewer は別の runtime と使い捨ての作業コピーを使います。固定検査、別担当、別 Run、分岐、バックアップには runtime を引き継ぎません。資料除外の条件が変わった場合も新しい領域に切り替え、古い領域を再公開しません。古い領域は即時消去せず Run の履歴削除時に回収されます。依存やロックの変更に対する自動再導入・自動実行はありません。
+## 会話の引き継ぎと確認
 
-実行時間と出力の上限は通常の Shell と同じです。runtime は実行前後に最大20,000項目・10秒、`limits.maxWorkspaceBytes` 以下か走査し、リンクをホストから辿りません。この検査はディスクのリアルタイム quota ではなく、超過した領域は再利用を拒否します。Bubblewrap には CPU・メモリ・ディスクの資源上限がありません。
+`/pins add|edit|remove` と `/context add|edit|constraint` で会話の固定メモや条件を編集できます。編集は待機中に行い、会話をまたぐ恒久メモリにはなりません。長い履歴の原文は `/context original <seq>`、圧縮前の記録は `/context read <archive-id>` で読み返せます。保護された指示が上限に収まらない場合は、切り捨てず `CONTEXT_LIMIT` で停止します。
 
-失敗時は `/status` と `/artifacts` で理由を確認します。待機・クラッシュした作業は `/resume`、結果未確定の操作は実際の結果を確認して `/reconcile` で照合します。中断・失敗で終了した作業の続きは、新しい依頼として入力してください。停止・失敗・再起動後の待機入力は自動実行せず `/queue` に残ります。
+`/context-review` が確認を求めたら、根拠と維持する条件を読み、確認メモを入力して確定します。これは条件や権限を書き換える操作ではありません。同じ作業はその後 `/resume`、条件の修正は新しい依頼で行います。CLI では `agent context-review <run-id>` で表示し、`--confirm <binding> --note <text>` を付けて確定します。
 
-適用はファイル単位で、全ファイル一括の原子性はありません。途中で失敗した場合は照合が必要です。バイナリ変更、symlink、hardlink、submodule は扱いません。
+`/search` は同じ作業ディレクトリの会話・資料・成果物などを文字列検索します。`/fork` では過去の発言を選んで新しい会話へ分岐できます。「保存状態ごと」はその時点の条件・資料・画像・作業コピーを復元し、「会話本文のみ」は本文だけをコピーします。待機入力・下書きはコピーしません。分岐先は読み取り専用で開き、作業は新しい依頼で始めます。
 
-## 保存
+## 調査と文書の確認
 
-設定・履歴は Linux では `~/.local/share/local-agent`、macOS では `~/Library/Application Support/Local Agent` に保存します。`--home /絶対パス` または `AGENT_HOME` で変更できます。保存先は対象リポジトリの外に置いてください。
+Web 検索・取得は `research` の依頼で使えます。検索には設定ファイルの `web.search` が必要です。次は形式例で、動作するサービスの指定ではありません。
 
-共有用には `/diagnostics /保存先/新しいファイル.json` を使います。全出力を確認して明示確定した場合だけ、その時点の診断を `0600` の新規ファイルへ保存します。CLI は `agent diagnostics`（または保存先を付けた実行）がプレビュー、`agent diagnostics /保存先/新しいファイル.json --write` が保存です。既存の安全な所有ディレクトリと Agent 領域外の未使用ファイル名が必要で、上書き・自動送信はしません。本文・識別子・パス・接続先・資格情報・環境変数・任意のエラー文を読んで伏字にするのではなく、ホワイトリストの項目だけを構成します。バージョン、設定種別、最近挿入された最大1000行の状態別件数、最大40件のイベント種別を含みます。件数は全履歴の総数ではなく、切り詰めの有無を表示します。未知の状態やイベントは `other`、設定・DB の取得失敗は詳細なしの `unavailable` とします。認証・隔離環境・接続先の試験や推論は行いません。環境特性や件数は残るため共有前に確認してください。完全な匿名化、内容依存の不具合の再現、稼働環境の検証、履歴バックアップの代わりにはなりません。従来の `/doctor` の詳細には接続名などが含まれるため、そのまま共有しないでください。
+```yaml
+web:
+  allowedHosts: [search.example.com, sources.example.com]
+  allowedData: [public]
+  search:
+    endpoint: https://search.example.com/search
+    queryParam: q
+```
 
-`/backup /保存先/新しいディレクトリ` は、全作業ディレクトリの会話・下書き・待機入力・出典・成果物・参照中の画像と資料・保存済み作業境界・現在の設定を非公開の履歴アーカイブとして保存します。対象を確認し、明示確定してから作成します。CLI は `agent backup /保存先/新しいディレクトリ` がプレビュー、`--write` 付きが保存です。ほかの Agent 画面を閉じ、実行・適用・評価を停止してから行ってください。
+検索先は HTTPS の443番ポートで、資格情報・クエリ・フラグメントを含まない URL を指定します。検索語は GET のクエリ引数として送ります。サービスは `{ "results": [{ "title": "題名", "url": "https://sources.example.com/page", "snippet": "短文" }] }` 形式の JSON、またはリンクを含む HTML を返す必要があります。検索先だけでなく取得するページのホストも許可してください。
 
-資格情報ストア・環境変数・未参照キャッシュ・モデル内部セッション・稼働プロセス・現在の未保存作業コピー・依存環境は含めません。作業コピーは保存済み境界のスナップショットだけが対象です。これは稼働環境を復元するバックアップや自動再開用の Agent home ではありません。会話・設定へのインポートは行いません。
+`restricted`・`localOnly`、または会話・添付の区分が `web.allowedData` に含まれない場合は Web を使えません。秘密情報を検索語に含めないでください。既定の外部検索サービスはなく、ページの JavaScript も実行しません。
 
-保存先は既存の所有ディレクトリ内に新しく作り、Agent 保存領域と全作業ディレクトリの外に置きます。権限はディレクトリ `0700`、ファイル `0600` です。SQLite の書込ロック中に整合した DB と参照ファイルを保存し、`backup.json` を最後に書きます。失敗時はこの操作で作った不完全な保存先を削除します。バックアップは既定で 512 MB・50,000 ファイルまで、メタデータは 100,000 行・64 MB までです。CLI の `--max-bytes`、`--max-files`、`--timeout-seconds` で保存処理の上限を指定できます（最大 5 GB・100,000 ファイル・120 秒、時間はローカル処理の境界で確認）。単一資料は 64 MB、設定は 4 MB までです。
+`/research` で調査メモ・検索履歴を確認します。検索のスニペットと取得した本文は別の記録です。`/sources` で本文を読み、資料を選んで今後の送信から除外できます。関連する別範囲・PDF画像も対象になります。除外後は新しい依頼で続けてください。除外は元ファイル・ローカル履歴の削除や、過去の回答・送信済みデータの取消ではありません。
 
-`agent backup-verify /保存先` はハッシュ・DB・資料参照の完全性をローカル検査し、復元や実行はしません。検査は内容の正しさ・署名・意味的品質を保証しません。履歴には private / restricted の本文や過去の除外済み資料も含まれ、手入力した秘密は除去されません。暗号化されていないため、共有用診断として渡さず、保存先の同期・共有にも注意してください。`auth/` を含む保存領域全体の手動コピーは、別途認証情報として保護する必要があります。
+`/versions [文書名]` で保存済み文書の版、差分、出典、検査結果を確認できます。検査成功は意味・事実の正しさを保証しません。
 
-`/backup-open /保存先` は保存済み会話・実行・出典・成果物・設定・添付を読み取り専用で閲覧します。一覧は30件ずつ、本文は16,000 UTF-16文字単位で区切り、続きを表示できます。表示のたびにハッシュと資料参照を検証し、DBは検証したバイト列の一時コピーだけを読みます。アーカイブや現在の会話を変更せず、保存された操作・削除ジョブ・設定・Providerを実行しません。確認中にアーカイブが変化した場合は開き直してください。バイナリは内容を端末へ出さず、サイズと検証値を表示します。
-
-CLI は設定・認証・現在のDBがない状態でも使えます。
+### 日本語の表記確認
 
 ```sh
-agent backup-read /保存先
+agent writing-check --source original.md --candidate draft.md --style polite --must-keep 青葉会議 --must-keep 参加費0円
+```
+
+ローカルの UTF-8 ファイルを読み、推論・送信・編集せず JSON で結果を表示します。各ファイルは1 MB・10,000行までです。`--must-keep` の完全一致文字列が欠けると `error`、日時・数値・URL・文体などの候補は `review`、検査上限に達すると `truncated` と表示します。誤検出があるため原文と照合してください。終了コード0は文書全体の品質合格ではありません。
+
+`--terminology terms.yaml` で、`preferred` と `alternatives` を持つ項目の YAML 配列を指定できます。例: `[{preferred: ユーザー, alternatives: [ユーザ]}]`。
+
+### モデル構成の比較
+
+[examples/comparison.yaml](examples/comparison.yaml) を編集し、接続・モデル・予算を設定して実行します。
+
+```sh
+agent eval-compare --suite examples/comparison.yaml
+agent eval-compare --suite examples/comparison.yaml --confirm-run
+agent eval-report <comparison-id> --summary-only
+```
+
+最初のコマンドは試行数と予算の確認のみです。`--confirm-run` は全試行の推論を許可し、利用枠・費用を消費します。入力パスは設定ファイル基準です。各試行は独立し、元リポジトリに変更を適用しません。中断した比較は自動再実行しません。
+
+レポートは実行成功、機械検査、人手評価を区別します。未報告の費用・未評価の品質は `null`、`knownCostUsd` は判明分のみです。時間には失敗した試行も含むため、早い失敗を高速化と解釈しないでください。
+
+人手評価は `reviewer`・`accepted`・`majorDefects`・`reworkCount`・`evidence` を持つ JSON/YAML に記入し、`agent eval-assess <comparison-id> <run-id> --assessment assessment.yaml --confirm` で登録します。成果物と条件を読み、欠陥の場所や理由を根拠として残してください。レポートには依頼文・入力パス・評価理由が含まれるため、共有前に確認します。
+
+## 保存・バックアップ・削除
+
+設定・履歴は Linux では `~/.local/share/local-agent`、macOS では `~/Library/Application Support/Local Agent` に保存します。`--home /絶対パス` または `AGENT_HOME` で変更できます。保存先は対象リポジトリの外に置いてください。履歴や画像には非公開の内容が含まれるため、保存領域をそのまま共有しないでください。
+
+### 診断情報の共有
+
+`/diagnostics /保存先/新しいファイル.json` で出力を確認し、確定すると保存します。CLI は `agent diagnostics` がプレビュー、`agent diagnostics /保存先/新しいファイル.json --write` が保存です。既存の所有ディレクトリ内で、Agent 領域外の未使用ファイル名を指定してください。
+
+本文・資格情報などを含めず、バージョンや状態別件数などを出力します。環境特性は残るため共有前に確認してください。接続や隔離環境の試験ではありません。`/doctor` の詳細には接続名などが含まれるため、そのまま共有しないでください。
+
+### 履歴のバックアップと閲覧
+
+他の Agent 画面を閉じ、実行・適用・評価を停止してから `/backup /保存先/新しいディレクトリ` を実行します。保存先は既存の所有ディレクトリ内で、Agent 領域と全作業ディレクトリの外にします。CLI では次のように確認・作成・検査できます。
+
+```sh
+agent backup /保存先/新しいディレクトリ
+agent backup /保存先/新しいディレクトリ --write
+agent backup-verify /保存先/新しいディレクトリ
+agent backup-read /保存先/新しいディレクトリ
+```
+
+全作業場所の会話、設定、資料、参照中の画像、保存済みの作業状態を含みます。認証情報、依存環境、稼働プロセス、現在の未保存作業コピーは含みません。履歴を閲覧するための非公開アーカイブで、稼働環境の復元や自動再開、現在の会話へのインポートには使えません。暗号化されず、過去の除外資料や手入力した秘密が残る場合があります。
+
+既定上限は512 MB・50,000ファイルです。CLI の `--max-bytes`、`--max-files`、`--timeout-seconds` で調整できます（最大5 GB・100,000ファイル・120秒）。検査はハッシュや参照の整合性を確認し、内容の正しさを保証するものではありません。
+
+TUI は `/backup-open /保存先`、CLI は次のように閲覧します。現在の設定や認証がなくても CLI で読めます。
+
+```sh
 agent backup-read /保存先 --conversation <会話ID>
 agent backup-read /保存先 --conversation <会話ID> --message <発言番号>
 agent backup-read /保存先 --section runs
@@ -185,74 +231,69 @@ agent backup-read /保存先 --section files
 agent backup-read /保存先 --file <一覧のpath>
 ```
 
-続きは応答の `nextOffset` を `--offset` に指定します（一覧は行、本文はUTF-16位置）。検査の既定上限はバックアップと同じです。TUIは既定上限を使い、CLIの読取・書出には `--max-bytes`、`--max-files`、`--timeout-seconds` を指定できます。ファイルの全バイトを書き出すにはTUIで対象ファイルから書出を選び、保存先・ハッシュ・サイズを確認して確定します。CLI は `agent backup-extract /保存先 <一覧のpath> /新しいファイル` がプレビュー、`--write` 付きが明示保存です。既存ファイルは上書きせず、所有する書込保護済みディレクトリ内に `0600` で保存します。Agent領域・現在と保存元の作業領域・アーカイブ内への書出は拒否します。画像・PDF等のバイナリも元のバイト列のまま保存し、自動で開いたり実行したりしません。書出した設定も手動参照用であり、現在の設定には反映しません。
+続きは応答の `nextOffset` を `--offset` に指定します。ファイルの書出は TUI の対象ファイルから選択するか、`agent backup-extract /保存先 <一覧のpath> /新しいファイル` で確認し、`--write` を付けて実行します。既存ファイルは上書きせず、Agent 領域・作業領域・アーカイブ内には書き出せません。書き出した設定は現在の設定に反映されません。
 
-## 履歴の削除と保持
+### 履歴とキャッシュの整理
 
-TUI の `/delete` では会話を複数選び、対象と保持理由を確認してから最終確定します。
-`/delete session <ID...>`、`/delete run <ID...>` でも指定でき、会話に属する実行だけを
-単独では削除できません。`/prune` は現在の作業場所と設定の `retentionDays` を使い、
-現在開いている会話・使用中の履歴・参照が残る履歴を保護します。確認画面だけでは
-削除せず、会話や設定・対象が変わった場合は選び直しが必要です。
-`/cleanup-deletions` は全作業場所の保留ジョブを表示し、一件ずつ明示再試行します。
+`/delete` で会話を選び、対象と保持理由を確認して確定します。`/delete session <ID...>`、`/delete run <ID...>` でも指定できます。`/prune` は現在の作業場所と `retentionDays` を使い、開いている会話・使用中・参照が残る履歴を保護します。
 
-画像、添付資料、保存境界の共有 blob は、作業プロセスごとの永続 pin と
-データベース参照を確認してから回収します。24時間未満のファイル、参照中の
-ファイル、未知の名前や安全性を確認できない物体は保持します。`prune-cache`
-は候補表示が既定で、`--write` と明示した選択だけを対象にします。
-`cleanup-cache` は保留 job を表示し、指定した一件だけを明示再試行します。
-pin はプロセスの寿命中保持され、起動時の自動 sweep・自動 retry は行いません。
-`/prune-pins` は終了を確認できたプロセスの pin 記録だけを候補表示し、明示確定後に整理します。画像・資料・履歴・稼働プロセスには触れません。稼働中・PID再利用・確認権限不足は保持し、名前・所有者・権限・内容・ファイル識別子を確認できない記録も残します。途中で終了した書込の `.tmp` は既知の名前・安全なファイル・終了確認・確認時のハッシュがそろう場合だけ対象です。CLI `agent prune-pins [ファイル名...]` もプレビューが既定で、`--write` が必要です。名前を指定した選択に保持対象が含まれた場合は全体を拒否します。
+物理削除が完了しなかった場合は `/cleanup-deletions` で一件ずつ再試行します。CLI の `remove`・`remove-session`・`prune` はプレビューが既定で、削除には `--write` が必要です。`cleanup-deletions --write <job-id>` は指定ジョブだけを再試行します。
 
-pin の列挙は一度に500件・読取量64 MB・10秒までで、全体件数とは区別します。TUIの次ページ、またはCLIの `--offset` で続けて確認できます（ディレクトリ列挙順で、記録が増減した場合は先頭から確認してください）。名前を直接指定すれば、通常の pin 読取上限に達していても、その選択だけを検証して整理できます。確認後の置換・状態変更は拒否し、途中の失敗は削除済みと未完了の名前を分けて返します。自動再試行はせず、残った記録を改めて選び直してください。ディレクトリ同期に失敗した場合も完了とは扱いません。
-共有キャッシュ、SQLite の残存ページ、外部バックアップの暗号学的消去は保証しません。
-確定後の中断は既に行われた削除を取り消しません。新しい推論・適用・自動再開は行いません。
+共有キャッシュは `prune-cache` で候補を確認し、選択と `--write` で整理します。保留分は `cleanup-cache`、終了済みプロセスの保持記録は `/prune-pins` または `agent prune-pins` から確認できます。参照中・新しいファイル・安全性を確認できない対象は保持します。自動削除・自動再試行はしません。削除途中の中断は取り消しではなく、外部バックアップや残存データの完全消去も保証しません。
 
-履歴削除は自動では実行されません。`remove`、`remove-session`、`prune` は既定で
-プレビューを表示し、削除には `--write` が必要です。対象は選択した閉じた会話と
-terminal run のメタデータ、およびその run 専用ディレクトリです。会話・run の
-JSON、本文、出典、fork lineage、boundary などに残る UUID 参照も保守的に調べます。
-外部から参照される単位は保持し、選択削除では選択全体を拒否します。
+## Firecracker 環境を使う
 
-メタデータは一つの SQLite transaction で先に削除します。物理削除に失敗した場合は
-保留中の cleanup job として表示し、`cleanup-deletions --write <job-id>` で明示した
-job ID だけを再試行できます。共有画像・準備済み文書・checkpoint blob、SQLite の
-残存ページ、外部バックアップは削除対象外です。暗号学的消去は保証しません。
-バックアップ内の pending job は記録として保存されますが、cleanup は実行されません。
+Firecracker は専用の `agent environment` コマンドで使う独立した VM 環境です。通常の TUI・Shell・ファイル操作の実行先にはなりません。`execution.backend` を変更して有効にすることはできません。
 
-開発・検証方法は [docs/architecture.md](docs/architecture.md)、保守用 CLI は `agent --help` を参照してください。
+### 管理者セットアップ
 
-## Collaboration backend
+Linux x86_64、使用可能な KVM、cgroup v2 の CPU・memory・pids、ネットワーク名前空間、Python 3、`ip`、`sudo`・`visudo`、`unsquashfs`・`mkfs.ext4` が必要です。管理者がホストの条件を確認して明示的にセットアップします。起動や診断が KVM・Proxmox・カーネルの設定を自動修復することはありません。
 
-Assisted and reviewed runs use host-assigned task graphs. New collaborative
-tasks return structured results; a synthesis task is the only integrated
-conversation answer. Delegated children receive only their assignment,
-authorized source IDs, and a read-only workspace view. They cannot write,
-execute shell or MCP tools, mutate research checkpoints, or read another
-task's transcript, context archive, or attempt reports.
+以下は利用アカウントが `ubuntu` の例です。ユーザー名と取得先を実環境に置き換え、ソースディレクトリから実行してください。
 
-Every invocation has a private immutable attempt report. Reviewers and
-synthesis may read only reports on their task or transitive dependencies.
-Source exclusions, model/image disclosure floors, writer exclusivity, request
-budgets, and the task-scoped context archive allow-list are enforced by the
-host rather than by model instructions. Legacy saved tasks without
-`resultFormat` retain their previous text/structured parsing behavior.
+```sh
+python3 -I scripts/firecracker/fetch_assets.py /home/ubuntu/firecracker-assets
+python3 -I scripts/firecracker/install.py --user ubuntu --dry-run
+```
 
-Prepared runs waiting for input, quota, or approval can explicitly replace the
-model for one selected task. Candidates use the same host policy as initial
-routing; replacement invalidates that task and its transitive dependents while
-preserving independent results, budgets, counters, and immutable attempt
-evidence. Preview and confirmation are bound to the run graph, operations,
-usage, configuration, and active session policy. Confirmation never probes a
-provider or resumes a run; a later explicit resume is required. Model-change
-and resolution records are host evidence and never assert semantic equivalence.
+取得するファイルとハッシュは [scripts/firecracker/assets.sha256](scripts/firecracker/assets.sha256) にあります。固定された kernel/rootfs は互換性確認用で、本番用に強化済みのイメージではありません。本番用途では管理者が更新・再検証する必要があります。
 
-Use `/model-change [task-id]` to select a waiting task and an eligible model,
-review affected tasks, destination and preserved budgets, and explicitly confirm.
-Cancellation leaves the selection unchanged. Confirmation keeps the run waiting;
-only a separate `/resume` starts execution. `/model` still configures the next
-request. `/tasks` shows delegation, immutable attempt reports, repair history and
-model-change evidence links without treating model reports as validation proof.
+スクリプト、ハッシュ、sudoers の設定内容を確認し、管理者専用の場所へコピーします。一般ユーザーが書き換えられるソースを root で直接実行しないでください。
 
-独立した Firecracker agent environment の管理者セットアップ、CLI、制約は
-[docs/firecracker.md](docs/firecracker.md) を参照してください。
+```sh
+sudo install -d -o root -g root -m 0700 /root/local-agent-firecracker-setup
+sudo install -o root -g root -m 0644 scripts/firecracker/assets.sha256 /root/local-agent-firecracker-setup/
+sudo install -o root -g root -m 0644 scripts/firecracker/helper.py /root/local-agent-firecracker-setup/
+sudo install -o root -g root -m 0644 scripts/firecracker/guest_runner.py /root/local-agent-firecracker-setup/
+sudo install -o root -g root -m 0700 scripts/firecracker/install.py /root/local-agent-firecracker-setup/
+sudo install -d -o root -g root -m 0700 /root/local-agent-firecracker-setup/assets
+sudo install -o root -g root -m 0600 /home/ubuntu/firecracker-assets/firecracker-v1.16.2-x86_64.tgz /root/local-agent-firecracker-setup/assets/
+sudo install -o root -g root -m 0600 /home/ubuntu/firecracker-assets/vmlinux-6.1.128 /root/local-agent-firecracker-setup/assets/
+sudo install -o root -g root -m 0600 /home/ubuntu/firecracker-assets/ubuntu-24.04.squashfs /root/local-agent-firecracker-setup/assets/
+```
+
+コピー先の内容・所有者・権限を再確認してから導入します。
+
+```sh
+sudo -n python3 -I /root/local-agent-firecracker-setup/install.py --user ubuntu /root/local-agent-firecracker-setup/assets
+```
+
+指定アカウントに限定した sudoers 規則、専用ヘルパー、イメージ、`/etc/local-agent/firecracker.json` が配置されます。既存の配置・状態は上書きしません。
+
+### VM の操作
+
+```sh
+agent --json environment doctor
+agent --json environment create
+agent --json environment start <uuid>
+agent --json environment status <uuid>
+agent --json environment exec <uuid> -- /bin/sh -c 'printf marker'
+agent --json environment stop <uuid>
+agent --json environment destroy <uuid>
+```
+
+`create` が返す ID を後続の `<uuid>` に使います。`exec` はゲストの `/workspace` で実行します。`--timeout-ms` と `--max-output-bytes` で上限を下げられます。`stop` はディスクを保持し、`destroy` はディスクを含む環境を削除します。
+
+ゲストに外部ネットワーク、ホストの資格情報、元の Git リポジトリは公開しません。依存の取得はできないため事前に準備してください。診断が失敗した場合は管理者が要件を確認し、実行結果が不明な場合は `status` で状態を確認してください。
+
+その他の CLI 操作と引数は `agent --help`、各コマンドの `--help` で確認できます。
