@@ -23,12 +23,11 @@ Ubuntu では `sudo apt-get install bubblewrap` で Bubblewrap を導入でき�
 
 初回は接続が無効です。Ctrl+P →「接続・権限・上限」（`/settings`）から準備します。
 
-1. **接続を追加**し、モデル、送信を許可するデータ区分、有効化を設定します。通常の会話は `private` です。接続の `allowedData` に必要な区分を指定してください。
+1. **接続を追加**し、使うモデルを選びます。ChatGPT・Gemini は一覧から選択でき、一覧にないモデルや互換・ローカル接続はモデル ID を入力します。別名の入力は不要です。送信を許可するデータ区分と接続の有効化も設定します。通常の会話は `private` です。接続の `allowedData` に必要な区分を指定してください。
 2. ChatGPT は `/login` で認証します。API キーを使う接続では、キーを起動環境へ渡し、`secretEnv` に環境変数名だけを登録します。従量 API は `limits.maxApiUsd` と接続の `maxRequestUsd` をともに正数にします。
-3. モデルはツール無効で登録されます。`/probe` で疎通・ツールの往復を確認してから、そのモデルの `tools` を有効にしてください。
-4. コード変更には**検査コマンドを追加**し、会話の必須検査に指定します。`/doctor` で隔離環境を確認します。
+3. コード変更には**検査コマンドを追加**し、会話の必須検査に指定します。`/doctor` で隔離環境を確認します。
 
-設定一覧で変更した値は、閉じる際に差分を確認してまとめて保存します。変更は次の依頼から反映されます。起動と `/doctor` はモデルを呼びません。`/probe` は利用枠・予算を消費します。
+モデルの追加は選択・入力した時点で保存され、ツール使用も有効になります。追加後の疎通試験は不要です。設定一覧で変更した値は、閉じる際に差分を確認してまとめて保存します。変更は次の依頼から反映されます。起動と `/doctor` はモデルを呼びません。接続の問題を調べるための `/probe` は任意で、利用枠・予算を消費します。
 
 設定例は [examples/config.yaml](examples/config.yaml) にあります。ローカル推論には OpenAI Chat Completions 互換サーバーを用意し、接続先を `127.0.0.1` または `::1` にします。`restricted` と `localOnly` はローカル接続専用、Sarashina は `public` 専用です。
 
@@ -36,7 +35,7 @@ Ubuntu では `sudo apt-get install bubblewrap` で Bubblewrap を導入でき�
 
 Ctrl+L で次の依頼のモデルと担当構成を選びます。単独実行の `single`、レビュー付きの `reviewed`、分担する `assisted` を使えます。独立した読み取りタスクは並列実行できますが、書き込みタスクは他のタスクと排他実行します。
 
-モデルの別名ごとに `roles`・`kinds`・`tools`・`images`・`maxOutputTokens` を設定できます。同じ提供元モデルを別名で登録すると、作業担当とレビュー担当に異なる設定を使えます。`thinkingLevel` は `off / minimal / low / medium / high`、空欄は未指定です。推論の深さは品質・速度・費用を保証せず、提供元によって意味が異なります。
+選択画面にはモデル ID と接続名が表示されます。既存のモデル設定も引き続き使えます。必要に応じて `/settings` で `roles`・`kinds`・`tools`・`images`・`maxOutputTokens` を変更できます。`thinkingLevel` は `off / minimal / low / medium / high`、空欄は未指定です。推論の深さは品質・速度・費用を保証せず、提供元によって意味が異なります。
 
 互換・ローカル接続では、サーバーが `reasoning_effort` に対応する場合だけ `reasoning: true` を設定してください。未対応の深さを明示すると推論前に停止します。出力上限の強制は API の対応範囲に限られ、ChatGPT 接続では `max_output_tokens` を送信しません。
 

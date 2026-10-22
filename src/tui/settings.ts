@@ -128,7 +128,7 @@ export class SettingsDialog {
       {
         value: "model",
         label: "+ モデルを追加",
-        description: "登録済み接続にモデルを追加（tools は無効）",
+        description: "接続と使うモデルを選んで登録",
       },
       {
         value: "check",
@@ -274,7 +274,13 @@ export class SettingsDialog {
         descriptions[`${path[0]}.${leaf}`] ?? descriptions[leaf] ?? "";
       result.push({
         value: JSON.stringify(path),
-        label: path.map((key) => labels[key] ?? key).join(" / "),
+        label: path
+          .map((key, index) =>
+            path[0] === "models" && index === 1
+              ? `${staged.config.models[key]!.id} (${staged.config.models[key]!.connection})`
+              : (labels[key] ?? key),
+          )
+          .join(" / "),
         description: `${detail ? `${detail} · ` : ""}${joined}${Array.isArray(node) ? " · カンマ区切り" : ""}${leaf.endsWith("Env") ? " · 環境変数名のみ（キーの値は入力しない）" : ""}${pending(joined) ? " · 保留" : ""}`,
         current:
           typeof node === "boolean"
@@ -423,31 +429,39 @@ export class SettingsDialog {
     config: Config,
     connection: string,
   ): Promise<{ name: string; entry: Config["models"][string] } | undefined> {
-    const name = await this.ui.prompt("モデルの呼び名");
-    if (!name) return;
-    if (config.models[name])
-      throw new AgentError("CONFIG", "同じ呼び名のモデルがあります。");
-    const choice = await this.ui.choose("モデル ID", [
-      { value: "manual", label: "ID を入力" },
-      {
-        value: "catalog",
-        label: "SDK カタログから選択（アカウントの利用可否は未確認）",
-      },
-    ]);
-    if (!choice) return;
-    let modelId: string | undefined;
-    if (choice === "catalog") {
-      const models = await catalog(config, this.app.paths, connection);
-      modelId = await this.ui.choose(
-        "SDK モデル一覧",
-        models.map((m) => ({
-          value: m.id,
-          label: m.id,
-          description: m.name,
-        })),
-      );
-    } else modelId = await this.ui.prompt("提供元のモデル ID");
+    const type = config.connections[connection]!.type;
+    const models = ["chatgpt", "gemini"].includes(type)
+      ? await catalog(config, this.app.paths, connection)
+      : [];
+    let modelId = models.length
+      ? await this.ui.choose("モデルを選択", [
+          ...models.map((m) => ({
+            value: m.id,
+            label: m.id,
+            description: m.name,
+          })),
+          { value: "@manual", label: "一覧にないモデル ID を入力" },
+        ])
+      : "@manual";
+    if (modelId === "@manual")
+      modelId = (await this.ui.prompt("モデル ID"))?.trim();
     if (!modelId) return;
+    if (
+      Object.values(config.models).some(
+        (model) => model.connection === connection && model.id === modelId,
+      )
+    )
+      throw new AgentError("CONFIG", "この接続には同じモデルが登録済みです。");
+    // Saved conversations reference stable config keys. Allocate one without
+    // asking the user to name a second identity or renaming existing entries.
+    const base =
+      modelId
+        .replace(/[^a-zA-Z0-9_-]/g, "-")
+        .replace(/^[^a-zA-Z0-9]+/, "")
+        .slice(0, 56) || "model";
+    let name = base;
+    for (let suffix = 2; name in config.models; suffix++)
+      name = `${base}-${suffix}`;
     return {
       name,
       entry: {
@@ -455,7 +469,7 @@ export class SettingsDialog {
         id: modelId,
         roles: ["lead", "worker", "reviewer"],
         kinds: ["coding", "research", "writing", "chat"],
-        tools: false,
+        tools: true,
         images: false,
         contextWindow: 32000,
         maxOutputTokens: 4096,
@@ -527,8 +541,7 @@ export class SettingsDialog {
       };
       const model =
         type === "clef" ? undefined : await this.promptModel(draft, name);
-      // Defaults as in-flow choices: allowedData, activation, then /login or
-      // /probe. Esc keeps the defaults and still saves below.
+      // Esc keeps the disclosure and activation defaults.
       if (["chatgpt", "gemini", "compatible", "clef"].includes(type)) {
         const data = await this.ui.choose(`${name} に送信してよい情報`, [
           {
@@ -553,15 +566,7 @@ export class SettingsDialog {
                 description: "ブラウザーで ChatGPT 認証",
               },
             ]
-          : model
-            ? [
-                {
-                  value: "probe",
-                  label: "有効化して /probe を実行",
-                  description: "実際に呼び出して疎通確認（利用枠を消費）",
-                },
-              ]
-            : []),
+          : []),
         { value: "enable", label: "有効化のみ" },
         { value: "skip", label: "無効のままにする" },
       ];
@@ -570,14 +575,9 @@ export class SettingsDialog {
         actions,
       );
       let follow: string | undefined;
-      if (
-        activation === "login" ||
-        activation === "probe" ||
-        activation === "enable"
-      )
+      if (activation === "login" || activation === "enable")
         connection.enabled = true;
       if (activation === "login") follow = `login ${name}`;
-      if (activation === "probe" && model) follow = `probe ${model.name}`;
       await app.saveConfiguration({
         ...draft,
         connections: { ...draft.connections, [name]: connection },
@@ -587,7 +587,7 @@ export class SettingsDialog {
       });
       this.ui.notify(
         model
-          ? `${name} とモデル ${model.name} を保存しました。`
+          ? `${name} とモデル ${model.entry.id} を保存しました。`
           : `${name} を保存しました。`,
       );
       if (follow && this.ui.run) await this.ui.run(follow);
@@ -613,23 +613,7 @@ export class SettingsDialog {
         models: { ...config.models, [model.name]: model.entry },
       };
       await app.saveConfiguration(raw);
-      if (
-        this.staged().config.connections[connection]!.enabled &&
-        this.ui.run
-      ) {
-        const go = await this.ui.choose(`モデル ${model.name} を保存しました`, [
-          {
-            value: "probe",
-            label: "/probe で疎通・ツールを確認",
-            description: "利用枠・予算を消費",
-          },
-          { value: "later", label: "あとで（tools は確認後に有効化）" },
-        ]);
-        if (go === "probe") await this.ui.run(`probe ${model.name}`);
-      } else
-        this.ui.notify(
-          "モデルを保存。接続の有効化と /probe の成功を確認して tools を有効にしてください。",
-        );
+      this.ui.notify(`モデル ${model.entry.id} を保存しました。`);
       return;
     }
     if (selected === "check") {

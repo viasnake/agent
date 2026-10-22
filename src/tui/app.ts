@@ -929,7 +929,7 @@ export class TerminalApp {
           [
             `会話: ${app.session.name}`,
             `作業場所: ${app.session.workspace}`,
-            `モデル: ${app.session.model || "自動選択"} · 構成: ${{ single: "単独", reviewed: "レビュー付き", assisted: "計画・委任" }[app.session.strategy]}`,
+            `モデル: ${(app.session.model && app.config.models[app.session.model]?.id) || app.session.model || "自動選択"} · 構成: ${{ single: "単独", reviewed: "レビュー付き", assisted: "計画・委任" }[app.session.strategy]}`,
             `送信区分: ${app.session.dataClass} · ${app.session.localOnly ? "ローカルのみ" : "許可した接続を使用"}`,
             `状態: ${run ? runLabels[run.state] : "未実行"}`,
             run?.reason
@@ -1799,8 +1799,8 @@ export class TerminalApp {
       },
       ...Object.entries(app.config.models).map(([name, model]) => ({
         value: name,
-        label: name,
-        description: `${name === current ? "現在 · " : ""}${app.config.connections[model.connection]!.enabled ? model.connection : "接続無効"} / ${model.id}`,
+        label: model.id,
+        description: `${name === current ? "現在 · " : ""}${model.connection}${app.config.connections[model.connection]!.enabled ? "" : " · 接続無効"}`,
       })),
     ];
     const value = await this.choose(
@@ -1810,7 +1810,10 @@ export class TerminalApp {
         {
           value: "@reviewer",
           label: "レビュー担当を変更",
-          description: app.session.reviewer ?? "自動選択",
+          description:
+            (app.session.reviewer &&
+              app.config.models[app.session.reviewer]?.id) ??
+            "自動選択",
         },
         {
           value: "@strategy",
