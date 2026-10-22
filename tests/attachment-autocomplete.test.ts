@@ -3,7 +3,7 @@ import { link, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider } from "../src/tui/autocomplete.js";
 import { AttachmentAutocompleteProvider } from "../src/tui/attachment-autocomplete.js";
 
 test("attachment autocomplete falls back to safe workspace directory suggestions", async () => {

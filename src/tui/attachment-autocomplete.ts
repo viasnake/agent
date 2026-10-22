@@ -4,7 +4,7 @@ import type {
   AutocompleteItem,
   AutocompleteProvider,
   AutocompleteSuggestions,
-} from "@earendil-works/pi-tui";
+} from "./autocomplete.js";
 import { safePath } from "../util.js";
 import { secretPath } from "../workspace.js";
 
@@ -24,20 +24,21 @@ export class AttachmentAutocompleteProvider implements AutocompleteProvider {
     lines: string[],
     cursorLine: number,
     cursorCol: number,
-    options: { signal: AbortSignal; force?: boolean },
+    options: { signal?: AbortSignal; force?: boolean },
   ): Promise<AutocompleteSuggestions | null> {
+    const signal = options.signal ?? new AbortController().signal;
     const suggestions = await this.delegate.getSuggestions(
       lines,
       cursorLine,
       cursorCol,
       options,
     );
-    if (suggestions || options.signal.aborted) return suggestions;
+    if (suggestions || signal.aborted) return suggestions;
 
     const text = (lines[cursorLine] ?? "").slice(0, cursorCol);
     const prefix = this.attachmentPrefix(text);
     if (!prefix) return null;
-    return this.getAttachmentSuggestions(prefix, options.signal);
+    return this.getAttachmentSuggestions(prefix, signal);
   }
 
   applyCompletion(

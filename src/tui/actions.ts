@@ -1,4 +1,4 @@
-import { matchesKey, type KeyId } from "@earendil-works/pi-tui";
+import { matchesKey, type KeyId, type KeyLike } from "./keys.js";
 import { AgentError } from "../types.js";
 
 export function commandPath(argument: string): string {
@@ -65,7 +65,7 @@ export const actions = {
 export type ActionName = keyof typeof actions;
 export type KeyOverrides = Partial<Record<ActionName, KeyId[]>>;
 export function actionFor(
-  data: string,
+  data: string | KeyLike,
   overrides: KeyOverrides = {},
 ): ActionName | undefined {
   return (Object.keys(actions) as ActionName[]).find((key) =>

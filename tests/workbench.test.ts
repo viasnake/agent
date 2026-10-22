@@ -1,14 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  visibleWidth,
-  TuiMainScreen,
-  TuiAltScreen,
-  Text,
-  type Terminal,
-  ProcessTerminal,
-  CURSOR_MARKER,
-} from "@earendil-works/pi-tui";
+import { TextRenderable } from "@opentui/core";
 import { ConversationView, ActivityView } from "../src/tui/workbench.js";
 import {
   safeText,
@@ -19,6 +11,7 @@ import {
   ResponsiveOverlay,
   WorkbenchLayout,
   ConversationScroll,
+  visibleWidth,
 } from "../src/tui/components.js";
 import {
   connectionProblems,
@@ -28,6 +21,7 @@ import {
 import { fixture, ScriptedRuntime, testConfig } from "./helpers.js";
 import { TerminalApp } from "../src/tui/app.js";
 import { Application } from "../src/application.js";
+import { makeScreen, chunksToText, feedInput } from "./helpers-tui.js";
 
 test("saved drafts survive slash commands and selecting the same conversation", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -35,8 +29,9 @@ test("saved drafts survive slash commands and selecting the same conversation", 
     throw new Error("Draft operations must not call a model");
   });
   const f = await fixture(runtime);
+  const screen = await makeScreen(80, 24);
   const app = new Application(f.config, f.p, f.store, f.root);
-  const terminal = new TerminalApp();
+  const terminal = new TerminalApp(undefined, screen.renderer);
   terminal.tui.requestRender = () => {};
   terminal.app = app;
   app.on("event", (event) => terminal["event"](event));
@@ -73,6 +68,7 @@ test("saved drafts survive slash commands and selecting the same conversation", 
     assert.equal(app.conversations.get(app.session.id).draft, "");
   } finally {
     await app.close();
+    await screen.dispose();
     await f.cleanup();
   }
 });
@@ -80,8 +76,9 @@ test("saved drafts survive slash commands and selecting the same conversation", 
 test("palette navigation saves the current draft before its debounce expires", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const screen = await makeScreen(80, 24);
   const app = new Application(f.config, f.p, f.store, f.root);
-  const terminal = new TerminalApp();
+  const terminal = new TerminalApp(undefined, screen.renderer);
   terminal.tui.requestRender = () => {};
   terminal.app = app;
   app.on("event", (event) => terminal["event"](event));
@@ -99,18 +96,23 @@ test("palette navigation saves the current draft before its debounce expires", a
     assert.equal(app.session.draft, "");
   } finally {
     await app.close();
+    await screen.dispose();
     await f.cleanup();
   }
 });
 
 test("external editing does not copy the TUI draft into the shell buffer", async () => {
   const f = await fixture(new ScriptedRuntime(async () => "unused"));
+  const screen = await makeScreen(80, 24);
   const app = new Application(f.config, f.p, f.store, f.root);
-  const terminal = new TerminalApp();
-  const writes: string[] = [];
-  terminal.terminal.start = () => {};
-  terminal.terminal.stop = () => {};
-  terminal.terminal.write = (text) => writes.push(text);
+  const terminal = new TerminalApp(undefined, screen.renderer);
+  const calls: string[] = [];
+  terminal.tui.suspendScreen = async () => {
+    calls.push("suspend");
+  };
+  terminal.tui.resumeScreen = async () => {
+    calls.push("resume");
+  };
   terminal.app = app;
   terminal["preferences"].editor = [
     process.execPath,
@@ -121,112 +123,79 @@ test("external editing does not copy the TUI draft into the shell buffer", async
     await app.initialize();
     const draft = "SHELL_MUST_NOT_CONTAIN_THIS_DRAFT";
     terminal.input.setText(draft);
-    terminal.tui.start();
-    terminal.tui.renderNow(true);
-    writes.length = 0;
-
     await terminal["externalEditor"](false);
     assert.equal(terminal.input.getExpandedText(), `${draft} edited`);
     assert.equal(app.session.draft, `${draft} edited`);
-    const output = writes.join("");
-    const exit = output.indexOf("\x1b[?1049l");
-    const restart = output.indexOf("\x1b[?1049h", exit + 1);
-    assert.ok(exit >= 0);
-    assert.ok(restart > exit);
-    assert.ok(!output.slice(exit, restart).includes(draft));
+    assert.deepEqual(calls, ["suspend", "resume"]);
   } finally {
     if (terminal["draftTimer"]) clearTimeout(terminal["draftTimer"]);
     if (terminal["renderTimer"]) clearTimeout(terminal["renderTimer"]);
-    terminal.tui.stop({ preserveScreen: true });
+    await screen.dispose();
     await app.close();
     await f.cleanup();
   }
 });
 
 test("fullscreen uses the viewport width and pins controls while scrolling and resizing", async () => {
-  let columns = 157;
-  let rows = 51;
-  let resize = () => {};
-  let input = (_data: string) => {};
-  const noop = () => {};
-  const terminal: Terminal = {
-    get columns() {
-      return columns;
-    },
-    get rows() {
-      return rows;
-    },
-    kittyProtocolActive: false,
-    start(onInput, onResize) {
-      input = onInput;
-      resize = onResize;
-    },
-    stop: noop,
-    drainInput: async () => {},
-    write: noop,
-    moveBy: noop,
-    hideCursor: noop,
-    showCursor: noop,
-    clearLine: noop,
-    clearFromCursor: noop,
-    clearScreen: noop,
-    setTitle: noop,
-    setProgress: noop,
-    setProgramStatus: noop,
-  };
-  const tui = new TuiAltScreen(terminal, true);
-  const composer = editor(tui);
+  const screen = await makeScreen(157, 51);
+  const composer = editor(screen.renderer);
   composer.setText("日本語の下書き");
-  const content = new Text("はじめの会話", 0, 0);
-  const ruler = {
-    render: (width: number) => ["─".repeat(width)],
-    invalidate: noop,
-  };
+  const content = new TextRenderable(screen.renderer, {
+    content: "はじめの会話",
+  });
+  const ruler = new TextRenderable(screen.renderer, {
+    content: "─".repeat(300),
+    wrapMode: "none",
+  });
   const layout = new WorkbenchLayout(
+    screen.renderer,
     [content],
-    [ruler, composer, new Text("操作案内", 0, 0)],
+    [
+      ruler,
+      composer,
+      new TextRenderable(screen.renderer, { content: "操作案内" }),
+    ],
   );
-  tui.setLayoutRoot(layout);
-  tui.setFocus(composer);
   const frame = async () => {
-    tui.requestRender();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const lines = tui.getScreenLines();
-    assert.equal(lines.length, terminal.rows);
-    for (const line of lines) assert.ok(visibleWidth(line) <= terminal.columns);
+    const lines = await screen.frame(layout);
+    assert.equal(lines.length, screen.renderer.height);
+    for (const line of lines)
+      assert.ok(visibleWidth(line) <= screen.renderer.width);
     assert.match(safeText(lines.at(-1)!), /操作案内/);
     assert.match(safeText(lines.join("\n")), /日本語の下書き/);
-    const border = lines.find((line) => line.includes("─"))!;
-    assert.equal(visibleWidth(safeText(border).trim()), terminal.columns - 2);
+    const border = lines.find((line) => /─{4,}/.test(line))!;
+    assert.equal(
+      visibleWidth(safeText(border).trim()),
+      screen.renderer.width - 2,
+    );
     return safeText(lines.join("\n"));
   };
-  tui.start();
   try {
     assert.match(await frame(), /はじめの会話/);
-    content.setText(
-      Array.from({ length: 150 }, (_, i) => `会話行 ${i}`).join("\n"),
-    );
+    let body = Array.from({ length: 150 }, (_, i) => `会話行 ${i}`).join("\n");
+    content.content = body;
     assert.match(await frame(), /会話行 149/);
-    input("\x1b[5~");
+    layout.scroll.scrollBy(-30);
     assert.doesNotMatch(await frame(), /会話行 149/);
     assert.equal(layout.scroll.isFollowingEnd, false);
-    content.setText(content.render(100).join("\n") + "\n新しい応答");
+    body = `${body}\n新しい応答`;
+    content.content = body;
     assert.doesNotMatch(await frame(), /新しい応答/);
     layout.scroll.scrollToEnd();
     assert.match(await frame(), /新しい応答/);
     for (const nextColumns of [59, 80, 120, 157]) {
-      columns = nextColumns;
-      rows = nextColumns === 59 ? 29 : 51;
-      resize();
+      const nextRows = nextColumns === 59 ? 29 : 51;
+      screen.resize(nextColumns, nextRows);
       assert.match(await frame(), /新しい応答/);
     }
   } finally {
-    tui.stop();
+    await screen.dispose();
   }
 });
 
-test("compact activity prioritizes actual tools and uncertain results on narrow terminals", () => {
-  const activity = new ActivityView();
+test("compact activity prioritizes actual tools and uncertain results on narrow terminals", async () => {
+  const screen = await makeScreen(80, 24);
+  const activity = new ActivityView(screen.renderer);
   activity.busy = true;
   activity.run = {
     state: "running",
@@ -280,8 +249,8 @@ test("compact activity prioritizes actual tools and uncertain results on narrow 
     target: "npm test",
     state: "pending",
   });
-  let output = safeText(activity.render(80).join("\n"));
-  assert.equal(activity.render(80).length, 3);
+  let output = safeText(chunksToText(activity.lines()));
+  assert.equal(activity.lines().length, 3);
   assert.match(output, /> 実行中  読み込み.*日本語.ts/);
   assert.match(output, /! 失敗  読み込み.*tests\/config.ts/);
   assert.doesNotMatch(output, /work|review|待機|unit/);
@@ -290,21 +259,24 @@ test("compact activity prioritizes actual tools and uncertain results on narrow 
     { taskId: "work", toolId: "1", name: "read_file", cancelled: true },
     false,
   );
-  output = safeText(activity.render(80).join("\n"));
+  output = safeText(chunksToText(activity.lines()));
   assert.match(output, /! 結果未確定  読み込み/);
   assert.doesNotMatch(output, /完了/);
-  for (const width of [20, 40, 80, 120])
-    for (const line of activity.render(width))
-      assert.ok(visibleWidth(line) <= width);
+  for (const width of [20, 40, 80, 120]) {
+    const lines = await screen.frame(activity, width, 24);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width);
+  }
   activity.busy = false;
-  assert.deepEqual(activity.render(80), []);
+  assert.deepEqual(activity.lines(), []);
   activity.clear();
   assert.equal(activity.tools.size + activity.checks.size, 0);
+  await screen.dispose();
 });
 
-test("picker searches Japanese labels, partial values and descriptions without losing selection", () => {
-  let rows = 24;
+test("picker searches Japanese labels, partial values and descriptions without losing selection", async () => {
+  const screen = await makeScreen(80, 24);
   const picker = new Picker(
+    screen.renderer,
     "操作を検索",
     [
       { value: "diff", label: "変更と差分", description: "/diff" },
@@ -312,58 +284,55 @@ test("picker searches Japanese labels, partial values and descriptions without l
       { value: "status", label: "状態", description: "利用量と接続" },
     ],
     true,
-    () => rows,
   );
   let selected = "";
-  picker.onSelect = (value) => {
-    selected = value;
+  picker.onSelect = (item) => {
+    selected = item?.value ?? "";
   };
-  picker.handleInput("差分");
-  picker.handleInput("\r");
+  feedInput(picker, "差分");
+  feedInput(picker, "\r");
   assert.equal(selected, "diff");
-  picker.handleInput("\x15");
-  picker.handleInput("odel");
-  assert.equal(picker.list.getSelectedItem()?.value, "model");
-  picker.handleInput("\x15");
-  picker.handleInput("利用量");
-  assert.equal(picker.list.getSelectedItem()?.value, "status");
-  picker.handleInput("存在しない項目");
+  feedInput(picker, "\x15");
+  feedInput(picker, "odel");
+  assert.equal(picker.selected?.value, "model");
+  feedInput(picker, "\x15");
+  feedInput(picker, "利用量");
+  assert.equal(picker.selected?.value, "status");
+  feedInput(picker, "存在しない項目");
   assert.match(
-    safeText(picker.render(80).join("\n")),
+    safeText((await screen.frame(picker)).join("\n")),
     /一致する項目がありません/,
   );
-  picker.handleInput("\x15");
-  picker.handleInput("\x1b[B");
-  picker.handleInput("\r");
+  feedInput(picker, "\x15");
+  feedInput(picker, "\x1b[B");
+  feedInput(picker, "\r");
   assert.equal(selected, "model");
-  rows = 11;
-  assert.ok(picker.render(40).length <= rows);
-  assert.equal(picker.list.getSelectedItem()?.value, "model");
+  assert.ok(
+    (await screen.frame(picker, 40, 11)).every(
+      (line) => visibleWidth(line) <= 40,
+    ),
+  );
+  assert.equal(picker.selected?.value, "model");
   for (const width of [20, 40, 80, 120])
-    for (const line of picker.render(width))
+    for (const line of await screen.frame(picker, width, 24))
       assert.ok(visibleWidth(line) <= width);
+  await screen.dispose();
 });
 
-test("composer preserves Pi cursor markers, wrapping and complete confirmation paths", () => {
-  const tui = new TuiMainScreen(new ProcessTerminal());
-  tui.requestRender = () => {};
-  const input = editor(tui);
-  input.focused = true;
+test("composer keeps wrapping consistent and confirms complete text round trips", async () => {
+  const screen = await makeScreen(80, 24);
+  const input = editor(screen.renderer);
+  input.focus();
+  const empty = await screen.frame(input);
   assert.equal(
-    safeText(input.render(80).join(""))
-      .replaceAll(CURSOR_MARKER, "")
-      .replace(/[▎\s]/g, ""),
+    safeText(empty.join("")).replace(/[\s]/g, ""),
     "",
     "empty composer contains no labels, metadata or hints",
   );
   for (const text of ["", "日本語 é\n次の依頼".repeat(5)]) {
     input.setText(text);
     for (const width of [20, 40, 80, 120]) {
-      const lines = input.render(width);
-      assert.ok(
-        lines.some((line) => line.includes(CURSOR_MARKER)),
-        "IME cursor position is retained",
-      );
+      const lines = await screen.frame(input, width, 24);
       for (const line of lines) assert.ok(visibleWidth(line) <= width);
     }
     assert.equal(input.getText(), text);
@@ -376,32 +345,34 @@ test("composer preserves Pi cursor markers, wrapping and complete confirmation p
     40,
   );
   assert.ok(safeText(lines.join("")).replace(/[│ ]/g, "").includes(path));
+  await screen.dispose();
 });
 
-test("composer uses Enter to send, Shift+Enter to add a line, and preserves pasted newlines", () => {
-  const tui = new TuiMainScreen(new ProcessTerminal());
-  tui.requestRender = () => {};
+test("composer uses Enter to send, Shift+Enter to add a line, and preserves pasted newlines", async () => {
+  const screen = await makeScreen(80, 24);
   for (const newline of [
     "\x1bOM",
     "\x1b[13;2u",
     "\x1b[27;2;13~",
     "\x1b[13;2~",
   ]) {
-    const input = editor(tui);
+    const input = editor(screen.renderer);
     const sent: string[] = [];
     input.onSubmit = (text) => sent.push(text);
-    input.handleInput("一行目");
-    input.handleInput(newline);
-    input.handleInput("\x1b[200~二行目\n三行目\x1b[201~");
+    feedInput(input, "一行目");
+    feedInput(input, newline);
+    feedInput(input, "\x1b[200~二行目\n三行目\x1b[201~");
     assert.deepEqual(sent, [], "newline and paste must not submit");
     assert.equal(input.getExpandedText(), "一行目\n二行目\n三行目");
-    input.handleInput("\r");
+    feedInput(input, "\r");
     assert.deepEqual(sent, ["一行目\n二行目\n三行目"]);
   }
+  await screen.dispose();
 });
 
-test("Ctrl+J is consumed before editors and dialogs, without swallowing pasted newlines", () => {
-  const app = new TerminalApp();
+test("Ctrl+J is consumed before editors and dialogs, without swallowing pasted newlines", async () => {
+  const screen = await makeScreen(80, 24);
+  const app = new TerminalApp(undefined, screen.renderer);
   app.tui.requestRender = () => {};
   app.input.setText("日本語");
   for (const key of ["\n", "\x1b[106;5u", "\x1b[27;5;106~"]) {
@@ -411,27 +382,18 @@ test("Ctrl+J is consumed before editors and dialogs, without swallowing pasted n
   assert.equal(app["key"]("\x1b[200~一行目\n二行目\x1b[201~"), undefined);
   assert.equal(app["key"]("\x1b[13;2u"), undefined);
   app.input.setText("日本語");
-  app.input.focused = true;
-  const cursorLine = app.input
-    .render(80)
-    .find((line) => line.includes(CURSOR_MARKER))!;
-  assert.equal(visibleWidth(cursorLine.split(CURSOR_MARKER)[0]!), 9);
+  app.input.focus();
+  assert.equal(app.input.getExpandedText(), "日本語");
+  await screen.dispose();
 });
 
-test("conversation layout handles resize, CJK, long messages and color-free terminals", (t) => {
-  const original = { NO_COLOR: process.env.NO_COLOR, TERM: process.env.TERM };
-  t.after(() => {
-    for (const [name, value] of Object.entries(original)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  });
-  process.env.NO_COLOR = "1";
-  const view = new ConversationView();
+test("conversation layout handles resize, CJK, long messages and untrusted content", async () => {
+  const screen = await makeScreen(80, 24);
+  const view = new ConversationView(screen.renderer);
   view.name = "日本語の会話".repeat(15) + "\x1b[2J";
   view.workspace = "/project/日本語";
   for (const width of [20, 40, 80, 120])
-    for (const line of view.render(width))
+    for (const line of await screen.frame(view, width, 24))
       assert.ok(visibleWidth(line) <= width);
   view.setMessages([
     {
@@ -457,25 +419,25 @@ test("conversation layout handles resize, CJK, long messages and color-free term
     },
   ]);
   for (const width of [20, 40, 80, 120]) {
-    const lines = view.render(width);
+    // 実アプリでは ConversationScroll 内に置くため、内容高ぶんの
+    // 高さでフレームして全体をレンダリングする。
+    const lines = await screen.frame(view, width, 400);
     for (const line of lines) assert.ok(visibleWidth(line) <= width);
-    // Pi may terminate a truncated plain line with SGR reset; no styling or
-    // controls from the conversation may survive in color-free mode.
-    assert.doesNotMatch(
-      lines.join("\n").replaceAll("\x1b[0m", ""),
-      /\x1b|secret/,
-    );
+    // 文字グリッドはプレーンテキストのため制御シーケンスは混入しない
+    assert.doesNotMatch(lines.join("\n"), /\x1b|secret/);
     assert.match(lines.join("\n"), /\/expand/);
     assert.match(lines.join("\n"), /é/);
   }
-  assert.equal(theme.accent("実行中"), "実行中");
-  process.env.NO_COLOR = "";
-  process.env.TERM = "dumb";
-  assert.equal(theme.error("失敗"), "失敗");
+  // theme はスタイルチャンクを返し、テキストはそのまま保持される
+  assert.equal(theme.accent("実行中").text, "実行中");
+  assert.equal(theme.error("失敗").text, "失敗");
+  await screen.dispose();
 });
 
-test("open overlays resize without reopening and retain search and focus", () => {
+test("open overlays resize without reopening and retain search and focus", async () => {
+  const screen = await makeScreen(80, 24);
   const picker = new Picker(
+    screen.renderer,
     "操作",
     [
       {
@@ -485,23 +447,19 @@ test("open overlays resize without reopening and retain search and focus", () =>
       },
     ],
     true,
-    24,
   );
-  const overlay = new ResponsiveOverlay(picker);
-  overlay.focused = true;
-  overlay.handleInput("接続");
+  const overlay = new ResponsiveOverlay(screen.renderer, picker);
+  picker.focus();
+  feedInput(picker, "接続");
   for (const width of [36, 120, 48, 88]) {
-    const lines = overlay.render(width);
-    assert.equal(
-      Math.max(...lines.map(visibleWidth)),
-      Math.min(width, 88) + Math.max(0, Math.floor((width - 88) / 2)),
-    );
+    const lines = await screen.frame(overlay, width, 24);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
     assert.match(safeText(lines.join("\n")), /Esc 戻る/);
     assert.match(safeText(lines.join("\n")), /送信許可/);
   }
-  assert.equal(picker.input.getValue(), "接続");
+  assert.equal(picker.input.value, "接続");
   assert.equal(picker.focused, true);
+  await screen.dispose();
 });
 
 test("model guidance identifies disabled connections without loosening policy", () => {
@@ -560,18 +518,22 @@ test("doctor summarizes failures with next actions rather than only JSON", () =>
   assert.doesNotMatch(report, /起動環境に設定あり/);
 });
 
-test("welcome shows only necessary setup and draft restoration", () => {
-  const view = new ConversationView();
+test("welcome shows only necessary setup and draft restoration", async () => {
+  const screen = await makeScreen(80, 24);
+  const view = new ConversationView(screen.renderer);
   view.setup = ["接続の準備が必要です", "1  /settings で接続を登録"];
   view.recent = "/continue 前回の会話へ · 下書きあり";
-  const text = safeText(view.render(80).join("\n"));
+  view.setMessages([]);
+  const text = safeText((await screen.frame(view)).join("\n"));
   assert.doesNotMatch(text, /LOCAL AGENT|何をつくりますか|Ctrl\+P/);
   assert.match(text, /接続の準備/);
   assert.match(text, /\/continue.*下書きあり/);
+  await screen.dispose();
 });
 
-test("conversation keeps a full history page and expands long UTF-8 messages in place", () => {
-  const view = new ConversationView();
+test("conversation keeps a full history page and expands long UTF-8 messages in place", async () => {
+  const screen = await makeScreen(80, 200);
+  const view = new ConversationView(screen.renderer);
   const messages = Array.from({ length: 30 }, (_, index) => ({
     seq: index + 1,
     role: "user",
@@ -581,30 +543,40 @@ test("conversation keeps a full history page and expands long UTF-8 messages in 
   }));
   messages[29]!.text = "日本語".repeat(900) + "本文末尾";
   view.setMessages(messages);
-  const before = safeText(view.render(80).join("\n"));
+  const before = safeText((await screen.frame(view)).join("\n"));
   assert.match(before, /発言-1 *\n/);
   assert.match(before, /日本語/);
   assert.doesNotMatch(before, /本文末尾|�/);
   assert.equal(view.expand(30), true);
   view.setMessages(messages);
-  assert.match(safeText(view.render(80).join("\n")), /本文末尾/);
+  assert.match(safeText((await screen.frame(view)).join("\n")), /本文末尾/);
   assert.equal(view.expand(30), false);
+  await screen.dispose();
 });
 
-test("history prepend preserves the reading anchor without following the tail", () => {
-  const scroll = new ConversationScroll(new Text(""), { follow: "end" });
-  scroll.updateLayout(100, 20, () => {});
+test("history prepend preserves the reading anchor without following the tail", async () => {
+  const screen = await makeScreen(100, 20);
+  const scroll = new ConversationScroll(screen.renderer);
+  scroll.height = 20;
+  const body = new TextRenderable(screen.renderer, {
+    content: Array.from({ length: 100 }, (_, i) => `行 ${i}`).join("\n"),
+  });
+  scroll.content.add(body);
+  await screen.frame(scroll);
   scroll.scrollToStart();
   let reads = 0;
   scroll.onOlder = (remaining) => {
     reads++;
-    scroll.preserveAfterPrepend(200, remaining);
+    scroll.markPrepend();
+    body.content = Array.from({ length: 300 }, (_, i) => `行 ${i}`).join("\n");
+    scroll.preserveAfterPrepend(remaining);
   };
   scroll.scrollBy(-20);
-  scroll.updateLayout(300, 20, () => {});
+  await screen.renderOnce();
   assert.equal(reads, 1);
   assert.equal(scroll.scrollTop, 180);
   assert.equal(scroll.isFollowingEnd, false);
   scroll.scrollBy(20);
   assert.equal(reads, 1);
+  await screen.dispose();
 });

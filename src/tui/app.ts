@@ -1,11 +1,14 @@
 import {
-  CombinedAutocompleteProvider,
-  ProcessTerminal,
-  TuiAltScreen,
-  Text,
-  matchesKey,
-  truncateToWidth,
-} from "@earendil-works/pi-tui";
+  CliRenderer,
+  StyledText,
+  type KeyEvent,
+  type TextChunk,
+} from "@opentui/core";
+import { CombinedAutocompleteProvider } from "./autocomplete.js";
+import { TerminalScreen, TerminalFacade } from "./screen.js";
+import { matchesKey } from "./keys.js";
+import { truncateToWidth, wrapLines } from "./text.js";
+import { markdownLines } from "./markdown.js";
 import { AttachmentAutocompleteProvider } from "./attachment-autocomplete.js";
 import { SettingsDialog } from "./settings.js";
 import { confirmToolOperation } from "./tool-approval.js";
@@ -51,6 +54,7 @@ import { editExternalText } from "../external-editor.js";
 import {
   Dialog,
   Reader,
+  StatusLine,
   editor,
   markdown,
   safeText,
@@ -59,6 +63,7 @@ import {
   WorkbenchLayout,
   terminalTheme,
   ResponsiveOverlay,
+  type MarkdownText,
 } from "./components.js";
 import { doctorSummary, failureGuidance, setupSummary } from "./guidance.js";
 import {
@@ -70,19 +75,17 @@ import {
 } from "./workbench.js";
 
 export class TerminalApp {
-  readonly terminal = new ProcessTerminal();
-  readonly tui = new TuiAltScreen(this.terminal, true, undefined, {
-    copyOnSelect: false,
-    scrollToEndIndicator: () => theme.accent("↓ 最新へ"),
-  });
-  readonly input = editor(this.tui);
-  readonly transcript = new ConversationView();
-  readonly progress = new Text("起動中…", 0, 0);
-  readonly activity = new ActivityView();
-  readonly notification = new Text("", 0, 0);
-  readonly inlineDetails = markdown("");
-  readonly status = new Text("", 0, 0);
-  readonly refs = new Text("", 0, 0);
+  readonly renderer: CliRenderer;
+  readonly terminal: TerminalFacade;
+  readonly tui: TerminalScreen;
+  readonly input: ReturnType<typeof editor>;
+  readonly transcript: ConversationView;
+  readonly progress: StatusLine;
+  readonly activity: ActivityView;
+  readonly notification: StatusLine;
+  readonly inlineDetails: MarkdownText;
+  readonly status: StatusLine;
+  readonly refs: StatusLine;
   readonly layout: WorkbenchLayout;
   app?: Application;
   private reader?: Reader;
@@ -113,8 +116,36 @@ export class TerminalApp {
   private detailText = "";
   private detailLimit = 24000;
   private detailReturn = { top: 0, following: true };
-  constructor(readonly home?: string) {
+  constructor(
+    readonly home?: string,
+    renderer?: CliRenderer,
+  ) {
+    this.renderer =
+      renderer ??
+      new CliRenderer(
+        process.stdin,
+        process.stdout,
+        process.stdout.columns ?? 80,
+        process.stdout.rows ?? 24,
+        {
+          exitOnCtrlC: false,
+          useKittyKeyboard: { disambiguate: true },
+          useMouse: true,
+          screenMode: "alternate-screen",
+        },
+      );
+    this.tui = new TerminalScreen(this.renderer);
+    this.terminal = new TerminalFacade(this.tui);
+    this.input = editor(this.renderer);
+    this.transcript = new ConversationView(this.renderer);
+    this.progress = new StatusLine(this.renderer, "起動中…");
+    this.activity = new ActivityView(this.renderer);
+    this.notification = new StatusLine(this.renderer);
+    this.inlineDetails = markdown(this.renderer, "");
+    this.status = new StatusLine(this.renderer);
+    this.refs = new StatusLine(this.renderer);
     this.layout = new WorkbenchLayout(
+      this.renderer,
       [
         this.transcript,
         this.progress,
@@ -159,9 +190,13 @@ export class TerminalApp {
     };
     this.tui.addInputListener((data) => this.key(data));
   }
-  private key(data: string): { consume: boolean } | undefined {
-    // Consume LF before Pi can interpret Ctrl+J as newline or dialog confirmation.
-    if (matchesKey(data, "ctrl+j")) return { consume: true };
+  private key(data: string | KeyEvent): { consume: boolean } | undefined {
+    // Consume LF before OpenTUI can interpret Ctrl+J as newline or dialog confirmation.
+    if (
+      matchesKey(data, "ctrl+j") ||
+      (typeof data !== "string" && data.name === "linefeed")
+    )
+      return { consume: true };
     const action = actionFor(data, this.preferences.keys);
     if (this.tui.hasOverlay()) {
       if (this.reader && this.acceptReader && matchesKey(data, "enter")) {
@@ -195,12 +230,12 @@ export class TerminalApp {
         return { consume: true };
       }
       if (this.reader && matchesKey(data, "home")) {
-        this.reader.scroll.scrollToStart();
+        this.reader.scroll.scrollTo(0);
         this.tui.requestRender();
         return { consume: true };
       }
       if (this.reader && matchesKey(data, "end")) {
-        this.reader.scroll.scrollToEnd();
+        this.reader.scroll.scrollTo(this.reader.scroll.scrollHeight);
         this.tui.requestRender();
         return { consume: true };
       }
@@ -293,7 +328,7 @@ export class TerminalApp {
       process.off("uncaughtException", exception);
       process.off("unhandledRejection", exception);
     };
-    this.tui.start();
+    await this.tui.start();
     const updateColors = (colors: Parameters<typeof terminalTheme>[0]) => {
       if (this.closing) return;
       terminalTheme(colors);
@@ -347,7 +382,7 @@ export class TerminalApp {
   private restore(): void {
     if (this.restored) return;
     this.restored = true;
-    this.tui.stop({ preserveScreen: true });
+    this.tui.stop();
   }
   private async shutdown(): Promise<void> {
     if (this.closing) return;
@@ -520,19 +555,23 @@ export class TerminalApp {
     this.activity.previewing = streams.length > 0;
     const width = Math.max(1, this.terminal.columns - 2);
     // Model labels stay outside clipped previews; full responses remain in history.
-    const preview = streams
-      .map(([task, text]) =>
-        [
-          theme.muted(
-            `生成中 · ${safeText(run?.tasks.find((item) => item.id === task)?.model ?? task)}`,
-          ),
-          ...markdown(text)
-            .render(width)
-            .slice(streams.length > 1 ? -2 : -4),
-        ].join("\n"),
-      )
-      .join("\n");
-    this.progress.setText(preview);
+    const preview: TextChunk[] = [];
+    streams.forEach(([task, text], index) => {
+      if (index > 0) preview.push({ __isChunk: true, text: "\n" });
+      preview.push(
+        theme.muted(
+          `生成中 · ${safeText(run?.tasks.find((item) => item.id === task)?.model ?? task)}`,
+        ),
+      );
+      preview.push({ __isChunk: true, text: "\n" });
+      markdownLines(text)
+        .slice(streams.length > 1 ? -2 : -4)
+        .forEach((line, i) => {
+          if (i > 0) preview.push({ __isChunk: true, text: "\n" });
+          preview.push(...line);
+        });
+    });
+    this.progress.setText(new StyledText(preview));
     const pending = app.session.queue[0];
     const notice = preparing
       ? ""
@@ -542,26 +581,30 @@ export class TerminalApp {
           : "");
     this.notification.setText(
       notice
-        ? (run?.state === "failed" || notice.startsWith("エラー")
-            ? theme.error
-            : theme.accent)(safeText(notice)) + "\n"
+        ? new StyledText([
+            (run?.state === "failed" || notice.startsWith("エラー")
+              ? theme.error
+              : theme.accent)(safeText(notice)),
+            { __isChunk: true, text: "\n" },
+          ])
         : "",
     );
-    this.status.setText(
-      [
-        ...(app.busy ? [theme.muted("作業中 · Esc 停止")] : []),
-        ...(pending
-          ? [
-              theme.muted(
-                truncateToWidth(
-                  `待機 ${app.session.queue.length} 件 · ${pending.mode === "instruction" ? "追加指示" : "次の依頼"}: ${safeText(pending.text).replace(/\s+/g, " ")}`,
-                  width,
-                ),
-              ),
-            ]
-          : []),
-      ].join("\n"),
-    );
+    const statusChunks: TextChunk[] = [];
+    if (app.busy) statusChunks.push(theme.muted("作業中 · Esc 停止"));
+    if (pending) {
+      if (statusChunks.length)
+        statusChunks.push({ __isChunk: true, text: "\n" });
+      statusChunks.push(
+        theme.muted(
+          truncateToWidth(
+            `待機 ${app.session.queue.length} 件 · ${pending.mode === "instruction" ? "追加指示" : "次の依頼"}: ${safeText(pending.text).replace(/\s+/g, " ")}`,
+            width,
+          ),
+        ),
+      );
+    }
+    this.status.setText(new StyledText(statusChunks));
+    this.activity.refresh();
     this.tui.requestRender();
   }
   private showError(error: unknown): void {
@@ -698,6 +741,7 @@ export class TerminalApp {
       throw new AgentError("DIALOG", "現在の画面を閉じてください。");
     return new Promise((resolve) => {
       const picker = new Picker(
+        this.renderer,
         safeText(title),
         choices.map((c) => ({
           ...c,
@@ -705,7 +749,6 @@ export class TerminalApp {
           description: c.description && safeText(c.description),
         })),
         searchable,
-        () => this.terminal.rows,
       );
       let settled = false;
       const cancel = () => finish();
@@ -716,9 +759,9 @@ export class TerminalApp {
         this.closeDialog();
         resolve(value);
       };
-      picker.onSelect = finish;
+      picker.onSelect = (item) => finish(item?.value);
       this.cancelDialog = cancel;
-      this.tui.showOverlay(new ResponsiveOverlay(picker), {
+      this.tui.showOverlay(new ResponsiveOverlay(this.renderer, picker), {
         width: "100%",
         margin: 1,
         anchor: "center",
@@ -733,12 +776,7 @@ export class TerminalApp {
     position: SettingsPosition,
   ): Promise<SettingsEdit | undefined> {
     return new Promise((resolve) => {
-      const panel = new SettingsEditor(
-        title,
-        fields,
-        position,
-        () => this.terminal.rows,
-      );
+      const panel = new SettingsEditor(this.renderer, title, fields, position);
       const finish = (value?: SettingsEdit) => {
         this.closeDialog();
         resolve(value);
@@ -748,7 +786,7 @@ export class TerminalApp {
         if (!panel.cancel()) finish();
         else this.tui.requestRender();
       };
-      this.tui.showOverlay(new ResponsiveOverlay(panel, 112), {
+      this.tui.showOverlay(new ResponsiveOverlay(this.renderer, panel, 112), {
         width: "100%",
         margin: 1,
         anchor: "center",
@@ -762,8 +800,8 @@ export class TerminalApp {
   ): Promise<string | undefined> {
     if (signal?.aborted) return undefined;
     return new Promise((resolve) => {
-      const dialog = new Dialog(safeText(title));
-      const control = editor(this.tui);
+      const dialog = new Dialog(this.renderer, safeText(title));
+      const control = editor(this.renderer);
       control.setText(safeText(value));
       const cancel = () => finish();
       const finish = (text?: string) => {
@@ -774,7 +812,7 @@ export class TerminalApp {
       control.onSubmit = (text) => finish(text);
       dialog.setControl(control);
       this.cancelDialog = cancel;
-      this.tui.showOverlay(new ResponsiveOverlay(dialog), {
+      this.tui.showOverlay(new ResponsiveOverlay(this.renderer, dialog), {
         width: "100%",
         margin: 1,
         anchor: "center",
@@ -785,9 +823,8 @@ export class TerminalApp {
   private async confirm(title: string): Promise<boolean> {
     // Long paths and permission scopes must remain readable before approval.
     if (
-      new Text(safeText(title), 0, 0).render(
-        Math.max(16, this.terminal.columns - 12),
-      ).length > 3
+      wrapLines(safeText(title), Math.max(16, this.terminal.columns - 12))
+        .length > 3
     ) {
       if (!(await this.show(title, "実行内容を確認", "確認へ進む")))
         return false;
@@ -809,7 +846,7 @@ export class TerminalApp {
     if (signal?.aborted) return false;
     if (this.tui.hasOverlay()) return false;
     return new Promise((resolve) => {
-      this.reader = new Reader(this.tui, text, title, accept);
+      this.reader = new Reader(this.renderer, text, title, accept);
       let settled = false;
       const cancel = () => finish(false);
       const finish = (accepted: boolean) => {
@@ -821,11 +858,14 @@ export class TerminalApp {
       };
       this.cancelDialog = cancel;
       if (accept) this.acceptReader = () => finish(true);
-      this.tui.showOverlay(new ResponsiveOverlay(this.reader, 104), {
-        width: "100%",
-        margin: 1,
-        anchor: "center",
-      });
+      this.tui.showOverlay(
+        new ResponsiveOverlay(this.renderer, this.reader, 104),
+        {
+          width: "100%",
+          margin: 1,
+          anchor: "center",
+        },
+      );
       signal?.addEventListener("abort", cancel, { once: true });
       if (signal?.aborted) cancel();
     });
@@ -1516,18 +1556,14 @@ export class TerminalApp {
   }
   private loadOlder(remaining?: number): void {
     if (!this.app || !this.hasOlder || !this.messages.length) return;
-    const width = Math.max(1, this.terminal.columns - 2);
-    const height = this.transcript.render(width).length;
+    this.layout.scroll.markPrepend();
     const older = this.app.history(this.messages[0]!.seq);
     this.hasOlder = older.length === 30;
     this.messages = [...older, ...this.messages];
     this.transcript.hasOlder = this.hasOlder;
     this.transcript.setMessages(this.messages);
     if (remaining !== undefined)
-      this.layout.scroll.preserveAfterPrepend(
-        this.transcript.render(width).length - height,
-        remaining,
-      );
+      this.layout.scroll.preserveAfterPrepend(remaining);
     this.tui.requestRender();
   }
   private clearDetails(): void {
@@ -1547,11 +1583,8 @@ export class TerminalApp {
     this.detailText = text;
     this.detailLimit = 24000;
     this.renderDetails();
-    const width = Math.max(1, this.terminal.columns - 2);
-    this.layout.scroll.scrollAfterLayout(
-      this.transcript.render(width).length +
-        this.progress.render(width).length +
-        this.activity.render(width).length,
+    this.layout.scroll.scrollAfterLayout(() =>
+      Math.max(0, this.inlineDetails.y - 1),
     );
     this.tui.requestRender();
   }
@@ -1726,7 +1759,7 @@ export class TerminalApp {
     if (this.renderTimer) clearTimeout(this.renderTimer);
     this.busyDialog = true;
     this.editorAbort = new AbortController();
-    this.tui.stop({ preserveScreen: true });
+    await this.tui.suspendScreen();
     try {
       const edited = await editExternalText(
         app.paths,
@@ -1749,7 +1782,7 @@ export class TerminalApp {
       this.editorAbort = undefined;
       this.busyDialog = false;
       if (!this.closing) {
-        this.tui.start();
+        await this.tui.resumeScreen();
         this.tui.invalidate();
         this.render();
         this.tui.requestRender(true);
@@ -1831,7 +1864,7 @@ export class TerminalApp {
           this.notice = "ログイン中（Esc で取消）";
           if (this.tui.hasOverlay()) this.closeDialog();
           const content = new Reader(
-            this.tui,
+            this.renderer,
             text,
             "認証画面をブラウザーで開いてください。Esc: 取消",
           );
