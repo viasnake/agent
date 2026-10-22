@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import sqlite3
@@ -11,11 +12,154 @@ import subprocess
 import sys
 import termios
 import time
+import unicodedata
 
 node, cli, provider, home, scenario = sys.argv[1:]
 master, slave = pty.openpty()
 original = termios.tcgetattr(slave)
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+
+# OpenTUI 按差量重绘：不变的单元格不会重复输出，且全角字符逐格写入。
+# 用一个极简终端模型维护"当前画面"，wait_for 才能按当前显示断言。
+# 只处理本程序实际发出的序列：绝对定位、擦除、换行、保存/恢复光标。
+CSI_RE = re.compile(r"\x1b\[([0-9;?]*)([A-Za-z@`])")
+OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+OTHER_ESC_RE = re.compile(r"\x1b(?:\([^0-9a-zA-Z]?[0-9a-zA-Z]|[=>MN78cDEZ#.]|[PX^_][^\x1b]*\x1b\\)?")
+
+def char_width(ch):
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+
+class ScreenModel:
+    def __init__(self, cols, rows):
+        self.cols, self.rows = cols, rows
+        self.grid = [[" "] * cols for _ in range(rows)]
+        self.r = self.c = 0
+        self.saved = (0, 0)
+
+    def resize(self, cols, rows):
+        new = [[" "] * cols for _ in range(rows)]
+        for y in range(min(rows, self.rows)):
+            for x in range(min(cols, self.cols)):
+                new[y][x] = self.grid[y][x]
+        self.grid, self.cols, self.rows = new, cols, rows
+        self.r = min(self.r, rows - 1)
+        self.c = min(self.c, cols - 1)
+
+    def _newline(self):
+        self.r += 1
+        if self.r >= self.rows:
+            self.grid.pop(0)
+            self.grid.append([" "] * self.cols)
+            self.r = self.rows - 1
+
+    def _put(self, ch):
+        w = char_width(ch)
+        if w == 0:
+            if self.c > 0:
+                self.grid[self.r][min(self.cols - 1, self.c - 1)] += ch  # 组合符附加到前一格
+            return
+        if self.c + w > self.cols:  # 延迟换行：写到最后一列后先标记，下一个字符才换行
+            self.c = 0
+            self._newline()
+        self.grid[self.r][self.c] = ch
+        if w == 2 and self.c + 1 < self.cols:
+            self.grid[self.r][self.c + 1] = ""
+        self.c += w
+
+    def _csi(self, params, final):
+        ps = params.lstrip("?")
+        parts = [int(p) if p else 0 for p in ps.split(";")] if ps else []
+        def p(i, default):
+            return parts[i] if i < len(parts) and parts[i] else default
+        if final in "Hf":
+            self.r = max(0, min(self.rows - 1, p(0, 1) - 1))
+            self.c = max(0, min(self.cols - 1, p(1, 1) - 1))
+        elif final == "A": self.r = max(0, self.r - p(0, 1))
+        elif final == "B": self.r = min(self.rows - 1, self.r + p(0, 1))
+        elif final == "C": self.c = min(self.cols - 1, self.c + p(0, 1))
+        elif final == "D": self.c = max(0, self.c - p(0, 1))
+        elif final == "E": self.r = min(self.rows - 1, self.r + p(0, 1)); self.c = 0
+        elif final == "F": self.r = max(0, self.r - p(0, 1)); self.c = 0
+        elif final in "G`": self.c = max(0, min(self.cols - 1, p(0, 1) - 1))
+        elif final == "d": self.r = max(0, min(self.rows - 1, p(0, 1) - 1))
+        elif final == "J":
+            mode = p(0, 0)
+            if mode >= 2 or params.startswith("?"):
+                self.grid = [[" "] * self.cols for _ in range(self.rows)]
+            else:
+                for x in range(self.c, self.cols): self.grid[self.r][x] = " "
+                for y in range(self.r + 1, self.rows): self.grid[y] = [" "] * self.cols
+        elif final == "K":
+            mode = p(0, 0)
+            rng = range(self.c, self.cols) if mode == 0 else range(0, self.c + 1) if mode == 1 else range(self.cols)
+            for x in rng: self.grid[self.r][x] = " "
+        elif final == "X":
+            for x in range(self.c, min(self.cols, self.c + p(0, 1))): self.grid[self.r][x] = " "
+        elif final == "L":
+            for _ in range(p(0, 1)):
+                self.grid.insert(self.r, [" "] * self.cols)
+                self.grid.pop()
+        elif final == "M":
+            for _ in range(p(0, 1)):
+                self.grid.pop(self.r)
+                self.grid.append([" "] * self.cols)
+        elif final == "S":
+            for _ in range(p(0, 1)):
+                self.grid.pop(0)
+                self.grid.append([" "] * self.cols)
+        elif final == "T":
+            for _ in range(p(0, 1)):
+                self.grid.pop()
+                self.grid.insert(0, [" "] * self.cols)
+        elif final == "s": self.saved = (self.r, self.c)
+        elif final == "u": self.r, self.c = self.saved
+        elif final in "hl" and "1049" in ps.split(";"):
+            self.grid = [[" "] * self.cols for _ in range(self.rows)]
+            self.r = self.c = 0
+
+    def feed(self, data):
+        s = data.decode("utf-8", "replace")
+        i, n = 0, len(s)
+        while i < n:
+            ch = s[i]
+            if ch == "\x1b":
+                m = CSI_RE.match(s, i) or OSC_RE.match(s, i)
+                if m:
+                    if m.re is CSI_RE:
+                        self._csi(m.group(1), m.group(2))
+                    i = m.end()
+                    continue
+                m = OTHER_ESC_RE.match(s, i)
+                if m:
+                    if m.group(0) == "\x1b7": self.saved = (self.r, self.c)
+                    elif m.group(0) == "\x1b8": self.r, self.c = self.saved
+                    i = m.end()
+                    continue
+                i += 1
+                continue
+            if ch == "\r": self.c = 0
+            elif ch == "\n" or ch == "\x0b" or ch == "\x0c": self._newline()
+            elif ch == "\x08": self.c = max(0, self.c - 1)
+            elif ch >= " ": self._put(ch)
+            i += 1
+
+    def text(self):
+        return "\n".join("".join(row) for row in self.grid)
+
+screen = ScreenModel(80, 24)
+fed_len = 0
+
+def screen_text():
+    global fed_len
+    if fed_len < len(output):
+        screen.feed(output[fed_len:])
+        fed_len = len(output)
+    return screen.text()
+
+def collapse(s):
+    return re.sub(r"\s+", "", s)
 started = time.monotonic()
 socket = os.path.join(home, "test-tmux.sock")
 command = [node, "--import", provider, cli, "--home", home]
@@ -38,9 +182,18 @@ def read_for(seconds):
             if len(output) > 5_000_000:
                 raise AssertionError("unbounded terminal output")
 
+ANSI_PATTERN = re.compile(
+    rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[PX^_][^\x1b]*\x1b\\|\x1b[@-_]"
+)
+
 def wait_for(text, timeout=10, after=0):
+    # 命中条件: mark 之后新输出的字节里出现该文本（去除控制序列后），
+    # 或当前终端画面上正显示该文本（忽略空白差异）。
     deadline = time.monotonic()+timeout
-    while text.encode() not in output[after:]:
+    while True:
+        plain = ANSI_PATTERN.sub(b"", output[after:])
+        if text.encode() in plain or collapse(text) in collapse(screen_text()):
+            return
         if proc.poll() is not None:
             raise AssertionError(f"early exit {proc.returncode}: {output[-4000:].decode(errors='replace')}")
         if time.monotonic()>deadline:
@@ -125,6 +278,7 @@ try:
         send("\x1b")
         assert proc.poll() is None, "canceling busy quit ended the process"
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        screen.resize(120, 40)
         proc.send_signal(signal.SIGWINCH)
         send("\x1b[5~")
         send("/history\r")
