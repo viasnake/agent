@@ -9,6 +9,7 @@ import {
 } from "../runtime/providers.js";
 import { AgentError } from "../types.js";
 import type { CliContext } from "./context.js";
+import { chatGPTLoginLink } from "./auth-link.js";
 export function registerConnectionsCommands(cli: CliContext): void {
   const {
     program,
@@ -35,9 +36,15 @@ export function registerConnectionsCommands(cli: CliContext): void {
           await login(config, p, name, {
             signal: signal,
             notify: (event) => {
-              if (event.type === "auth_url")
-                print({ url: event.url, instructions: event.instructions });
-              else if (event.type === "device_code")
+              if (event.type === "auth_url") {
+                if (program.opts().json)
+                  print({ url: event.url, instructions: event.instructions });
+                else {
+                  // This validated link intentionally bypasses print's ANSI stripping.
+                  stdout.write(chatGPTLoginLink(event.url, !!stdout.isTTY));
+                  if (event.instructions) print(event.instructions);
+                }
+              } else if (event.type === "device_code")
                 print({ url: event.verificationUri, code: event.userCode });
               else print(event.message);
             },
