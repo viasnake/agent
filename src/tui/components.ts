@@ -634,11 +634,24 @@ export class Reader extends BoxRenderable {
       title: borderTitle(ctx, title),
       flexDirection: "column",
       width: "100%",
-      maxHeight: "90%",
       backgroundColor: panelBackground() ?? RGBA.fromHex("#10131a"),
       paddingX: 1,
       focusable: true,
     });
+    // maxHeight は整数行で固定する。パーセント指定だと Yoga が小数高を割り当て、
+    // OpenTUI にクリップがないため描画高の切り上げ分がフッター行へ滲む。
+    // オーバーレイ解除後もリスナーが残らないよう、ツリーから外れた時点で解除する。
+    const fitMaxHeight = () => {
+      let node: Renderable | null = this;
+      while (node.parent) node = node.parent;
+      if (node !== ctx.root) {
+        ctx.off("resize", fitMaxHeight);
+        return;
+      }
+      this.maxHeight = Math.max(8, ctx.height - 4);
+    };
+    fitMaxHeight();
+    ctx.on("resize", fitMaxHeight);
     this.scroll = new ScrollBoxRenderable(ctx, {
       flexGrow: 1,
       flexShrink: 1,
@@ -782,9 +795,11 @@ export class ConversationScroll extends ScrollBoxRenderable {
       stickyStart: "bottom",
       viewportCulling: true,
       paddingX: 1,
-      focusable: false, // クリックで入力欄からフォーカスを奪わない
       live: true, // onUpdate でレイアウト確定後のスクロール補正を行う
     });
+    // クリックでスクロールがフォーカスを奪い、入力欄のキー入力が吞まれるのを防ぐ。
+    // defaultFocusable=true のクラスは options.focusable=false が効かないためセッターで落とす。
+    this.focusable = false;
     this.verticalScrollBar.focusable = false;
     // onUpdate はレイアウト前に走るため、同フレーム内で scrollHeight が
     // 伸びたケース（prepend / 追従）は renderAfter でも適用する。
