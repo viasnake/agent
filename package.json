@@ -17,7 +17,6 @@
   "files": [
     "dist",
     "README.md",
-    "docs",
     "examples"
   ],
   "scripts": {
@@ -25,6 +24,8 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "test": "tsc --outDir .test-dist && node --test --experimental-test-isolation=none --test-concurrency=1 .test-dist/tests/*.test.js",
+    "test:firecracker": "python3 -B -m unittest discover -s tests/firecracker -p 'test_*.py'",
+    "verify": "npm run format:check && npm run check && npm run build --ignore-scripts && npm run test:firecracker && npm test && node dist/cli.js --help",
     "start": "node dist/cli.js",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

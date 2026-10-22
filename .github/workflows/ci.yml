@@ -1,9 +1,14 @@
 name: Verify
 on:
   push:
+    branches: [master]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   verify:
     runs-on: ubuntu-26.04
@@ -14,13 +19,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux
-      - run: npm ci --ignore-scripts
-      - run: npm run format:check
-      - run: npm run check
-      - run: npm run build
-      - name: Run the Firecracker helper and guest runner unit tests
-        run: python3 -m unittest discover -s tests/firecracker -p 'test_*.py'
-      - run: npm test
+      - name: Install test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux python3
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify formatting, types, build, tests, and CLI startup
+        run: npm run verify
         env:
           AGENT_REQUIRE_SANDBOX: "1"
+      - name: Check dependency manifests remain unchanged
+        run: git diff --exit-code -- package.json package-lock.json
