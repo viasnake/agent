@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { z } from "zod";
-import type { KeyId } from "@earendil-works/pi-tui";
+import type { KeyId } from "./keys.js";
 import type { Paths } from "../config.js";
 import { AgentError } from "../types.js";
 import { atomicWrite, readText } from "../util.js";

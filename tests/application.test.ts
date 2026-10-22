@@ -20,8 +20,8 @@ import {
   ScriptedRuntime,
   testConfig,
 } from "./helpers.js";
-import { safeText, markdown } from "../src/tui/components.js";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { safeText, wrapLines } from "../src/tui/components.js";
+import { visibleWidth } from "../src/tui/text.js";
 import { PiRuntime } from "../src/runtime/pi.js";
 import type { Runtime } from "../src/types.js";
 import { readSnapshot } from "../src/workspace.js";
@@ -983,7 +983,7 @@ test("Japanese text wraps with Pi width rules and external terminal controls can
   const clean = safeText(hostile);
   assert.doesNotMatch(clean, /[\x1b\x07\u009b\u202e]/);
   assert.match(clean, /日本語/);
-  for (const line of markdown(clean.repeat(20)).render(40))
+  for (const line of wrapLines(clean.repeat(20), 40))
     assert.ok(visibleWidth(line) <= 40);
   assert.equal(inferKind("こんにちは"), "chat");
   assert.equal(inferKind("不具合を修正して"), "coding");

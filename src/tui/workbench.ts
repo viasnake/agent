@@ -1,13 +1,22 @@
 import {
-  truncateToWidth,
-  Text,
-  type Component,
-  type Markdown,
-} from "@earendil-works/pi-tui";
+  BoxRenderable,
+  RGBA,
+  TextRenderable,
+  TextAttributes,
+  type CliRenderer,
+  StyledText,
+  type TextChunk,
+} from "@opentui/core";
 import type { ConversationMessage } from "../conversations.js";
 import { basename } from "node:path";
 import type { Role, Run, RunState } from "../types.js";
-import { markdown, safeText, theme } from "./components.js";
+import {
+  markdown,
+  safeText,
+  theme,
+  panelBackground,
+  type MarkdownText,
+} from "./components.js";
 
 const lineText = (text: string) => safeText(text).replace(/\s+/g, " ");
 export function excerpt(text: string, limit: number): string {
@@ -102,37 +111,210 @@ export function taskDetails(run: Run): string {
   ].join("\n");
 }
 
-export class ConversationView implements Component {
-  name = "新しい会話";
-  workspace = process.cwd();
+const ACCENT = RGBA.fromHex("#56b6c2");
+
+interface MessageView {
+  seq: number;
+  source: string;
+  role: string;
+  limit: number;
+  container: BoxRenderable;
+  body: MarkdownText;
+  expandHint: TextRenderable;
+}
+
+/**
+ * 会話表示。ScrollBox の content に配置されるカラムコンテナ。
+ * ユーザ発言は左ボーダー+パネル背景、AGENT はマークダウン本文（opencode 風）。
+ */
+export class ConversationView extends BoxRenderable {
+  private _name = "新しい会話";
+  private _workspace = process.cwd();
+  get name(): string {
+    return this._name;
+  }
+  set name(value: string) {
+    this._name = value;
+    this.refreshHeader();
+  }
+  get workspace(): string {
+    return this._workspace;
+  }
+  set workspace(value: string) {
+    this._workspace = value;
+    this.refreshHeader();
+  }
   setup: string[] = [];
   recent = "";
-  hasOlder = false;
-  private messages: {
-    seq: number;
-    source: string;
-    role: string;
-    body: Markdown;
-    limit: number;
-  }[] = [];
-  setMessages(messages: ConversationMessage[]): void {
-    // Streaming updates do not rebuild unchanged Markdown components.
-    const previousMessages = new Map(
-      this.messages.map((message) => [message.seq, message]),
-    );
-    this.messages = messages.map((message) => {
-      const previous = previousMessages.get(message.seq);
-      if (previous?.source === message.text && previous.role === message.role)
-        return previous;
-      return {
-        seq: message.seq,
-        source: message.text,
-        role: message.role,
-        limit: 6000,
-        body: markdown(excerpt(message.text, 6000)),
-      };
+  private _hasOlder = false;
+  private messages: MessageView[] = [];
+
+  private readonly header: TextRenderable;
+  private readonly rule: TextRenderable;
+  private readonly olderHint: TextRenderable;
+  private readonly empty: BoxRenderable;
+
+  constructor(ctx: CliRenderer) {
+    // ScrollBox 内に置かれる前提で、内容高を維持するため flexShrink は切る。
+    super(ctx, { flexDirection: "column", width: "100%", flexShrink: 0 });
+    this.header = new TextRenderable(ctx, {
+      content: "",
+      flexShrink: 0,
     });
+    this.rule = new TextRenderable(ctx, {
+      content: new StyledText([theme.muted("─".repeat(300))]),
+      wrapMode: "none",
+      flexShrink: 0,
+    });
+    this.olderHint = new TextRenderable(ctx, {
+      content: new StyledText([
+        theme.muted("↑ スクロールで以前の発言を読込 · /history"),
+      ]),
+      visible: false,
+      flexShrink: 0,
+    });
+    this.empty = new BoxRenderable(ctx, {
+      flexDirection: "column",
+      visible: true,
+    });
+    this.add(this.header);
+    this.add(this.rule);
+    this.add(this.olderHint);
+    this.add(this.empty);
+    this.refreshHeader();
   }
+
+  get hasOlder(): boolean {
+    return this._hasOlder;
+  }
+  set hasOlder(value: boolean) {
+    this._hasOlder = value;
+    this.olderHint.visible = value && this.messages.length > 0;
+  }
+
+  private refreshHeader(): void {
+    this.header.content = new StyledText([
+      theme.strong(lineText(this.name)),
+      theme.muted(`  / ${lineText(basename(this.workspace))}`),
+    ]);
+  }
+
+  private refreshEmpty(): void {
+    const ctx = this.ctx as CliRenderer;
+    for (const child of [...this.empty.getChildren()]) this.empty.remove(child);
+    if (this.messages.length) {
+      this.empty.visible = false;
+      return;
+    }
+    this.empty.visible = true;
+    for (const line of this.setup) {
+      this.empty.add(new TextRenderable(ctx, { content: safeText(line) }));
+    }
+    if (this.recent) {
+      this.empty.add(
+        new TextRenderable(ctx, {
+          content: new StyledText([theme.muted(safeText(this.recent))]),
+        }),
+      );
+    }
+  }
+
+  setMessages(messages: ConversationMessage[]): void {
+    const ctx = this.ctx as CliRenderer;
+    const previous = new Map(this.messages.map((m) => [m.seq, m]));
+    const next: MessageView[] = [];
+    let changed = false;
+    for (const message of messages) {
+      const old = previous.get(message.seq);
+      if (old && old.source === message.text && old.role === message.role) {
+        next.push(old);
+        continue;
+      }
+      changed = true;
+      next.push(this.buildMessage(ctx, message));
+    }
+    // 消えたメッセージのコンテナを除去
+    const keep = new Set(next.map((m) => m.seq));
+    for (const old of this.messages) {
+      if (!keep.has(old.seq)) {
+        this.remove(old.container);
+        changed = true;
+      }
+    }
+    // 順序どおりに並べ直す。新規メッセージは seq 昇順で、
+    // 既存の最初のコンテナの前に差し込む（履歴の prepend）か末尾に追加する。
+    this.messages = next;
+    if (changed) {
+      const firstMounted = next.findIndex(
+        (view) => view.container.parent === this,
+      );
+      const anchor = firstMounted >= 0 ? next[firstMounted]!.container : null;
+      for (let i = 0; i < next.length; i++) {
+        const view = next[i]!;
+        if (view.container.parent === this) continue;
+        if (anchor && i < firstMounted) {
+          this.insertBefore(view.container, anchor);
+        } else {
+          this.add(view.container);
+        }
+      }
+    }
+    this.olderHint.visible = this._hasOlder && this.messages.length > 0;
+    this.refreshEmpty();
+    this.requestRender();
+  }
+
+  private buildMessage(
+    ctx: CliRenderer,
+    message: ConversationMessage,
+  ): MessageView {
+    const container = new BoxRenderable(ctx, {
+      flexDirection: "column",
+      width: "100%",
+      marginTop: 1,
+    });
+    const roleLabel = new TextRenderable(ctx, {
+      content:
+        message.role === "user"
+          ? new StyledText([theme.accent("あなた")])
+          : new StyledText([theme.strong("AGENT")]),
+    });
+    const body = markdown(ctx, excerpt(message.text, 6000));
+    const expandHint = new TextRenderable(ctx, {
+      content: new StyledText([
+        theme.muted(`… /expand ${message.seq} で続きを表示`),
+      ]),
+      visible: Buffer.byteLength(message.text) > 6000,
+    });
+    container.add(roleLabel);
+    if (message.role === "user") {
+      // ユーザ発言: 左バー + パネル背景
+      const panel = new BoxRenderable(ctx, {
+        border: ["left"],
+        borderColor: ACCENT,
+        backgroundColor: panelBackground(),
+        paddingX: 1,
+        width: "100%",
+      });
+      body.paddingLeft = 0;
+      panel.add(body);
+      container.add(panel);
+    } else {
+      body.paddingLeft = 2;
+      container.add(body);
+    }
+    container.add(expandHint);
+    return {
+      seq: message.seq,
+      source: message.text,
+      role: message.role,
+      limit: 6000,
+      container,
+      body,
+      expandHint,
+    };
+  }
+
   expand(seq?: number): boolean {
     const message = [...this.messages]
       .reverse()
@@ -143,54 +325,10 @@ export class ConversationView implements Component {
       );
     if (!message) return false;
     message.limit += 24000;
-    message.body = markdown(excerpt(message.source, message.limit));
+    message.body.setText(excerpt(message.source, message.limit));
+    message.expandHint.visible =
+      Buffer.byteLength(message.source) > message.limit;
     return true;
-  }
-  invalidate(): void {
-    for (const message of this.messages) message.body.invalidate();
-  }
-  render(width: number): string[] {
-    const fit = (text: string) => truncateToWidth(text, width);
-    const lines = [
-      fit(
-        `${theme.strong(lineText(this.name))}  ${theme.muted("/ " + lineText(basename(this.workspace)))}`,
-      ),
-      theme.muted("─".repeat(width)),
-    ];
-    if (!this.messages.length)
-      return [
-        ...lines,
-        "",
-        ...this.setup.flatMap((line) => new Text(line, 0, 0).render(width)),
-        ...(this.recent
-          ? ["", ...new Text(this.recent, 0, 0).render(width)]
-          : []),
-        "",
-      ];
-    if (this.hasOlder)
-      lines.push(fit(theme.muted("↑ スクロールで以前の発言を読込 · /history")));
-    for (const message of this.messages) {
-      const body = message.body.render(Math.max(1, width - 2));
-      lines.push(
-        "",
-        fit(
-          message.role === "user"
-            ? theme.accent("あなた")
-            : theme.strong("AGENT"),
-        ),
-        ...body.map((line) => {
-          const prefix = message.role === "user" ? "▎ " : "  ";
-          const content = prefix + line;
-          return message.role === "user"
-            ? theme.panel(truncateToWidth(content, width, "", true))
-            : content;
-        }),
-        ...(Buffer.byteLength(message.source) > message.limit
-          ? [fit(theme.muted(`… /expand ${message.seq} で続きを表示`))]
-          : []),
-      );
-    }
-    return [...lines, ""];
   }
 }
 
@@ -217,7 +355,8 @@ const toolNames: Record<string, string> = {
   fetch_url: "ページ取得",
   read_source: "出典の確認",
 };
-function activityLine(item: ActivityItem, width: number): string {
+
+function activityLineChunks(item: ActivityItem): TextChunk[] {
   const style =
     item.state === "running" || item.state === "unknown"
       ? theme.accent
@@ -234,13 +373,14 @@ function activityLine(item: ActivityItem, width: number): string {
         : item.state === "failed" || item.state === "unknown"
           ? "!"
           : "·";
-  // State precedes potentially long model names, commands and paths so a narrow
-  // terminal never hides whether a tool actually ran or is still pending.
-  return truncateToWidth(
-    `${style(`${marker} ${activityLabels[item.state]}`)}  ${lineText(item.label)}${item.target ? theme.muted(` · ${lineText(item.target)}`) : ""}`,
-    width,
-  );
+  const chunks: TextChunk[] = [
+    style(`${marker} ${activityLabels[item.state]}`),
+    { __isChunk: true, text: `  ${lineText(item.label)}` },
+  ];
+  if (item.target) chunks.push(theme.muted(` · ${lineText(item.target)}`));
+  return chunks;
 }
+
 function visibleItems(items: ActivityItem[], limit: number): ActivityItem[] {
   const rank = (item: ActivityItem) =>
     item.state === "running" || item.state === "unknown"
@@ -256,16 +396,24 @@ function visibleItems(items: ActivityItem[], limit: number): ActivityItem[] {
     .slice(0, limit);
 }
 
-export class ActivityView implements Component {
+/** アクティビティ一覧（ツール・検査の状態表示）。 */
+export class ActivityView extends TextRenderable {
   run?: Pick<Run, "state" | "tasks">;
   busy = false;
   previewing = false;
   readonly tools = new Map<string, ActivityItem>();
   readonly checks = new Map<string, ActivityItem>();
+
+  constructor(ctx: CliRenderer) {
+    super(ctx, { content: "" });
+  }
+
   clear(): void {
     this.tools.clear();
     this.checks.clear();
+    this.refresh();
   }
+
   tool(detail: Record<string, unknown>, started: boolean): void {
     const key = `${detail.taskId}/${detail.toolId ?? detail.name}`;
     const args = detail.args as { command?: string; path?: string } | undefined;
@@ -285,32 +433,45 @@ export class ActivityView implements Component {
     });
     if (this.tools.size > 12)
       this.tools.delete(this.tools.keys().next().value!);
+    this.refresh();
   }
-  invalidate(): void {}
-  render(width: number): string[] {
+
+  /** 表示用行を構築する（テストでも直接使えるよう公開）。 */
+  lines(): TextChunk[][] {
     if (!this.busy) return [];
     const run = this.run;
     const active = [...this.tools.values(), ...this.checks.values()].filter(
       (item) => ["running", "failed", "unknown"].includes(item.state),
     );
     const lines = visibleItems(active, 2).map((item) =>
-      activityLine(item, width),
+      activityLineChunks(item),
     );
     if (!lines.length && !this.previewing) {
       const task = run?.tasks.find((task) => task.state === "running");
-      lines.push(
-        truncateToWidth(
-          theme.muted(
-            task
-              ? `${task.role === "reviewer" ? "レビュー中" : task.role === "lead" ? "計画中" : "応答を生成中"} · ${lineText(task.model ?? "選択中")}`
-              : run
-                ? runLabels[run.state]
-                : "準備中…",
-          ),
-          width,
+      lines.push([
+        theme.muted(
+          task
+            ? `${task.role === "reviewer" ? "レビュー中" : task.role === "lead" ? "計画中" : "応答を生成中"} · ${lineText(task.model ?? "選択中")}`
+            : run
+              ? runLabels[run.state]
+              : "準備中…",
         ),
-      );
+      ]);
     }
-    return lines.length ? [...lines, ""] : [];
+    // 旧実装の `render()` は末尾に空行を足していた（ツール行との視覚的分離）。
+    return lines.length ? [...lines, []] : lines;
+  }
+
+  /** 状態を反映して content を更新する。 */
+  refresh(): void {
+    const lines = this.lines();
+    const chunks: TextChunk[] = [];
+    lines.forEach((line, i) => {
+      if (i > 0) chunks.push({ __isChunk: true, text: "\n" });
+      chunks.push(...line);
+    });
+    this.content = new StyledText(chunks);
   }
 }
+
+export { TextAttributes };
