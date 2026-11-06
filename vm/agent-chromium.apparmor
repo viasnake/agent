@@ -1,0 +1,9 @@
+abi <abi/4.0>,
+include <tunables/global>
+# Only the administrator-installed browser can create its sandbox user namespaces.
+profile agent-chromium /opt/agent-browsers/chromium-1254/chrome-linux64/chrome flags=(default_allow) {
+  userns,
+}
+profile agent-chromium-headless /opt/agent-browsers/chromium_headless_shell-1254/chrome-headless-shell-linux64/headless_shell flags=(default_allow) {
+  userns,
+}

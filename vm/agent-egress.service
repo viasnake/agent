@@ -1,0 +1,10 @@
+[Unit]
+Description=Personal agent work-user egress policy
+Before=agent.service
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/agent/egress.nft
+ExecStop=/usr/bin/rm -f /run/agent-egress.ready

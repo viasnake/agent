@@ -1,211 +1,123 @@
 # Repository guidance
 
-## Scope and documentation
+## Product and scope
 
-This repository is a local terminal agent for coding, research, and writing.
-Use Japanese for user-facing communication and README usage instructions; use
-English for code, comments, commits, and this file.
+This is a single-user personal work agent inside a manually started Ubuntu VM.
+The host has QEMU init/start scripts and a browser. The guest runs a single
+TypeScript HTTP service using Pi Durable 1.5.0 and SQLite; all arbitrary work
+runs under a separate Unix UID. One job runs at a time, including decision waits.
 
-Keep documentation to `README.md` for usage and `AGENTS.md` for development.
-Keep executable configuration examples in `examples/`. Do not add a `docs/`
-tree, design records, roadmaps, progress reports, or historical test results.
-Explain non-obvious implementation constraints beside the code; use commits
-and pull requests for change history. Update usage instructions when a command,
-installation step, or user-visible limitation changes.
+Do not add a host daemon, VM manager, automatic host startup, Proxmox,
+Firecracker, distributed workers, a generic harness, DAG engine, or plugin system.
+Legacy TUI, CLI, runtime and saved-session formats have no compatibility promise.
+Do not erase old user data, VM disks, secrets or Git history.
 
-Inspect the worktree before editing and preserve unrelated changes. Use
-short-lived `codex/<type>/<description>` branches and Conventional Commits.
-Use `.github/pull_request_template.md` for pull requests. Keep changes and
-validation scoped to their purpose; do not commit generated output, credentials,
-machine-local state, or live provider responses.
+Use Japanese for user-facing text and README instructions. Use English for code,
+comments, commits and this file. Keep maintained prose in README.md and AGENTS.md;
+put executable examples in examples/. Do not add a docs tree, design records,
+roadmaps, progress reports, historical test results or copies of handoff documents.
+Explain current non-obvious constraints beside their implementation.
 
-## Setup and verification
+## Work and delivery
 
-Use Node.js 24 and npm for CI parity. Linux verification also requires Git,
-Python 3, Bubblewrap, and tmux. On Ubuntu, install the test prerequisites with
-`sudo apt-get install bubblewrap tmux python3` after updating the package index.
+Inspect the worktree before editing and preserve unrelated changes. Avoid
+concurrent edits to the same files. Use short-lived codex/type/description
+branches and Conventional Commits. Follow .github/pull_request_template.md.
+Do not push directly to master, rewrite shared history, merge or publish a
+release without explicit authorization. Do not commit generated output, live
+provider responses, credential files, machine state or dependency trees.
+
+## Setup and checks
+
+Use Node.js 26.13.0, npm and the committed lockfile. Install separately from builds:
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
-AGENT_REQUIRE_SANDBOX=1 npm run verify
+npx playwright install chromium
+npm run verify
 ```
 
-`verify` runs formatting, type checking, a build without lifecycle hooks,
-Python helper/guest-runner unit tests, TypeScript tests, and the built CLI's
-`--help`. CI uses Ubuntu 26.04 and Node.js 24. Pull requests, pushes to `master`,
-and manual dispatch run the same checks; superseded runs on the same ref are
-cancelled. Actions are pinned to full commit SHAs. Keep dependency installation
-separate from verification and check that CI leaves both manifests unchanged.
+Linux tests need Git, Python 3, Poppler, Japanese fonts and Chromium system
+libraries. See README for preparation. Build has no dependency-install hook.
+`verify` runs formatting, type checking, build, nonprivileged unit/integration
+checks, actual HTTP/browser E2E, and entry-point help. Tests compile into
+.test-dist and evidence is generated in ignored test-results/.
 
-For local installation, `npm run build` intentionally runs `prebuild` to install
-dependencies. After `npm ci`, use `npm run build --ignore-scripts` to compile
-without another install or lockfile rewrite. Do not replace CI's `npm ci` with
-`npm install` or remove the interactive installation convenience inadvertently.
+Use `npm run check`, a selected compiled Node test, or `git diff --check` for
+narrow changes. Keep tests tied to concrete failures. Ordinary tests use a faux
+provider and local external-service fixtures, but real Pi Durable, SQLite,
+files, processes, HTTP and Chromium. TestRunner is test-only dependency injection;
+never expose it as a production mode or fallback. Production Chromium enables
+its sandbox; ordinary browser fixtures do not establish that guest boundary.
 
-Run narrow checks first when investigating a change:
-
-- `npm run check`: TypeScript validation, including tests.
-- `npm run format:check`: Prettier validation. `npm run format` rewrites files;
-  prefer formatting only changed files to avoid unrelated edits.
-- `npm run test:firecracker`: Python unit tests; no KVM or privileged setup.
-- `npm test`: compile to `.test-dist` and run the Node test suite.
-- After compilation, `node --test --experimental-test-isolation=none --test-concurrency=1 .test-dist/tests/<name>.test.js`
-  runs a selected TypeScript test file.
-- `git diff --check`: whitespace validation before delivery.
-
-The Node tests run sequentially because provider fixtures replace global
-`fetch`. Do not parallelize these fixtures without isolating their state.
-Tests use synthetic provider responses, temporary application homes, local
-servers, and PTY/tmux sessions. They must not use real credentials or paid
-inference. `AGENT_REQUIRE_SANDBOX=1` makes unavailable Bubblewrap isolation a
-failure; without it, relevant integration tests may skip. Non-Linux execution
-uses the disabled sandbox backend and does not establish Linux isolation.
-Restricted environments can block sockets, namespaces, or PTYs: distinguish
-those failures from product defects, and do not report skipped tests as passes.
-
-Real Firecracker integration is opt-in. On an explicitly provisioned Linux KVM
-host, compile the tests and run:
-
-```sh
-AGENT_REQUIRE_FIRECRACKER=1 node --test .test-dist/tests/firecracker.integration.test.js
-```
-
-This creates, starts, executes commands in, and destroys real microVMs through
-the privileged helper. Never enable it in generic CI or automatically install
-or repair KVM, cgroups, networking, or sudoers to make a test pass. Report real
-KVM testing separately from helper unit tests. Live authentication, model access,
-image understanding, model quality, rendered TUI behavior, IME interaction, and
-native macOS operation require separate acceptance checks.
+`npm run test:guest` requires AGENT_GUEST_TEST=1, administrator privileges and a
+dedicated provisioned guest with agent.service explicitly stopped. It must not
+install/repair system prerequisites or interrupt user jobs. `npm run test:live`
+requires explicit opt-in, a selected input, private credential file and approved
+paid-model disclosure. Neither belongs in default CI. Missing prerequisites are
+blocked (exit 77), not pass. WHPX, KVM, guest security, rendered quality and live
+model quality are separate acceptance claims.
 
 ## Code boundaries
 
-The application runs as one foreground Node.js process. Pi supplies inference,
-terminal components, and MCP clients; the host owns permissions, disclosure,
-budgets, validation, and success state.
+- src/service.ts and src/state.ts: Pi Document job state, admission, budgets,
+  recovery, validation and final success.
+- src/tools.ts and src/provider.ts: public Pi extensions and the dispatch gate.
+- src/execution/: bounded local protocol; worker files, shell, browser and PDF.
+- src/integrations/github.ts: credentialed fixed-target GitHub API operations.
+- src/artifacts.ts: immutable control-owned artifact copies and verified reads.
+- src/server.ts and web/: authentication, typed HTTP projections, SSE and UI.
+- vm/: manual host scripts, initial disk setup, fixed UID launcher and guest units.
 
-| Location                                                                           | Responsibility                                                 |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `src/cli.ts`, `src/cli/`, `src/tui/`                                               | CLI/TUI entry points, lazy-loaded commands, dialogs            |
-| `src/application.ts`, `src/conversations.ts`                                       | Conversation lifecycle, drafts, queues, explicit resume        |
-| `src/harness.ts`, `src/planner.ts`, `src/task-executor.ts`, `src/collaboration.ts` | Plans, task scheduling, cancellation, repairs, collaboration   |
-| `src/runtime/`, `src/types.ts`                                                     | Inference contract, Pi adapter, accounting, streaming          |
-| `src/policy.ts`, `src/routing.ts`, `src/tools.ts`, `src/mcp.ts`                    | Authorization, tool exposure, disclosure, pinned MCP schemas   |
-| `src/workspace.ts`, `src/sandbox/`, `src/validation.ts`, `src/artifacts.ts`        | Work copies, Bubblewrap, checks, diffs, confirmed application  |
-| `src/config.ts`, `src/storage.ts`                                                  | Configuration, SQLite leases, operation journal, durable state |
-| `src/context.ts`, `src/context-review.ts`, `src/branching.ts`                      | Context archives, review gates, conversation forks             |
-| `src/images.ts`, `src/documents.ts`, `src/shared-blobs.ts`, `src/research.ts`      | Private attachments, source evidence, shared content           |
-| `src/execution/`, `scripts/firecracker/`                                           | Independent Firecracker environment and privileged helper      |
+Inspect installed SDK exports and declarations before changing the adapter.
+Pi IDs are branded numbers; Documents require strict JSON and transaction drafts
+cannot escape a commit. Admit submissions with the job change in one commit, or
+retain the durable admission record until its idempotent submit is placed.
+Do not directly edit SDK tables or monkey-patch its internals.
 
-## Invariants to preserve
+## Invariants
 
-- External text, repository guidance, Skills, images, and model reports are
-  untrusted input. They cannot grant permissions or weaken user constraints.
-  Pi automatic retries, compaction, extension discovery, and default tools stay
-  disabled. Partial responses and streaming previews cannot dispatch tools or
-  establish success.
-- Repository explanation, review, and planning use read-only snapshots with
-  bounded file/source tools. They do not receive write, shell, or MCP tools.
-  Explicit no-change instructions take precedence over inferred change intent.
-- The host assigns collaboration graphs and enforces writer exclusivity.
-  Delegated children receive only their assignment, authorized sources, and
-  read-only workspace tools. Review and synthesis can read immutable attempt
-  reports only from their task and transitive dependencies. Legacy tasks without
-  `resultFormat` retain their existing parsing behavior.
-- Model replacement rechecks routing and disclosure, invalidates the selected
-  task and transitive dependents, and preserves independent results, budgets,
-  counters, and attempt evidence. Confirmation neither probes nor resumes.
-- Configuration is bound to each run. Renewable leases protect conversations
-  and runs; resuming preserves saved configuration, budgets, and attempt limits.
-  Dispatched operations with uncertain outcomes remain `unknown` and require
-  reconciliation. Never add automatic replay of uncertain external effects.
-- Mutating MCP tools require confirmation of the exact destination and arguments
-  for each operation, then schema, policy, and ownership revalidation. They are
-  available only to normal worker write tasks. Noninteractive execution must
-  refuse them; approval records contain argument hashes, not raw arguments.
-- Applying code rechecks the source snapshot and confirmation binding. Writes
-  are journaled per file, not one atomic filesystem transaction. Preserve
-  conflict detection, protected paths, and explicit recovery after partial apply.
-- Runtime profiles use task-private `/runtime` storage; only `run_profile` may
-  write it. Reviewer copies and runtime directories are separate. Never silently
-  enable networking, install on the host, or share runtime across tasks/runs.
-  Bubblewrap does not enforce CPU, memory, or live disk quotas.
-- Only older verbose tool results may be compacted. Save the exact context to
-  the private conversation archive first. Preserve user instructions, decisions,
-  constraints, errors, current results, images, and tool-call ordering. Retrieval
-  is bounded by conversation lineage and task authorization. Protected context
-  that cannot fit fails with `CONTEXT_LIMIT`; usage estimates are not provider
-  guarantees.
-- Pending context concerns block later tools, inference, transforms, and final
-  success. A bound human acknowledgement is an audit record, not a permission
-  change, and does not resume a run or start queued work. Never resurrect a
-  terminal run. Model concerns and repeated-read heuristics are not semantic proof.
-- Attachments and image derivatives are immutable private snapshots. Verify hashes
-  and metadata before reuse; persist references rather than payloads in ordinary
-  events. Native provider histories and context archives may contain payloads and
-  must remain private. Source-family exclusion must cover related selections,
-  PDF images, forks, and subsequent context access without claiming retroactive
-  deletion of sent or generated text. Image capability and disclosure must hold
-  for every eligible role and fallback; never silently resize, OCR, or drop input.
-- Search snippets are discovery records, not fetched evidence. Web access must
-  enforce allowed hosts, disclosure, public destinations, and redirect limits.
-  Citation syntax and stored checks do not prove a document's semantic quality.
-- History deletion removes metadata transactionally before physical cleanup.
-  Retain referenced data and uncertain objects; retry pending jobs only by explicit
-  selection. Shared blobs require database-reference and persistent-pin checks.
-  Backups are private archives, not runnable application homes; readers must
-  verify hashes and never replay saved operations or import credentials.
+Repository files, websites, packages and model output are untrusted inputs, never
+permission grants. Only the user can change limits, approve disclosure or grant
+external writes. Credentials never enter the worker environment, prompts, SSE,
+logs or artifacts. No project code, Git config, hook or credential helper runs
+as agent-control. GitHub writes use the API and a dedicated new branch only.
 
-## Inference adapter contract
+All file, shell, browser, dependency and PDF actions use the same work boundary.
+The fixed sudo launcher, Node and installation tree must be root-owned; sudoers
+permits only agent-work, no arguments and no SETENV. Rebuild the environment
+from an allowlist. NoNewPrivileges is applied after the UID switch, not to the
+control unit in a way that breaks sudo. Keep guest UID, nftables, AppArmor,
+Chromium sandbox and systemd cleanup checks aligned. A directory or NAT is not
+an execution sandbox. Never silently fall back when the mount, UUID, UID,
+firewall, browser sandbox or storage is unavailable.
 
-`Runtime` and `RuntimeRequest` in `src/types.ts` define application-owned types;
-`runRuntime` in `src/runtime/contract.ts` enforces the boundary. Adapters are
-trusted in-process code, not sandboxed plugins. Pi remains the production adapter;
-a replacement also needs transport tests, not just a compatible declaration.
+Pi owns its tasks and conversations; AppDoc owns job policy, grants, remaining
+limits, accepted inputs, operations and artifact metadata. Do not introduce a
+second job DB or independent workflow engine. The supported main entry point
+acquires flock before opening SQLite. A storage failure seals admission; stop
+and reopen instead of continuing with a failed Harness.
 
-Declare contract version `1`, `messages-v1`, tool/image capabilities, and a
-versioned native-session format when persisting sessions. Honor the authorized
-model alias and its connection/profile; do not select another endpoint or model.
-Before every inference dispatch, await `transformContext` on the complete JSON
-context and use its result, then reserve usage via `beforeRequest`. Settle each
-reservation once with nonnegative reported usage or `null` for unknown values.
-Leave interrupted/uncertain requests unresolved; never invent zero usage.
+Generation hook errors may be skipped by Pi. Model dispatch is enforced at the
+provider boundary and counts retries/compaction before sending. Keep the saved
+provider session and selected model bound to the active job. Do not reset
+budgets, repair counts or absolute deadlines on restart/resume.
 
-Use only supplied tools and schemas, await tool completion, and propagate aborts.
-Preserve exact verified image bytes, IDs, and order. Return final text only after
-a complete response and drained work; `close` releases resources. Failures use
-`AgentError` host codes. Do not swallow boundary failures, privately retry, warm
-caches, or report success after cancellation. The guard rejects missing or duplicate
-accounting, pending tools/requests, empty results, and late callbacks.
+Browser disconnects never cancel a job. Pause is admission stop plus abort and
+cleanup, not an OS stack snapshot. Shutdown preserves unfinished jobs. Unknown
+shell or external outcomes block replacement work until reconciled. Never mark
+generic shells replay-safe; a fresh tool ID or old approval cannot bypass the
+unknown-operation gate. A crash with external permission also requires review.
 
-`messages-v1` has ordered `messages` with `system`, `user`, `assistant`, `tool`,
-or `toolResult` roles. Preserve text/image blocks, call IDs, error flags, and opaque
-metadata. Translate other native formats at the adapter boundary; reject unknown
-roles. Register native session files only inside the supplied task session directory.
-An incompatible saved format fails before reading or invoking the adapter; never
-implicitly convert or discard it. Pi alone accepts legacy untagged Pi JSONL and
-tags new sessions `pi-jsonl-v1`. Model replacement clears both native-session
-fields while preserving host evidence. Keep saved-record additions optional where
-legacy records remain supported. Cover changes with runtime-contract, runtime,
-context, images, application, collaboration, and model-change tests as applicable.
+Bind approvals to job, target, argument hash and policy revision. Commit prepared
+and dispatched intent before the effect; persist the external result afterward.
+An external success followed by a lost response remains unknown. Reconciliation
+queries existing results; it never resends the mutation. Backup restoration must
+start with an explicit recovery hold; do not claim automatic restore detection or
+power-loss exactly-once from SQLite WAL/NORMAL.
 
-## Firecracker boundary
-
-Firecracker is an independent `ExecutionEnvironment`, not an
-`execution.backend` option. Do not route only shell commands into a VM while
-file tools still operate on a host workspace. The TUI, file tools, stdio MCP,
-conversation association, PTY, and validation have not moved into this environment.
-
-The agent stays unprivileged. Only the fixed administrator-installed helper may
-manage jailer, namespaces, cgroups, and disks. Reject arbitrary caller paths,
-binaries, UIDs, images, and jailer flags. Verify root ownership and asset digests,
-authorize the environment owner, and drop the VMM to its separate pool UID.
-Do not expose host credentials, the original repository, NIC/TAP, or a guest-initiated
-host service. Use bounded, authenticated vsock messages and verify readiness;
-unknown execution outcomes must fail closed without backend fallback.
-
-Keep per-environment and allocation locks, fixed disk inodes linked into the jail,
-authenticated guest sync before stopping, and cgroup cleanup. Do not mount or
-extract guest-modified disks on the host. Resource limits include VMM overhead
-in addition to guest RAM. Asset versions/checksums live in
-`scripts/firecracker/assets.sha256`; setup and use are in the README. Treat the
-pinned kernel/rootfs as compatibility fixtures, not hardened production images.
+Success requires current immutable artifacts, current command/PDF validation,
+self-review, all required raster pages delivered for inspection, no unprocessed
+input and no unknown operation. Check the exact current job revision in the
+final commit so a late pause/cancel/input cannot be overwritten by success.
+Machine checks, model self-review and human quality acceptance remain distinct.

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Agent — 仕事を預ける</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div id="login" class="login" hidden>
+      <form id="login-form" class="login-card">
+        <span class="eyebrow">LOCAL WORKSPACE</span>
+        <h1>Agent</h1>
+        <p>仕事を預けて、成果を受け取る。</p>
+        <label
+          >認証情報<input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            required
+        /></label>
+        <button type="submit">ログイン</button>
+        <p id="login-error" role="alert"></p>
+      </form>
+    </div>
+    <div id="app" hidden>
+      <header>
+        <a href="/" class="brand">Agent<span>PERSONAL WORKSPACE</span></a
+        ><span id="connection" role="status">接続を確認しています</span
+        ><button id="settings-open" class="quiet">共通指示</button
+        ><button id="logout" class="quiet">ログアウト</button>
+      </header>
+      <div class="layout">
+        <aside>
+          <div class="aside-heading">
+            <h2>仕事</h2>
+            <button id="new-job" class="quiet">＋ 新規</button>
+          </div>
+          <nav id="jobs" aria-label="仕事一覧"></nav>
+          <button id="more-jobs" class="quiet" hidden>さらに表示</button>
+        </aside>
+        <main>
+          <p id="error" class="notice error" role="alert" hidden></p>
+          <section id="compose">
+            <span class="eyebrow">NEW REQUEST</span>
+            <h1>何を進めましょうか。</h1>
+            <p class="intro">
+              目的と完成の条件を伝えてください。必要な判断と成果物は、この画面で確認できます。
+            </p>
+            <form id="job-form">
+              <label
+                >依頼名<input
+                  id="title"
+                  maxlength="200"
+                  placeholder="例：計算処理のバグを修正する"
+                  required
+              /></label>
+              <label
+                >依頼内容<textarea
+                  id="objective"
+                  rows="6"
+                  maxlength="64000"
+                  placeholder="目的、参照する URL、守ってほしい条件など"
+                  required
+                ></textarea>
+              </label>
+              <div class="form-row">
+                <label
+                  >仕事の種類<select id="kind">
+                    <option value="code">コードの修正</option>
+                    <option value="research">調査・文書制作</option>
+                  </select></label
+                ><label
+                  >プロジェクト名<input
+                    id="project"
+                    maxlength="100"
+                    placeholder="任意"
+                /></label>
+              </div>
+              <label
+                >完成の条件<textarea
+                  id="acceptance"
+                  rows="3"
+                  placeholder="1行に1つ。未入力なら仕事の種類に応じた条件を使います。"
+                ></textarea>
+              </label>
+              <label
+                >公開 Git URL<input
+                  id="repo-url"
+                  type="url"
+                  placeholder="https://github.com/owner/repository.git（任意）"
+              /></label>
+              <label
+                >添付ファイル<input
+                  id="attachments"
+                  type="file"
+                  multiple
+                /><span class="subtle"
+                  >1件20 MiB、仕事全体50 MiBまで。ZIPは自動展開しません。</span
+                ></label
+              >
+              <label class="checkbox"
+                ><input id="external-allowed" type="checkbox" />
+                設定済みの対象への GitHub
+                変更提案を許可する（送信前に内容を確認）</label
+              >
+              <button id="submit-job" type="submit">仕事を依頼する</button>
+            </form>
+          </section>
+          <section id="detail" hidden>
+            <div class="detail-heading">
+              <div>
+                <span id="job-state" class="badge"></span>
+                <h1 id="job-title"></h1>
+              </div>
+              <div id="actions" class="actions"></div>
+            </div>
+            <p id="job-progress" class="notice"></p>
+            <div id="budget" class="subtle"></div>
+            <div id="decisions"></div>
+            <section class="deliverables">
+              <h2>成果物</h2>
+              <div id="artifacts" class="artifact-grid"></div>
+            </section>
+            <section>
+              <h2>検証</h2>
+              <div id="validations"></div>
+            </section>
+            <section>
+              <h2>会話と作業</h2>
+              <details>
+                <summary>依頼と完成の条件</summary>
+                <pre id="original"></pre>
+              </details>
+              <details id="activity">
+                <summary>作業の記録</summary>
+                <button id="earlier" class="quiet" hidden>
+                  以前の記録を読む
+                </button>
+                <div id="transcript"></div>
+              </details>
+              <div id="live" class="subtle"></div>
+            </section>
+            <form id="input-form">
+              <label
+                >追加指示<textarea
+                  id="input-text"
+                  rows="3"
+                  maxlength="16000"
+                  placeholder="進行中でも指示を追加できます"
+                  required
+                ></textarea></label
+              ><button type="submit">指示を送る</button
+              ><span id="input-status" class="subtle"></span>
+            </form>
+            <button id="continue-job" class="quiet" hidden>
+              この仕事の続きを新しい依頼にする
+            </button>
+          </section>
+        </main>
+      </div>
+    </div>
+    <dialog id="settings">
+      <form id="settings-form">
+        <span class="eyebrow">PREFERENCES</span>
+        <h2>共通指示とプロジェクトメモ</h2>
+        <p>次に作成する仕事から適用します。</p>
+        <label
+          >共通指示<textarea
+            id="common-instructions"
+            rows="7"
+            maxlength="16000"
+          ></textarea></label
+        ><label>プロジェクト名<input id="note-project" maxlength="100" /></label
+        ><label
+          >プロジェクトメモ<textarea
+            id="project-note"
+            rows="5"
+            maxlength="16000"
+          ></textarea>
+        </label>
+        <p id="model-status" class="subtle"></p>
+        <div class="actions">
+          <button type="submit">保存</button
+          ><button id="settings-close" type="button" class="quiet">
+            閉じる
+          </button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

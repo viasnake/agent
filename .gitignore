@@ -1,7 +1,7 @@
 node_modules/
 dist/
-coverage/
 .test-dist/
+coverage/
 *.tgz
 .env
 .env.*
@@ -10,3 +10,6 @@ coverage/
 .agents/
 .codex/
 .aws/
+test-results/
+playwright-report/
+__pycache__/

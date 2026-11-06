@@ -1,0 +1,35 @@
+[Unit]
+Description=Personal work agent
+Requires=agent-egress.service
+After=network-online.target agent-egress.service
+Wants=network-online.target
+RequiresMountsFor=/srv/agent-data
+
+[Service]
+Type=simple
+User=agent-control
+Group=agent-control
+WorkingDirectory=/opt/agent
+ExecStartPre=+/usr/local/libexec/agent-preflight
+ExecStart=/opt/agent-node/bin/node /opt/agent/dist/src/main.js /etc/agent/config.yaml
+Environment=PATH=/opt/agent-node/bin:/usr/bin:/bin
+UMask=0077
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+SendSIGKILL=yes
+ProtectSystem=full
+ReadWritePaths=/srv/agent-data/control /srv/agent-data/work
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectProc=invisible
+PrivateTmp=yes
+NoNewPrivileges=no
+TasksMax=512
+MemoryMax=7G
+
+[Install]
+WantedBy=multi-user.target

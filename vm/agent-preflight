@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+[[ $(id -u agent-control) == 980 && $(id -u agent-work) == 981 ]]
+[[ $(findmnt -n -o LABEL --mountpoint /srv/agent-data) == AGENT_DATA ]]
+[[ $(findmnt -n -o UUID --mountpoint /srv/agent-data) == $(cat /etc/agent-data.uuid) ]]
+if [[ -f /sys/firmware/qemu_fw_cfg/by_name/opt/agent/recovery-hold/raw ]] && grep -q '^1$' /sys/firmware/qemu_fw_cfg/by_name/opt/agent/recovery-hold/raw; then
+  install -o root -g root -m 0644 /dev/null /run/agent-recovery-hold
+else
+  rm -f /run/agent-recovery-hold
+fi
+[[ $(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf) == 10.0.2.3 ]]
+/usr/sbin/nft list table inet agent_work >/dev/null
+install -o root -g root -m 0644 /dev/null /run/agent-egress.ready
+printf 'agent-work-egress-v1\n' > /run/agent-egress.ready
