@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer as portProbe } from "node:net";
@@ -47,6 +47,21 @@ test("real browser conversation: no category, attachments, response-loss retry, 
   });
   try {
     await page.goto(origin);
+    const bootstrap = await page.request.get(`${origin}/bootstrap.css`);
+    assert.equal(bootstrap.status(), 200);
+    assert.ok(
+      (await bootstrap.body()).equals(
+        await readFile("node_modules/bootstrap/dist/css/bootstrap.min.css"),
+      ),
+      "Serve the pinned Bootstrap CSS without CDN requests",
+    );
+    assert.ok(
+      await page
+        .locator("#password")
+        .evaluate(
+          (input) => parseFloat(getComputedStyle(input).paddingLeft) > 0,
+        ),
+    );
     await page.locator("#password").fill(password);
     await page.getByRole("button", { name: "ログイン", exact: true }).click();
     await page.locator("#app").waitFor({ state: "visible" });
@@ -110,6 +125,18 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       path: "test-results/conversation.png",
       fullPage: true,
     });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: "test-results/conversation-mobile.png",
+      fullPage: true,
+    });
+    assert.ok(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+      "Mobile layout must not overflow horizontally",
+    );
+    assert.ok(await page.locator("#send").isVisible());
     const home = await mkdtemp(join(tmpdir(), "agent-ui-download-"));
     await download.saveAs(join(home, "clean.csv"));
   } finally {

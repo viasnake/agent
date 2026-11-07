@@ -333,6 +333,7 @@ export async function createServer(
     ["/", "index.html", "text/html; charset=utf-8"],
     ["/app.js", "app.js", "text/javascript; charset=utf-8"],
     ["/style.css", "style.css", "text/css; charset=utf-8"],
+    ["/bootstrap.css", "bootstrap.css", "text/css; charset=utf-8"],
   ]) {
     app.get(path!, async (_request, reply) =>
       reply.type(type!).send(await readFile(webRoot + name!)),

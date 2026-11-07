@@ -4,76 +4,135 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Agent</title>
+    <link rel="stylesheet" href="/bootstrap.css" />
     <link rel="stylesheet" href="/style.css" />
     <script type="module" src="/app.js"></script>
   </head>
   <body>
-    <div id="login" class="login" hidden>
-      <form id="login-form" class="login-card">
-        <span class="eyebrow">LOCAL WORKSPACE</span>
-        <h1>Agent</h1>
-        <label
-          >認証情報<input
-            id="password"
-            type="password"
-            autocomplete="current-password"
-            required /></label
-        ><button type="submit">ログイン</button>
-        <p id="login-error" role="alert"></p>
+    <div
+      id="login"
+      class="container min-vh-100 d-flex align-items-center justify-content-center"
+      hidden
+    >
+      <form
+        id="login-form"
+        class="col-12 sm:col-8 md:col-6 lg:col-4 border rounded p-6"
+      >
+        <h1 class="h4 mb-5">Agent</h1>
+        <label for="password" class="form-label">認証情報</label>
+        <input
+          id="password"
+          class="form-control mb-5"
+          type="password"
+          autocomplete="current-password"
+          required
+        />
+        <button class="btn-solid theme-primary w-100" type="submit">
+          ログイン
+        </button>
+        <p id="login-error" class="fg-danger small mt-3 mb-0" role="alert"></p>
       </form>
     </div>
     <div id="app" hidden>
-      <header>
-        <a href="/" class="brand">Agent<span>PI DURABLE</span></a
-        ><span id="connection" role="status">接続を確認しています</span
-        ><button id="logout" class="quiet">ログアウト</button>
+      <header class="d-flex align-items-center gap-4 border-bottom px-5 py-4">
+        <a href="/" class="h5 mb-0 text-decoration-none fg-1">Agent</a>
+        <span id="connection" class="ms-auto small fg-2" role="status"
+          >接続待ち</span
+        >
+        <button id="logout" class="btn-text theme-secondary btn-sm">
+          ログアウト
+        </button>
       </header>
-      <div class="layout">
-        <aside>
-          <div class="aside-heading">
-            <h2>会話</h2>
-            <button id="new-conversation" class="quiet">＋ 新規</button>
-          </div>
-          <nav id="conversations" aria-label="会話一覧"></nav>
-        </aside>
-        <main>
-          <p id="error" class="notice error" role="alert" hidden></p>
-          <div class="detail-heading">
-            <div>
-              <span id="state" class="badge"></span>
-              <h1 id="title">何を進めましょうか。</h1>
+      <div class="container-fluid">
+        <div class="row g-0">
+          <aside class="col-12 lg:col-3 xl:col-2 p-5 border-bottom border-end">
+            <div
+              class="d-flex align-items-center justify-content-between gap-3 mb-4"
+            >
+              <h2 class="h6 mb-0">会話</h2>
+              <button
+                id="new-conversation"
+                class="btn-outline theme-secondary btn-sm"
+              >
+                新規
+              </button>
             </div>
-            <div id="actions" class="actions"></div>
-          </div>
-          <p id="detail" class="subtle"></p>
-          <button id="earlier" class="quiet" hidden>以前の記録を読む</button>
-          <div id="transcript" aria-live="polite"></div>
-          <pre id="live" class="subtle"></pre>
-          <form id="message-form">
-            <label
-              >依頼・追加指示<textarea
-                id="message"
-                rows="5"
-                maxlength="64000"
-                placeholder="CSV の整形、文章の作成、コードの修正など"
-                required
-              ></textarea></label
-            ><label
-              >添付ファイル<input id="attachments" type="file" multiple
-            /></label>
-            <div class="actions">
-              <button id="send" type="submit">送る</button
-              ><span id="input-status" class="subtle"></span>
+            <nav
+              id="conversations"
+              class="list-group overflow-auto"
+              aria-label="会話一覧"
+            ></nav>
+          </aside>
+          <main class="col-12 lg:col-9 xl:col-10 p-5 lg:p-8">
+            <div class="container px-0">
+              <p id="error" class="alert theme-danger" role="alert" hidden></p>
+              <div
+                class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-5"
+              >
+                <div class="d-flex align-items-center flex-wrap gap-3">
+                  <h1 id="title" class="h4 mb-0 text-break">新しい会話</h1>
+                  <span
+                    id="state"
+                    class="badge badge-subtle theme-secondary"
+                    hidden
+                  ></span>
+                </div>
+                <div id="actions" class="d-flex gap-3"></div>
+              </div>
+              <p id="detail" class="small fg-2" hidden></p>
+              <button
+                id="earlier"
+                class="btn-text theme-secondary btn-sm mb-4"
+                hidden
+              >
+                以前の記録
+              </button>
+              <div id="transcript" aria-live="polite"></div>
+              <pre id="live" class="fg-2 small"></pre>
+              <form id="message-form" class="mt-5">
+                <label for="message" class="form-label">メッセージ</label>
+                <textarea
+                  id="message"
+                  class="form-control mb-4"
+                  rows="4"
+                  maxlength="64000"
+                  required
+                ></textarea>
+                <label for="attachments" class="form-label">添付</label>
+                <input
+                  id="attachments"
+                  class="form-control mb-4"
+                  type="file"
+                  multiple
+                />
+                <div class="d-flex align-items-center gap-3">
+                  <button
+                    id="send"
+                    class="btn-solid theme-primary"
+                    type="submit"
+                  >
+                    送る
+                  </button>
+                  <span id="input-status" class="small fg-2"></span>
+                </div>
+              </form>
+              <section id="files-section" class="border-top mt-6 pt-5" hidden>
+                <div
+                  class="d-flex align-items-center justify-content-between mb-3"
+                >
+                  <h2 class="h6 mb-0">ファイル</h2>
+                  <button
+                    id="refresh-files"
+                    class="btn-text theme-secondary btn-sm"
+                  >
+                    更新
+                  </button>
+                </div>
+                <div id="files" class="list-group"></div>
+              </section>
             </div>
-          </form>
-          <section class="deliverables">
-            <div class="aside-heading">
-              <h2>ファイル</h2>
-              <button id="refresh-files" class="quiet">更新</button>
-            </div>
-            <div id="files" class="artifact-grid"></div>
-          </section>
-        </main>
+          </main>
+        </div>
       </div>
     </div>
   </body>

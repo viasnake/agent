@@ -105,11 +105,14 @@ function clear() {
   cursor = null;
   lastStatus = "";
   entries.clear();
-  element("title").textContent = "何を進めましょうか。";
+  element("title").textContent = "新しい会話";
   element("state").textContent = "";
+  element("state").hidden = true;
   element("detail").textContent = "";
+  element("detail").hidden = true;
   element("transcript").replaceChildren();
   element("files").replaceChildren();
+  element("files-section").hidden = true;
   element("actions").replaceChildren();
   element("live").textContent = "";
   element("earlier").hidden = true;
@@ -124,8 +127,10 @@ async function list() {
   element("conversations").replaceChildren(
     ...value.conversations.map((conversation) => {
       const button = document.createElement("button");
-      button.className = `job-link ${conversation.id === selected ? "selected" : ""}`;
+      button.className = `list-group-item list-group-item-action text-break ${conversation.id === selected ? "active" : ""}`;
       button.textContent = conversation.title;
+      if (conversation.id === selected)
+        button.setAttribute("aria-current", "true");
       button.onclick = () => {
         void select(conversation.id).catch(notice);
       };
@@ -144,18 +149,20 @@ function drawTranscript() {
             const wrapper = document.createElement(
               message.role === "toolResult" ? "details" : "article",
             );
-            wrapper.className = "transcript-entry";
+            wrapper.className = "border-bottom pb-4 mb-4";
             if (wrapper instanceof HTMLDetailsElement) {
               const summary = document.createElement("summary");
               summary.textContent = `${message.toolName ?? "道具"}：${message.isError ? "失敗" : "実行結果"}`;
+              summary.className = "small fg-2";
               wrapper.append(summary);
             } else {
               const role = document.createElement("span");
-              role.className = "eyebrow";
+              role.className = "small fw-medium fg-2";
               role.textContent = message.role === "user" ? "あなた" : "Agent";
               wrapper.append(role);
             }
             const text = document.createElement("pre");
+            text.className = "mt-3 mb-0";
             text.textContent = message.content;
             wrapper.append(text);
             return wrapper;
@@ -168,9 +175,11 @@ function render(view: View, older = false) {
   element("title").textContent = view.conversation.title;
   element("state").textContent =
     status[view.conversation.status] ?? view.conversation.status;
-  element("detail").textContent =
-    view.conversation.detail ||
-    `${view.conversation.requests} 回のモデル呼び出し`;
+  element("state").hidden = false;
+  const detail =
+    view.conversation.status === "interrupted" ? view.conversation.detail : "";
+  element("detail").textContent = detail;
+  element("detail").hidden = !detail;
   for (const entry of view.transcript) entries.set(entry.id, entry);
   if (!older && entries.size > 100)
     for (const id of [...entries.keys()]
@@ -181,10 +190,10 @@ function render(view: View, older = false) {
   cursor = view.cursor;
   element("earlier").hidden = !cursor;
   element("input-status").textContent = view.pendingInputs
-    ? `追加指示 ${view.pendingInputs} 件を受理・反映待ち`
+    ? `反映待ち：${view.pendingInputs}`
     : view.modelConfigured
       ? ""
-      : "モデル未設定です";
+      : "モデル未設定";
   element("live").textContent = [
     view.progress.partial,
     ...view.progress.tools
@@ -201,8 +210,8 @@ function render(view: View, older = false) {
   ) {
     const button = document.createElement("button");
     const running = view.conversation.status === "running";
-    button.textContent = running ? "停止" : "状態を確認して再開";
-    button.className = "quiet";
+    button.textContent = running ? "停止" : "再開";
+    button.className = "btn-outline theme-secondary btn-sm";
     button.onclick = () => {
       button.disabled = true;
       const id = selected!;
@@ -238,11 +247,10 @@ async function select(id: string) {
     if (current === epoch) render(JSON.parse((event as MessageEvent).data));
   });
   events.onopen = () => {
-    if (current === epoch) element("connection").textContent = "VM に接続中";
+    if (current === epoch) element("connection").textContent = "接続中";
   };
   events.onerror = () => {
-    if (current === epoch)
-      element("connection").textContent = "再接続しています";
+    if (current === epoch) element("connection").textContent = "再接続中";
   };
   await list();
   await files().catch(() => {});
@@ -260,24 +268,19 @@ async function files() {
   if (selected !== id) return;
   const nodes: HTMLElement[] = value.files.map((file) => {
     const link = document.createElement("a");
-    link.className = "artifact";
+    link.className = "list-group-item list-group-item-action text-break";
     link.textContent = `${file.path.slice(8)} · ${file.size < 1024 ? `${file.size} B` : `${(file.size / 1024).toFixed(1)} KiB`}`;
     link.href = `/api/conversations/${id}/download?path=${encodeURIComponent(file.path)}`;
     return link;
   });
-  if (!nodes.length) {
-    const note = document.createElement("p");
-    note.className = "subtle";
-    note.textContent = "outputs/ に保存したファイルが表示されます。";
-    nodes.push(note);
-  }
   if (value.truncated) {
     const note = document.createElement("p");
-    note.textContent =
-      "一覧の上限に達しました。必要なファイルを整理してください。";
+    note.className = "small fg-2 mt-3";
+    note.textContent = "表示上限に達しました";
     nodes.push(note);
   }
   element("files").replaceChildren(...nodes);
+  element("files-section").hidden = nodes.length === 0;
 }
 element("login-form").onsubmit = (event) => {
   event.preventDefault();
@@ -295,7 +298,7 @@ element("login-form").onsubmit = (event) => {
       element<HTMLInputElement>("password").value = "";
       element("login").hidden = true;
       element("app").hidden = false;
-      element("connection").textContent = "VM に接続中";
+      element("connection").textContent = "接続中";
       await list();
     } catch (error) {
       element("login-error").textContent =
@@ -390,7 +393,7 @@ void api<{ csrf: string }>("/api/session")
     csrf = session.csrf;
     element("login").hidden = true;
     element("app").hidden = false;
-    element("connection").textContent = "VM に接続中";
+    element("connection").textContent = "接続中";
     await list();
   })
   .catch(showLogin);
