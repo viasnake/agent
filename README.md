@@ -48,20 +48,17 @@ sudo systemctl status agent.service
 
 ## 設定
 
-モデルは `/etc/agent/config.yaml` の `model.id`、API キーは `model.keyFile` で指定します。[設定例](examples/config.yaml) の `model` を有効にし、利用を許可したモデル ID に置き換えてください。対応する認証は OpenAI API キーです。OAuth ログインと画面上のモデル切り替えには対応していません。
+1. Web の「設定 → モデル」で OpenAI のモデル ID と API キーを登録し、既定モデルを選んで「保存」します。対応モデルは Pi SDK の OpenAI カタログに含まれるものです。「有料接続テスト」は推論料金が発生する可能性があります。
+2. 「MCP」でサーバーを追加します。stdio は導入済みコマンドの絶対パス・引数・必要な環境変数を、Streamable HTTP は HTTPS URL と認証方式を指定します。保存後、「接続テスト」で状態と公開ツールを確認します。
+3. OAuth は「認証する」から開始します。必要なら Client ID / Secret を登録してください。認証サーバーには画面に表示される `http://127.0.0.1:8080/oauth/callback` など、実際に開いている localhost のコールバックを許可します。許可できない接続先は利用できません。
+4. 社内・VPN の MCP や認証サーバーは「社内・VPN の接続許可」にホスト名を個別に追加します。loopback・メタデータへの接続、HTTP、HTTP リダイレクトは拒否します。最終 HTTPS URL を指定してください。
+5. 「Agent 設定」で共通指示と上限を保存します。変更は次の会話実行開始時に反映され、サービス再起動は不要です。実行中は現在のモデル・上限を維持します。MCP の接続テストは応答終了後に行います。
 
-```sh
-sudo -u agent-control sh -c 'umask 077; cat > /srv/agent-data/control/secrets/model-key'
-# API キーを入力し、Ctrl-D で保存します。
-sudoedit /etc/agent/config.yaml
-sudo systemctl restart agent.service
-```
+設定の保存先は `/srv/agent-data/control/settings-v1.json`（所有者のみ読み書き可）です。初回だけ `/etc/agent/config.yaml` のモデル・MCP・指示・上限を取り込み、以後は Web 設定を使用します。既存の設定・資格情報ファイルは削除しません。待受・Origin・ディスク設定は引き続き管理者が `config.yaml` で設定し、サービスを再起動します。
 
-モデルを変更するときは、実行中の会話を停止し、`model.id` を編集してサービスを再起動します。再読み込み後、同じ会話に追記するか「再開」で新しいモデルを使います。API キーを変更する場合も再起動が必要です。
+秘密値は再表示しません。キーの変更は新しい値を入力して保存し、削除は「API キーを削除 → 保存」または「認証情報を解除」で行います。OAuth の解除はこの Agent 内の保存情報を削除します。サービス側の認可も取り消す場合は、接続先の管理画面で操作してください。
 
-CLI・ライブラリは必要なものだけゲストへ導入します。MCP は設定例の `mcp` に stdio サーバーの絶対パスと引数を指定し、サービスを再起動してください。
-作業側の HOME は `/srv/agent-data/work/home` です。ここへ登録した CLI・MCP の資格情報は Agent が利用できます。
-保護する会社・VPN の公開 IP は、管理者が `/etc/agent/protected-cidrs.nft` に追加してください。
+CLI・ライブラリ・stdio サーバーは必要なものだけゲストへ導入します。作業側の HOME は `/srv/agent-data/work/home` です。stdio の環境変数や作業側へ渡した CLI 資格情報は、同じ UID の Shell からも利用され得ます。保護する会社・VPN の公開 IP は、管理者が `/etc/agent/protected-cidrs.nft` に追加してください。
 
 ## 操作
 
@@ -84,11 +81,11 @@ ssh -p 2222 -i /path/to/private-key agent-admin@127.0.0.1 sudo shutdown -h now
 QEMU の終了後、VM ディレクトリ全体を保護された場所へコピーします。復元先には未使用のディレクトリを使ってください。
 
 更新時は `sudo systemctl stop agent.service` で停止し、既存の `/opt/agent`・`/opt/agent-node`・`/etc/agent` を管理者が退避してから再配備します。
-会話の保存先は `control/conversations-v1.sqlite` と `work/conversations/` です。旧 `state.sqlite`・`work/jobs/` は削除・変換しないでください。
+設定・資格情報の `control/settings-v1.json`、会話の `control/conversations-v1.sqlite`、作業ファイルの `work/conversations/` を保護してください。旧 `state.sqlite`・`work/jobs/` は削除・変換しないでください。
 
 ## 開発・検証
 
-Node.js 26.13.0、Git、Python 3 を用意します。
+Node.js 26.13.0、Git、Python 3、OpenSSL を用意します。
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund

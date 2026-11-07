@@ -1,3 +1,4 @@
+import { mcpToolName } from "../src/tools.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -198,19 +199,22 @@ test("restart preserves Pi history and work files, leaves legacy DB untouched, a
 });
 
 test("configured stdio MCP tool is listed and called using the real official client and server", async () => {
-  const f = await fixture(
-    [call("mcp_0_0", { name: "Pi" }), answer("挨拶しました")],
-    {
-      mcp: [
-        {
-          name: "fixture",
-          command: process.execPath,
-          args: [resolve(".test-dist/tests/mcp-server.js")],
-        },
-      ],
-    },
-  );
+  const f = await fixture([], {
+    mcp: [
+      {
+        name: "fixture",
+        command: process.execPath,
+        args: [resolve(".test-dist/tests/mcp-server.js")],
+      },
+    ],
+  });
   try {
+    f.faux.setResponses([
+      call(mcpToolName(f.service.settings.snapshot().mcp[0]!.id, "greet"), {
+        name: "Pi",
+      }),
+      answer("挨拶しました"),
+    ]);
     const { id } = await f.service.create(randomUUID(), "MCP");
     await f.service.send(id, randomUUID(), "挨拶");
     await until(
@@ -226,7 +230,7 @@ test("downloads reject traversal, absolute paths, symlinks, hardlinks, FIFO and 
   const { service, root } = await fixture();
   try {
     const { id } = await service.create(randomUUID(), "境界");
-    await service.files(id);
+    await service.upload(id, randomUUID(), "init.txt", Buffer.from("init"));
     const base = join(root, "work/conversations", id);
     await writeFile(join(base, "outputs/good.csv"), "a,b\n1,2\n");
     await symlink("/etc/passwd", join(base, "outputs/link"));
@@ -286,7 +290,7 @@ test("an opened file whose parent moved outside the expected path is refused", a
   const f = await fixture();
   try {
     const { id } = await f.service.create(randomUUID(), "FD race");
-    await f.service.files(id);
+    await f.service.upload(id, randomUUID(), "init.txt", Buffer.from("init"));
     const base = join(f.root, "work/conversations", id),
       path = join(base, "outputs/file");
     await writeFile(path, "safe");

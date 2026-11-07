@@ -1,3 +1,5 @@
+import { hash } from "./security.js";
+import type { McpConfig } from "./settings.js";
 import { defineExtension } from "@earendil-works/pi-durable";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import type { ToolInfo } from "./execution/protocol.js";
@@ -23,38 +25,37 @@ export function agentTools(service: AgentService) {
           context.abortSignal,
         );
         if (!result.result) throw new Error("Missing worker result");
-        return result.result;
+        return service.sanitize(result.result);
       },
     })),
   });
 }
+export function mcpToolName(server: string, tool: string): string {
+  return `mcp_${server.replaceAll("-", "")}_${hash(tool).slice(0, 12)}`;
+}
 export function mcpTools(
   service: AgentService,
   tools: ToolInfo[],
-  server: number,
+  server: McpConfig,
 ) {
   return defineExtension({
-    name: `mcp-${server}`,
-    tools: tools.map((tool, index) => ({
-      name: `mcp_${server}_${index}`,
-      description: `[${service.config.mcp[server]!.name}/${tool.name}] ${tool.description}`,
-      parameters: tool.parameters,
+    name: `mcp-${server.id}`,
+    tools: tools.map((tool) => ({
+      name: mcpToolName(server.id, tool.name),
+      description: service
+        .redact(`[${server.name}/${tool.name}] ${tool.description}`)
+        .slice(0, 8000),
+      parameters: service.sanitize(tool.parameters),
       replay: "unsafe" as const,
       execute: async (args, api, context) => {
         const id = await service.toolConversation(api.conversationId);
-        const result = await service.runner.call(
+        return service.callMcp(
+          server,
           id,
-          "mcp_call",
-          {
-            server: service.config.mcp[server],
-            name: tool.name,
-            args,
-            commandSeconds: service.config.limits.commandSeconds,
-          },
+          tool.name,
+          args as Record<string, unknown>,
           context.abortSignal,
         );
-        if (!result.result) throw new Error("Missing MCP result");
-        return result.result;
       },
     })),
   });

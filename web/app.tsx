@@ -1,3 +1,4 @@
+import { Settings } from "./settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -247,6 +248,9 @@ function Chat({
 }
 
 function App() {
+  const [settingsOpen, setSettingsOpen] = useState(
+    new URLSearchParams(location.search).has("settings"),
+  );
   const [ready, setReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -288,6 +292,7 @@ function App() {
     ]);
   }, []);
   function select(id: string | null) {
+    setSettingsOpen(false);
     selectedRef.current = id;
     setSelected(id);
     setView(null);
@@ -512,6 +517,15 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
+          <button
+            className="btn-text theme-secondary btn-sm"
+            onClick={() => {
+              setSettingsOpen(true);
+              setSidebar(false);
+            }}
+          >
+            設定
+          </button>
           <span id="connection" className="small fg-2" role="status">
             <span
               className={`status-dot ${connection === "接続中" ? "connected" : ""}`}
@@ -520,109 +534,122 @@ function App() {
           </span>
         </div>
       </aside>
-      <main className="workspace">
-        <header className="conversation-header">
-          <button
-            className="mobile-only btn-text theme-secondary btn-sm"
-            aria-label="会話一覧を開く"
-            aria-expanded={sidebar}
-            aria-controls="sidebar"
-            onClick={() => setSidebar(!sidebar)}
-          >
-            <Icon name="menu" />
-          </button>
-          <h1 id="title">{view?.conversation.title ?? "新しい会話"}</h1>
-          {view && (
-            <span
-              id="state"
-              className={`badge badge-subtle ${currentStatus === "running" ? "theme-primary" : "theme-secondary"}`}
-            >
-              {statuses[currentStatus!] ?? currentStatus}
-            </span>
-          )}
-          <div id="actions" className="ms-auto">
-            {(currentStatus === "running" ||
-              currentStatus === "interrupted") && (
-              <button
-                className="btn-outline theme-secondary btn-sm"
-                disabled={acting}
-                onClick={() => void action()}
-              >
-                {currentStatus === "running" ? "停止" : "再開"}
-              </button>
-            )}
-          </div>
-        </header>
-        {error && (
-          <div
-            id="error"
-            className="alert theme-danger workspace-notice"
-            role="alert"
-          >
-            {error}
+      {settingsOpen ? (
+        <Settings
+          onClose={() => {
+            setSettingsOpen(false);
+            history.replaceState(null, "", location.pathname);
+          }}
+        />
+      ) : (
+        <main className="workspace">
+          <header className="conversation-header">
             <button
-              className="btn-text theme-secondary btn-sm"
-              aria-label="エラーを閉じる"
-              onClick={() => setError("")}
+              className="mobile-only btn-text theme-secondary btn-sm"
+              aria-label="会話一覧を開く"
+              aria-expanded={sidebar}
+              aria-controls="sidebar"
+              onClick={() => setSidebar(!sidebar)}
             >
-              <Icon name="close" />
+              <Icon name="menu" />
             </button>
-          </div>
-        )}
-        {currentStatus === "interrupted" && (
-          <p id="detail" className="workspace-notice small fg-2" role="status">
-            {view?.conversation.detail}
-          </p>
-        )}
-        {files.files.length > 0 && (
-          <section
-            id="files-section"
-            className="output-files"
-            aria-label="生成ファイル"
-          >
-            <div className="output-label">
-              <Icon name="file" />
-              <span>ファイル</span>
-              <button
-                id="refresh-files"
-                className="btn-text theme-secondary btn-sm"
-                onClick={() =>
-                  selected && void refreshFiles(selected).catch(notice)
-                }
+            <h1 id="title">{view?.conversation.title ?? "新しい会話"}</h1>
+            {view && (
+              <span
+                id="state"
+                className={`badge badge-subtle ${currentStatus === "running" ? "theme-primary" : "theme-secondary"}`}
               >
-                更新
-              </button>
-            </div>
-            <div id="files">
-              {files.files.map((file) => (
-                <a
-                  key={file.path}
-                  className="output-file"
-                  href={`/api/conversations/${selected}/download?path=${encodeURIComponent(file.path)}`}
+                {statuses[currentStatus!] ?? currentStatus}
+              </span>
+            )}
+            <div id="actions" className="ms-auto">
+              {(currentStatus === "running" ||
+                currentStatus === "interrupted") && (
+                <button
+                  className="btn-outline theme-secondary btn-sm"
+                  disabled={acting}
+                  onClick={() => void action()}
                 >
-                  <Icon name="down" />
-                  <span>{file.path.slice(8)}</span>
-                  <small>{fileSize(file.size)}</small>
-                </a>
-              ))}
-              {files.truncated && (
-                <span className="small fg-2">表示上限に達しました</span>
+                  {currentStatus === "running" ? "停止" : "再開"}
+                </button>
               )}
             </div>
-          </section>
-        )}
-        <Chat
-          key={threadKey}
-          view={view}
-          entries={entries}
-          cursor={cursor}
-          sending={sending}
-          attachments={attachments}
-          setAttachments={setAttachments}
-          onSend={send}
-          onEarlier={earlier}
-        />
-      </main>
+          </header>
+          {error && (
+            <div
+              id="error"
+              className="alert theme-danger workspace-notice"
+              role="alert"
+            >
+              {error}
+              <button
+                className="btn-text theme-secondary btn-sm"
+                aria-label="エラーを閉じる"
+                onClick={() => setError("")}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+          )}
+          {currentStatus === "interrupted" && (
+            <p
+              id="detail"
+              className="workspace-notice small fg-2"
+              role="status"
+            >
+              {view?.conversation.detail}
+            </p>
+          )}
+          {files.files.length > 0 && (
+            <section
+              id="files-section"
+              className="output-files"
+              aria-label="生成ファイル"
+            >
+              <div className="output-label">
+                <Icon name="file" />
+                <span>ファイル</span>
+                <button
+                  id="refresh-files"
+                  className="btn-text theme-secondary btn-sm"
+                  onClick={() =>
+                    selected && void refreshFiles(selected).catch(notice)
+                  }
+                >
+                  更新
+                </button>
+              </div>
+              <div id="files">
+                {files.files.map((file) => (
+                  <a
+                    key={file.path}
+                    className="output-file"
+                    href={`/api/conversations/${selected}/download?path=${encodeURIComponent(file.path)}`}
+                  >
+                    <Icon name="down" />
+                    <span>{file.path.slice(8)}</span>
+                    <small>{fileSize(file.size)}</small>
+                  </a>
+                ))}
+                {files.truncated && (
+                  <span className="small fg-2">表示上限に達しました</span>
+                )}
+              </div>
+            </section>
+          )}
+          <Chat
+            key={threadKey}
+            view={view}
+            entries={entries}
+            cursor={cursor}
+            sending={sending}
+            attachments={attachments}
+            setAttachments={setAttachments}
+            onSend={send}
+            onEarlier={earlier}
+          />
+        </main>
+      )}
     </div>
   );
 }

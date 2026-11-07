@@ -127,6 +127,62 @@ export async function createServer(
     }
     return { csrf: sessions.get(token)!.csrf };
   });
+  app.get("/api/settings", async () => service.management());
+  app.put("/api/settings", async (request) =>
+    service.saveSettings(request.body),
+  );
+  app.post("/api/settings/models/:id/test", async (request) => {
+    const { id } = identifier.parse(request.params);
+    z.object({ confirmPaid: z.literal(true) })
+      .strict()
+      .parse(request.body);
+    return service.testModel(id);
+  });
+  app.post("/api/settings/mcp/:id/test", async (request) => {
+    const { id } = identifier.parse(request.params);
+    z.object({}).strict().parse(request.body);
+    return service.testMcp(id);
+  });
+  app.post("/api/settings/mcp/:id/disconnect", async (request) => {
+    const { id } = identifier.parse(request.params);
+    z.object({}).strict().parse(request.body);
+    return service.disconnectMcp(id);
+  });
+  app.post("/api/settings/mcp/:id/oauth", async (request, reply) => {
+    const { id } = identifier.parse(request.params);
+    z.object({}).strict().parse(request.body);
+    const binding = randomBytes(32).toString("hex");
+    const url = await service.remote.begin(
+      service.mcpServer(id),
+      request.headers.origin!,
+      binding,
+    );
+    // Only this short-lived callback cookie is Lax. The API session stays Strict.
+    reply.setCookie("agent_oauth", binding, {
+      path: "/oauth/callback",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: request.protocol === "https",
+      maxAge: 600,
+    });
+    return { url };
+  });
+  app.get("/oauth/callback", async (request, reply) => {
+    const query = z
+      .object({
+        state: z.string().regex(/^[a-f0-9]{64}$/),
+        code: z.string().min(1).max(4096),
+      })
+      .parse(request.query);
+    await service.remote.finish(
+      query.state,
+      query.code,
+      request.cookies.agent_oauth ?? "",
+      request.headers.host ?? "",
+    );
+    reply.clearCookie("agent_oauth", { path: "/oauth/callback" });
+    return reply.redirect("/?settings=mcp&authorized=1");
+  });
   const safe = (value: unknown): unknown => {
     if (typeof value === "string") return service.redact(value);
     if (Array.isArray(value)) return value.map(safe);

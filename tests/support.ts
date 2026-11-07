@@ -75,7 +75,10 @@ export async function fixture(
     instructions: "",
     limits: { ...DEFAULT_LIMITS, commandSeconds: 10 },
   };
-  const faux = fauxProvider({ tokensPerSecond: Infinity });
+  const faux = fauxProvider({
+    tokensPerSecond: Infinity,
+    models: [{ id: "faux-1" }, { id: "gpt-4.1" }],
+  });
   faux.setResponses(responses);
   const runner = options.runner ?? new TestRunner(join(root, "work"));
   const service = await AgentService.open(config, {

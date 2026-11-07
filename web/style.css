@@ -655,3 +655,76 @@ button {
     animation: none;
   }
 }
+
+.settings-page {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  flex: 1;
+  background: var(--bs-bg-body);
+}
+.settings-tabs,
+.settings-footer {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 1rem;
+  border-bottom: 1px solid var(--bs-border-color);
+}
+.settings-footer {
+  border-top: 1px solid var(--bs-border-color);
+  border-bottom: 0;
+}
+.settings-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1rem;
+}
+.settings-fields {
+  border: 0;
+  padding: 0;
+  margin: 0 auto;
+  max-width: 48rem;
+  min-width: 0;
+}
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.settings-card legend {
+  float: none;
+  width: auto;
+  font-size: 1rem;
+  padding: 0 0.3rem;
+}
+.settings-card .form-label {
+  display: block;
+  margin: 0;
+}
+.settings-card .form-control,
+.settings-card .form-select {
+  margin-top: 0.3rem;
+}
+.settings-card p {
+  margin: 0;
+}
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}

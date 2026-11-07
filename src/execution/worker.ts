@@ -28,6 +28,7 @@ const mcpServer = z
     name: z.string().min(1).max(100),
     command: z.string().startsWith("/"),
     args: z.array(z.string()).max(100),
+    env: z.record(z.string(), z.string()).default({}),
   })
   .strict();
 export async function assertFileDescriptorPath(
@@ -165,7 +166,9 @@ export class Worker {
         await walk(`${name}/${item}`, depth + 1).catch(() => {});
       }
     };
-    await walk("outputs", 0);
+    await walk("outputs", 0).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
     return { files, truncated };
   }
   async cleanup(): Promise<boolean> {
@@ -328,7 +331,7 @@ export class Worker {
     const transport = new StdioClientTransport({
       command: server.command,
       args: server.args,
-      env: this.env(),
+      env: { ...this.env(), ...server.env },
       stderr: "ignore",
       cwd: this.workspace(id),
       maxBufferSize: 1024 * 1024,
@@ -418,7 +421,12 @@ export class Worker {
     if (op === "download") {
       if (!name.startsWith("outputs/"))
         throw new Error("Only outputs are downloadable");
-      return { data: (await this.bytes(id, name)).toString("base64") };
+      try {
+        return { data: (await this.bytes(id, name)).toString("base64") };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+        throw error;
+      }
     }
     if (op === "upload") {
       if (!name.startsWith("attachments/")) throw new Error("Attachments only");

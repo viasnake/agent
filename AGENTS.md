@@ -41,6 +41,12 @@ generated output or live provider responses.
 - src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
   official MCP client and bounded attachment/output transfers.
 - src/provider.ts: model dispatch limit and active-conversation binding.
+- src/settings.ts: atomic mode-0600 control-owned settings, private credentials
+  and secret-free projections. Import config.yaml only when settings-v1.json is
+  absent; preserve the source and old credential files. Web-managed fields have
+  one source of truth thereafter. Server/disk settings remain in config.yaml.
+- src/mcp.ts and src/remote-http.ts: official Streamable HTTP/OAuth client and
+  bounded HTTPS fetch with DNS address pinning. No custom MCP protocol.
 - src/server.ts and web/: local browser sessions, conversation projections and SSE.
   Pi remains the only conversation/execution owner; the React UI adapts the
   existing API without client-side tool execution or cloud persistence. Bundle
@@ -73,8 +79,25 @@ Retain systemd control-group cleanup and bounded tool duration/output.
 Explicitly configured work-side CLI/MCP credentials delegate their authority to
 the agent. Do not claim prompt restrictions or UI approval completely constrain
 a freely callable authenticated shell. Do not infer credentials, billing,
-company access or disclosure permission. Use stdio MCP with the existing official
-client; no discovery service, custom MCP protocol or global connector framework.
+company access or disclosure permission. stdio MCP uses the work UID and only
+explicitly supplied environment values. Remote MCP and OAuth credentials stay
+on the control side; never pass them to the worker. Use the official MCP SDK
+for transport, discovery, PKCE, registration and refresh. Keep login state
+single-use, expiring and bound to a callback cookie and exact configured Host.
+Only the OAuth callback cookie may use SameSite=Lax; API sessions stay Strict.
+Reject HTTP and redirects, resolve every connection and pin the checked address.
+Reject loopback, link-local, metadata and special addresses even with a grant.
+Private/company networks require an explicit exact-host grant; also consult
+/etc/agent/protected-cidrs.nft. Missing network policy fails closed.
+
+Apply settings at the next idle execution admission. Do not mutate a running
+provider, tools or budgets. Install/uninstall server extensions using the Pi
+Registry; isolate each connection failure and never replay an ambiguous tool
+mutation. Connection tests cannot run worker cleanup during an active tool.
+OAuth rotation uses atomic private writes; stale edits/callbacks must not restore
+revoked credentials. GET, tool results and errors must not disclose secrets.
+A model connection test requires an explicit paid-inference confirmation.
+Uninitialized output listings are empty and must not initialize work or MCP.
 
 Keep downloads within outputs/: reject absolute paths, traversal, symlinks,
 nonregular files, hardlinks, oversized files and path replacement during reads.
@@ -104,7 +127,7 @@ npx playwright install chromium
 npm run verify
 ```
 
-Linux needs Git, Python 3 and Chromium system libraries. Build never installs
+Linux needs Git, Python 3, OpenSSL and Chromium system libraries. Build never installs
 dependencies. verify includes format, types, build, Python unit tests, actual
 Pi/SQLite/file/process/HTTP/MCP tests, browser E2E and entry-point help. The faux
 provider avoids paid inference. Playwright is a test dependency, not an application

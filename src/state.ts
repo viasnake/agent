@@ -8,6 +8,7 @@ export type Conversation = {
   status: "idle" | "running" | "stopping" | "interrupted";
   detail: string;
   updatedAt: number;
+  workspaceCreated?: boolean;
   requests: number;
   deadlineAt: number | null;
 };

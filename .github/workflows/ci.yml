@@ -20,7 +20,7 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - name: Install test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y git python3
+        run: sudo apt-get update && sudo apt-get install -y git python3 openssl
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Install test browser
