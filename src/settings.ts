@@ -45,6 +45,10 @@ export const mcpInput = z
     env: z
       .record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), secret)
       .optional(),
+    envKeep: z
+      .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/))
+      .max(100)
+      .optional(),
     url: z.string().max(2000).default(""),
     // Explicit host grants apply to private addresses, never loopback or metadata.
     privateHosts: z
@@ -73,10 +77,19 @@ export const mcpInput = z
     } else {
       try {
         const u = new URL(s.url);
-        if (u.protocol !== "https:" || u.username || u.password || u.hash)
+        if (
+          !["https:", "http:"].includes(u.protocol) ||
+          (u.protocol === "http:" && s.auth !== "none") ||
+          u.username ||
+          u.password ||
+          u.hash
+        )
           throw new Error();
       } catch {
-        ctx.addIssue({ code: "custom", message: "HTTPS URL required" });
+        ctx.addIssue({
+          code: "custom",
+          message: "HTTP(S) URL required; authentication requires HTTPS",
+        });
       }
     }
   });
@@ -309,7 +322,7 @@ export class SettingsStore {
               old && same && key === old.key ? old.authVersion : randomUUID(),
           };
         }),
-        mcp: parsed.mcp.map((m) => {
+        mcp: parsed.mcp.map(({ envKeep, ...m }) => {
           const old = this.value.mcp.find((v) => v.id === m.id);
           const sameTarget =
             old?.transport === m.transport &&
@@ -317,7 +330,20 @@ export class SettingsStore {
             old?.command === m.command;
           const merged = {
             ...m,
-            env: m.env ?? (sameTarget ? old?.env : undefined),
+            env:
+              envKeep !== undefined
+                ? {
+                    ...Object.fromEntries(
+                      envKeep
+                        .filter(
+                          (key) =>
+                            sameTarget && Object.hasOwn(old?.env ?? {}, key),
+                        )
+                        .map((key) => [key, old!.env![key]!]),
+                    ),
+                    ...m.env,
+                  }
+                : (m.env ?? (sameTarget ? old?.env : undefined)),
             bearer: m.bearer ?? (sameTarget ? old?.bearer : undefined),
             clientSecret:
               m.clientSecret ??

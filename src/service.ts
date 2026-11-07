@@ -66,6 +66,7 @@ export class AgentService {
     authContext: { env: async () => undefined, fileExists: async () => false },
   });
   private appliedRevision = -1;
+  private appliedModelConfigId?: string;
   private appliedMcp: McpConfig[] = [];
   private mcpExtensions: ReturnType<typeof mcpTools>[] = [];
   private mcpStatuses = new Map<string, McpStatus>();
@@ -214,9 +215,34 @@ export class AgentService {
     if (!server) throw new AppError(404, "MCP がありません");
     return server;
   }
-  private async applySettings() {
+  modelOptions() {
     const s = this.settings.snapshot();
-    if (this.appliedRevision === s.revision) {
+    return {
+      catalog: openaiProvider()
+        .getModels()
+        .map((m) => m.id),
+      models: s.models.map((m) => ({
+        id: m.id,
+        name: m.model,
+        available: !!modelCredential(m),
+      })),
+      initialModel: s.defaultModel ?? s.models[0]?.id ?? null,
+    };
+  }
+  private async applySettings(selected?: string) {
+    const s = this.settings.snapshot();
+    const model = s.models.find(
+      (m) => m.id === (selected ?? s.defaultModel ?? s.models[0]?.id),
+    );
+    if (selected && !model)
+      throw new AppError(
+        409,
+        "選択したモデルがありません。会話のモデルを選び直してください",
+      );
+    if (
+      this.appliedRevision === s.revision &&
+      this.appliedModelConfigId === model?.id
+    ) {
       this.appliedMcp = s.mcp;
       return;
     }
@@ -225,7 +251,6 @@ export class AgentService {
     );
     this.config.instructions = s.instructions;
     Object.assign(this.config.limits, s.limits);
-    const model = s.models.find((m) => m.id === s.defaultModel);
     this.modelId = model?.model ?? this.options.modelId ?? null;
     this.providerId = this.options.provider?.id ?? "openai";
     this.models.deleteProvider(this.providerId);
@@ -244,6 +269,7 @@ export class AgentService {
     }
     this.appliedMcp = s.mcp;
     this.appliedRevision = s.revision;
+    this.appliedModelConfigId = model?.id;
   }
   private stdio(server: McpConfig) {
     return {
@@ -483,10 +509,14 @@ export class AgentService {
     if (!pi) throw new AppError(503, "保存された会話がありません");
     return pi;
   }
-  async create(requestId: string, title: string): Promise<{ id: string }> {
+  async create(
+    requestId: string,
+    title: string,
+    modelId?: string,
+  ): Promise<{ id: string }> {
     return this.exclusive(async () => {
       this.assertHealthy();
-      const digest = hash({ title });
+      const digest = hash({ title, ...(modelId ? { modelId } : {}) });
       const result = await this.harness.commit(async (tx) => {
         const state = await tx.doc(ConversationsDoc),
           previous = state.receipts[requestId];
@@ -495,6 +525,11 @@ export class AgentService {
             throw new AppError(409, "requestId の内容が一致しません");
           return { id: previous.id };
         }
+        if (
+          modelId &&
+          !this.settings.snapshot().models.some((m) => m.id === modelId)
+        )
+          throw new AppError(400, "モデルを選び直してください");
         if (
           state.conversations.length >= 1000 ||
           Object.keys(state.receipts).length >= 10000
@@ -512,6 +547,9 @@ export class AgentService {
           detail: "",
           updatedAt: Date.now(),
           workspaceCreated: false,
+          ...(modelId || this.modelOptions().initialModel
+            ? { modelConfigId: modelId ?? this.modelOptions().initialModel! }
+            : {}),
           requests: 0,
           deadlineAt: null,
         });
@@ -520,6 +558,28 @@ export class AgentService {
       }, ctx);
       this.notify();
       return result;
+    });
+  }
+  async selectModel(id: string, modelId: string) {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      const conversation = await this.conversation(id);
+      if (
+        conversation.status === "running" ||
+        conversation.status === "stopping"
+      )
+        throw new AppError(409, "応答が終わってからモデルを変更してください");
+      if (!this.settings.snapshot().models.some((m) => m.id === modelId))
+        throw new AppError(400, "モデルを選び直してください");
+      await this.harness.commit(async (tx) => {
+        const record = (await tx.doc(ConversationsDoc)).conversations.find(
+          (c) => c.id === id,
+        )!;
+        record.modelConfigId = modelId;
+        record.updatedAt = Date.now();
+      }, ctx);
+      this.notify();
+      return this.view(id);
     });
   }
   private async workspace(id: string): Promise<void> {
@@ -568,11 +628,11 @@ export class AgentService {
         throw new AppError(409, "別の会話が実行中です（busy）");
       if (conversation.status === "stopping")
         throw new AppError(409, "停止を確認しています");
-      if (!this.active) await this.applySettings();
+      if (!this.active) await this.applySettings(conversation.modelConfigId);
       if (!this.readyModel || !this.modelId)
         throw new AppError(
           409,
-          "設定画面でモデルと API キーを登録してください。会話は保存されています",
+          "設定画面でモデルの認証を完了してください。会話は保存されています",
         );
       const starting = !this.active;
       if (starting) {
@@ -617,6 +677,8 @@ export class AgentService {
           record.detail = "";
           record.updatedAt = Date.now();
           if (starting) {
+            if (this.appliedModelConfigId)
+              record.modelConfigId = this.appliedModelConfigId;
             record.requests = 0;
             record.deadlineAt =
               Date.now() + this.config.limits.runSeconds * 1000;
@@ -875,7 +937,14 @@ export class AgentService {
       conversation,
       transcript,
       cursor: entries.next ?? null,
-      modelConfigured: this.readyModel,
+      modelConfigured:
+        !!this.options.provider ||
+        this.modelOptions().models.some(
+          (m) =>
+            m.id ===
+              (conversation.modelConfigId ??
+                this.modelOptions().initialModel) && m.available,
+        ),
       pendingInputs:
         inbox?.items.filter((item) => "content" in item).length ?? 0,
       progress: {

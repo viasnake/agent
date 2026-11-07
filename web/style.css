@@ -734,3 +734,198 @@ button {
     --bs-control-select-bg: var(--bs-control-select-bg-dark);
   }
 }
+
+.environment-fields {
+  display: grid;
+  gap: 0.5rem;
+}
+.environment-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* Keep model choice beside the prompt; large catalogs get a bounded search surface. */
+.model-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  min-width: 0;
+}
+.model-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-trigger > svg:last-child {
+  margin-left: auto;
+  width: 16px;
+}
+.composer-toolbar .model-trigger {
+  max-width: min(48vw, 280px);
+}
+.model-dialog {
+  padding: 0;
+  width: min(480px, calc(100vw - 32px));
+  max-height: min(640px, calc(100dvh - 48px));
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 18px;
+  color: var(--bs-fg-body);
+  background: var(--bs-bg-body);
+  box-shadow: var(--bs-box-shadow-lg);
+  overflow: hidden;
+}
+.model-dialog::backdrop {
+  background: rgb(0 0 0 / 40%);
+}
+.model-dialog-body {
+  display: flex;
+  flex-direction: column;
+  max-height: min(638px, calc(100dvh - 50px));
+}
+.model-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 20px 12px;
+}
+.model-dialog-header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+.model-search {
+  margin: 0 20px 12px;
+  width: calc(100% - 40px);
+  flex-shrink: 0;
+}
+.model-list {
+  padding: 0 10px 12px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.model-group {
+  padding: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--bs-fg-2);
+}
+.model-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  margin: 2px 0;
+  border: 0;
+  border-radius: 10px;
+  text-align: left;
+  background: transparent;
+  color: var(--bs-fg-body);
+}
+.model-option:hover,
+.model-option:focus-visible {
+  background: var(--bs-bg-2);
+}
+.model-option[aria-pressed="true"] {
+  background: var(--bs-primary-bg-subtle);
+  color: var(--bs-primary-fg-emphasis);
+}
+.model-option-icon {
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 10px;
+}
+.model-option-name {
+  flex: 1;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  font-weight: 550;
+}
+.model-option-name small {
+  display: block;
+  color: var(--bs-fg-2);
+  font-size: 11px;
+  font-weight: 400;
+  margin-top: 4px;
+}
+.model-empty {
+  padding: 32px 12px;
+  text-align: center;
+  color: var(--bs-fg-2);
+}
+.model-dialog-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--bs-border-muted);
+}
+.model-dialog-footer button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.history-loading {
+  padding: 32px 0;
+  color: var(--bs-fg-2);
+}
+.chat-empty {
+  justify-content: center;
+}
+.chat-empty .thread-viewport {
+  flex: 0 1 auto;
+}
+.chat-empty .thread-content {
+  min-height: 0;
+  padding-bottom: 12px;
+}
+.chat-empty .empty-thread {
+  min-height: 0;
+  padding: 24px 0;
+}
+.chat-empty .composer-dock {
+  margin: 0 auto 12vh;
+}
+.composer-toolbar {
+  gap: 6px;
+}
+.composer-toolbar #send {
+  flex-shrink: 0;
+}
+#input-status:empty {
+  display: none;
+}
+@media (max-width: 767px) {
+  .model-search {
+    font-size: 16px;
+  }
+  .model-dialog {
+    width: calc(100vw - 24px);
+  }
+  .composer-toolbar .model-trigger {
+    max-width: 45vw;
+  }
+  #input-status {
+    position: absolute;
+    bottom: 100%;
+    right: 16px;
+  }
+}
+.assistant-message + .assistant-message {
+  margin-top: -16px;
+}
+.assistant-message + .assistant-message > .message-label {
+  display: none;
+}
+.tool-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-state {
+  flex-shrink: 0;
+  white-space: nowrap;
+}

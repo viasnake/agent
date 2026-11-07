@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { request } from "node:https";
+import { request as httpRequest } from "node:http";
 import { BlockList, isIP } from "node:net";
 import { Readable } from "node:stream";
 import { AppError } from "./security.js";
@@ -47,9 +48,14 @@ export function allowedAddress(address: string, allowPrivate = false): boolean {
   if (privateAddresses.check(address, family)) return allowPrivate;
   return version === 4 || globalV6.check(address, "ipv6");
 }
-export function remoteUrl(value: string | URL): URL {
+export function remoteUrl(value: string | URL, allowHttp = false): URL {
   const url = new URL(value);
-  if (url.protocol !== "https:" || url.username || url.password || url.hash)
+  if (
+    (url.protocol !== "https:" && !(allowHttp && url.protocol === "http:")) ||
+    url.username ||
+    url.password ||
+    url.hash
+  )
     throw new AppError(
       400,
       "MCP・認証の接続先には資格情報を含まない HTTPS URL が必要です",
@@ -87,7 +93,7 @@ export async function resolveRemote(
   )
     throw new AppError(
       403,
-      "MCP・認証の接続先アドレスが許可されていません。社内・VPN のホストは明示的な許可が必要です",
+      "接続先アドレスが許可されていません。登録した MCP 以外の内部接続先やメタデータには接続できません",
     );
   return addresses[0]!;
 }
@@ -119,11 +125,17 @@ export function remoteFetch(
   dependencies: {
     resolve?: typeof validateRemote;
     request?: typeof request;
+    httpOrigin?: string;
   } = {},
 ): typeof fetch {
   return async (input, init) => {
     const source = input instanceof Request ? input : undefined;
-    const url = remoteUrl(source?.url ?? String(input));
+    const url = remoteUrl(
+      source?.url ?? String(input),
+      !!dependencies.httpOrigin,
+    );
+    if (url.protocol === "http:" && url.origin !== dependencies.httpOrigin)
+      throw new AppError(403, "登録した接続先以外には HTTP 接続できません");
     const signal = AbortSignal.any([
       init?.signal ?? source?.signal ?? new AbortController().signal,
       AbortSignal.timeout(30000),
@@ -140,6 +152,11 @@ export function remoteFetch(
     );
     signal.throwIfAborted();
     const headers = new Headers(init?.headers ?? source?.headers);
+    if (
+      url.protocol === "http:" &&
+      (headers.has("authorization") || headers.has("cookie"))
+    )
+      throw new AppError(400, "認証を使う接続には HTTPS を指定してください");
     if (headers.has("host"))
       throw new AppError(400, "Host の上書きはできません");
     const method = init?.method ?? source?.method ?? "GET";
@@ -154,7 +171,10 @@ export function remoteFetch(
     )
       throw new Error("Unsupported HTTP body");
     return new Promise<Response>((resolve, reject) => {
-      const req = (dependencies.request ?? request)(
+      const req = (
+        dependencies.request ??
+        (url.protocol === "http:" ? httpRequest : request)
+      )(
         url,
         {
           method,

@@ -128,6 +128,16 @@ export function MarkdownText({ text }: Pick<TextMessagePartProps, "text">) {
   );
 }
 
+export function toolLabel(name: string): string {
+  const labels: Record<string, string> = {
+    read: "ファイルを読む",
+    write: "ファイルを保存",
+    edit: "ファイルを編集",
+    bash: "コマンドを実行",
+  };
+  return labels[name] ?? (name.startsWith("mcp_") ? "MCP ツール" : name);
+}
+
 function ToolResult({
   toolName,
   argsText,
@@ -139,7 +149,7 @@ function ToolResult({
     <details className={`tool-card ${isError ? "tool-error" : ""}`}>
       <summary>
         <Icon name="terminal" />
-        <span>{toolName}</span>
+        <span className="tool-name">{toolLabel(toolName)}</span>
         <span className="tool-state">
           {isError
             ? "失敗"
@@ -150,7 +160,10 @@ function ToolResult({
               : "実行結果"}
         </span>
       </summary>
-      {argsText && <pre>{argsText}</pre>}
+      <pre>
+        {toolName}
+        {argsText ? `\n${argsText}` : ""}
+      </pre>
       {result !== undefined && (
         <pre>
           {typeof result === "string"

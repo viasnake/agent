@@ -1,4 +1,6 @@
 const paths = {
+  chevron: "m7 10 5 5 5-5",
+  check: "m5 12 4 4L19 6",
   agent: "M12 3v3M8 3h8M5 8h14v12H5zM8 12h.01M16 12h.01M9 16h6M2 12v4M22 12v4",
   plus: "M12 5v14M5 12h14",
   menu: "M4 6h16M4 12h16M4 18h16",

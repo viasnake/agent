@@ -100,17 +100,37 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page
       .getByRole("button", { name: "モデルを追加", exact: true })
       .click();
-    await page.getByLabel("モデル ID", { exact: true }).fill("gpt-4.1");
+    await page
+      .getByRole("button", { name: "設定するモデル", exact: true })
+      .click();
+    await page.getByRole("searchbox", { name: "モデルを検索" }).fill("gpt-4.1");
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "gpt-4.1", exact: true })
+      .click();
     await page
       .getByLabel("API キー", { exact: true })
       .fill("browser-dummy-key");
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .getByText("保存しました。次の実行開始時に反映します。")
-      .waitFor();
+    await page.getByText("保存しました。").waitFor();
     assert.equal(
       await page.getByLabel("API キー", { exact: true }).inputValue(),
-      "",
+      "••••••••",
+    );
+    await page.getByLabel("API キー", { exact: true }).fill("");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByText("API キー未登録", { exact: true }).waitFor();
+    assert.equal(f.service.management().models.length, 1);
+    assert.equal(f.service.management().models[0]!.hasKey, false);
+    assert.equal(
+      await page.getByText("既定のモデル", { exact: true }).count(),
+      0,
+    );
+    assert.equal(
+      await page
+        .getByRole("button", { name: "API キーを削除", exact: true })
+        .count(),
+      0,
     );
     await page.getByLabel("認証方式", { exact: true }).selectOption("oauth");
     await page.getByRole("button", { name: "保存", exact: true }).click();
@@ -163,21 +183,38 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .getByLabel("API キー", { exact: true })
       .fill("browser-replaced-key");
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .getByText("保存しました。次の実行開始時に反映します。")
-      .waitFor();
+    await page.getByText("保存しました。").waitFor();
     await page.emulateMedia({ colorScheme: "light" });
     await page.setViewportSize({ width: 1280, height: 900 });
+    await page
+      .getByRole("button", { name: "モデルを追加", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "設定するモデル", exact: true })
+      .last()
+      .click();
+    const search = page.getByRole("searchbox", { name: "モデルを検索" });
+    await search.fill("no-matching-model");
+    await page.getByText("一致するモデルがありません").waitFor();
+    await search.fill("gpt-4.1-mini");
+    await page.screenshot({ path: "test-results/model-picker-light.png" });
+    await search.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await page
+      .getByLabel("API キー", { exact: true })
+      .last()
+      .fill("second-dummy-key");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByText("保存しました。").waitFor();
     await page.getByRole("button", { name: "MCP", exact: true }).click();
     await page.getByRole("button", { name: "MCP を追加", exact: true }).click();
     await page.getByLabel("接続方式", { exact: true }).selectOption("http");
     await assertDropdowns(page);
     assert.equal(
       await page
-        .locator("details")
-        .filter({ has: page.getByText("詳細設定", { exact: true }) })
-        .getAttribute("open"),
-      null,
+        .getByText("社内・VPN 接続を許可するホスト", { exact: false })
+        .count(),
+      0,
     );
     await page.screenshot({
       path: "test-results/mcp-dropdown-light.png",
@@ -200,20 +237,46 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.getByLabel("接続方式", { exact: true }).selectOption("stdio");
     await page.getByLabel("名前", { exact: true }).fill("Fixture");
-    await page.getByLabel("コマンド（絶対パス）").fill(process.execPath);
+    await page.getByLabel("コマンド").fill(process.execPath);
     await page
-      .getByLabel("引数（1行に1つ）")
+      .getByLabel("引数")
       .fill(resolve(".test-dist/tests/mcp-server.js"));
     await page
-      .getByLabel("環境変数（JSON・全置換）")
-      .fill('{"FIXTURE_KEY":"browser-stdio-secret"}');
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+      .getByRole("button", { name: "環境変数を追加", exact: true })
+      .click();
+    await page.getByLabel("環境変数名 1", { exact: true }).fill("FIXTURE_KEY");
     await page
-      .getByText("保存しました。次の実行開始時に反映します。")
-      .waitFor();
-    await page.getByRole("button", { name: "接続テスト", exact: true }).click();
+      .getByLabel("環境変数の値 1", { exact: true })
+      .fill("browser-stdio-secret");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByText("保存しました。").waitFor();
+    assert.equal(await page.locator("legend").last().textContent(), "Fixture");
+    assert.equal(
+      await page.getByLabel("環境変数の値 1", { exact: true }).inputValue(),
+      "••••••••",
+    );
+    await page
+      .getByRole("button", { name: "環境変数を追加", exact: true })
+      .click();
+    await page.getByLabel("環境変数名 2", { exact: true }).fill("EXTRA");
+    await page
+      .getByLabel("環境変数の値 2", { exact: true })
+      .fill("extra-value");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByText("保存しました。", { exact: true }).waitFor();
+    assert.equal(
+      f.service.settings.snapshot().mcp[0]!.env!.FIXTURE_KEY,
+      "browser-stdio-secret",
+    );
+    await page
+      .getByRole("button", { name: "環境変数 2 を削除", exact: true })
+      .click();
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByText("保存しました。", { exact: true }).waitFor();
+    assert.equal(f.service.settings.snapshot().mcp[0]!.env!.EXTRA, undefined);
+    await page.getByRole("button", { name: "テスト", exact: true }).click();
     await page.getByText("接続済み", { exact: true }).waitFor();
-    await page.getByText("公開ツール（1）").click();
+    await page.getByText("ツール（1）").click();
     await page.getByText("greet", { exact: true }).waitFor();
     await page.getByRole("button", { name: "Agent 設定", exact: true }).click();
     await page
@@ -221,9 +284,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .fill("Keep replies short.");
     await page.getByLabel("モデル呼び出し上限").fill("5");
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .getByText("保存しました。次の実行開始時に反映します。")
-      .waitFor();
+    await page.getByText("保存しました。").waitFor();
     await mkdir("test-results", { recursive: true });
     await page.screenshot({ path: "test-results/settings-light.png" });
     await page.emulateMedia({ colorScheme: "dark" });
@@ -243,12 +304,54 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       answer("完了しました"),
     ]);
     await page.getByRole("button", { name: "会話に戻る", exact: true }).click();
+    await page
+      .getByRole("button", { name: "会話のモデル", exact: true })
+      .click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "gpt-4.1", exact: true })
+      .click();
     await page.locator("#message").fill("MCP とファイルを使って");
     await page.locator("#send").click();
     await until(async () => (await f.service.list())[0]?.status === "idle");
     await page.getByText("完了しました", { exact: true }).waitFor();
+    const picker = page.getByRole("button", {
+      name: "会話のモデル",
+      exact: true,
+    });
+    await picker.click();
+    await page.screenshot({
+      path: "test-results/model-picker-mobile-dark.png",
+    });
+    await page.keyboard.press("Escape");
+    assert.equal(
+      await picker.evaluate((el) => el === document.activeElement),
+      true,
+    );
+    await picker.click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "gpt-4.1-mini", exact: true })
+      .click();
+    await until(
+      async () =>
+        (await f.service.list())[0]?.modelConfigId ===
+        f.service.management().models[1]!.id,
+    );
+    await page.screenshot({
+      path: "test-results/conversation-model-mobile-dark.png",
+    });
+
     await page.reload();
     await page.locator("#app").waitFor();
+    await page.getByRole("button", { name: "会話一覧を開く" }).click();
+    await page.locator(".conversation-item").first().click();
+    await page
+      .getByRole("button", { name: "会話のモデル", exact: true })
+      .filter({ hasText: "gpt-4.1-mini" })
+      .waitFor();
+    await page.getByText("完了しました", { exact: true }).waitFor();
+
     assert.equal(f.service.management().instructions, "Keep replies short.");
     assert.equal(f.service.management().pending, false);
     assert.deepEqual(errors, []);

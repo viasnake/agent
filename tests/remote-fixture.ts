@@ -188,6 +188,7 @@ export async function remoteFixture() {
   };
   return {
     origin,
+    local,
     options,
     fetch: fetcher,
     counts: () => ({ refreshes, calls, authorizations }),

@@ -49,7 +49,7 @@ generated output or live provider responses.
   absent; preserve the source and old credential files. Web-managed fields have
   one source of truth thereafter. Server/disk settings remain in config.yaml.
 - src/mcp.ts and src/remote-http.ts: official Streamable HTTP/OAuth client and
-  bounded HTTPS fetch with DNS address pinning. No custom MCP protocol.
+  bounded HTTP(S) fetch with DNS address pinning. No custom MCP protocol.
 - src/server.ts and web/: local browser sessions, conversation projections and SSE.
   Pi remains the only conversation/execution owner; the React UI adapts the
   existing API without client-side tool execution or cloud persistence. Bundle
@@ -88,17 +88,30 @@ on the control side; never pass them to the worker. Use the official MCP SDK
 for transport, discovery, PKCE, registration and refresh. Keep login state
 single-use, expiring and bound to a callback cookie and exact configured Host.
 Only the OAuth callback cookie may use SameSite=Lax; API sessions stay Strict.
-Reject HTTP and redirects, resolve every connection and pin the checked address.
+Allow unauthenticated HTTP only to the exact registered origin; credentials and
+OAuth require HTTPS. Reject redirects, resolve every connection and pin the checked address.
 Reject loopback, link-local, metadata and special addresses even with a grant.
-Private/company networks require an explicit exact-host grant; also consult
-/etc/agent/protected-cidrs.nft. Missing network policy fails closed.
+Registering an MCP URL grants that exact host access to private/company networks;
+discovered internal hosts do not inherit this permission. Preserve existing grants
+without exposing a separate host-list editor. Consult /etc/agent/protected-cidrs.nft;
+missing network policy fails closed.
 
+Store the selected model configuration ID in each conversation through Pi Documents.
+Only idle/interrupted conversations can change it; never silently replace a deleted
+selection with another model. Keep legacy defaultModel only as the initial selection.
+Expose model catalog choices in settings and configured models in the conversation UI.
 Apply settings at the next idle execution admission. Do not mutate a running
 provider, tools or budgets. Install/uninstall server extensions using the Pi
 Registry; isolate each connection failure and never replay an ambiguous tool
 mutation. Connection tests cannot run worker cleanup during an active tool.
 OAuth rotation uses atomic private writes; stale edits/callbacks must not restore
 revoked credentials. GET, tool results and errors must not disclose secrets.
+Use short UI labels (Test, stdio, arguments) and named MCP cards with enabled first.
+Environment variables use name/value rows; unchanged secret values stay server-side.
+A blank edited key deletes that credential, not its model or conversation.
+Keep credential-delegation rules in this guidance, not helper prose in forms.
+Use a searchable model picker shared by settings and the conversation composer;
+persist selections server-side and retain keyboard navigation and focus restoration.
 A model connection test requires explicit inference/usage confirmation.
 OpenAI API-key and ChatGPT OAuth are separate explicit selections: never fall back
 between billing sources or to ambient credentials. Persist the installation UUID,

@@ -1,9 +1,12 @@
+import { ModelPicker } from "./model-picker.js";
 import { useEffect, useState } from "react";
 import type { ModelLogin } from "../src/model-auth.js";
 import type { AgentService } from "../src/service.js";
 import type { SettingsInput } from "../src/settings.js";
 import { api } from "./api.js";
 type PublicSettings = ReturnType<AgentService["management"]>;
+const secretMask = "••••••••";
+type EnvironmentRow = { name: string; value?: string };
 type Tab = "models" | "mcp" | "agent";
 function editable(s: PublicSettings): SettingsInput {
   return {
@@ -60,7 +63,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
     [dirty, setDirty] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
-  const [environments, setEnvironments] = useState<Record<string, string>>({});
+  const [catalog, setCatalog] = useState<string[]>([]);
+  const [environments, setEnvironments] = useState<
+    Record<string, EnvironmentRow[]>
+  >({});
   function accept(value: PublicSettings) {
     setSaved(value);
     setDraft(editable(value));
@@ -82,6 +88,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     void perform(async () => {
       accept(await api<PublicSettings>("/api/settings"));
+      setCatalog(
+        (await api<{ catalog: string[] }>("/api/model-options")).catalog,
+      );
       setLogin(
         (await api<ModelLogin | null>("/api/settings/model-login")) ??
           undefined,
@@ -128,10 +137,24 @@ export function Settings({ onClose }: { onClose: () => void }) {
     await perform(async () => {
       const input = structuredClone(draft);
       for (const server of input.mcp)
-        if (environments[server.id] !== undefined)
-          server.env = JSON.parse(environments[server.id] || "{}");
+        if (environments[server.id] !== undefined) {
+          const rows = environments[server.id]!;
+          if (
+            new Set(rows.map((r) => r.name)).size !== rows.length ||
+            rows.some((r) => !r.name)
+          )
+            throw new Error("環境変数の名前を確認してください");
+          server.envKeep = rows
+            .filter((r) => r.value === undefined)
+            .map((r) => r.name);
+          server.env = Object.fromEntries(
+            rows
+              .filter((r) => r.value !== undefined)
+              .map((r) => [r.name, r.value!]),
+          );
+        }
       accept(await api<PublicSettings>("/api/settings", "PUT", input));
-      setNotice("保存しました。次の実行開始時に反映します。");
+      setNotice("保存しました。");
     });
   }
   async function mcpAction(id: string, action: string) {
@@ -155,7 +178,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       setNotice(
         action === "disconnect"
           ? "認証情報を解除しました。"
-          : "接続テストが終了しました。",
+          : "テストが終了しました。",
       );
     });
   }
@@ -212,7 +235,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         {notice && <p role="status">{notice}</p>}
         {saved?.pending && (
           <p className="small fg-2" role="status">
-            設定の反映待ち：次の実行開始時に適用
+            次の応答から反映されます
           </p>
         )}
         {login && (
@@ -289,7 +312,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <fieldset disabled={busy || loginPending} className="settings-fields">
             {tab === "models" && (
               <>
-                {draft.models.map((model, index) => {
+                {draft.models.map((model) => {
                   const current = saved?.models.find((m) => m.id === model.id);
                   const update = (patch: Partial<typeof model>) =>
                     change((s) => ({
@@ -300,7 +323,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     }));
                   return (
                     <fieldset key={model.id} className="settings-card">
-                      <legend>モデル {index + 1}</legend>
+                      <legend>{model.model || "新しいモデル"}</legend>
                       <label className="form-label">
                         プロバイダー
                         <select
@@ -312,14 +335,21 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           <option value="openai">OpenAI</option>
                         </select>
                       </label>
-                      <label className="form-label">
-                        モデル ID
-                        <input
-                          className="form-control"
+                      <div className="form-label">
+                        モデル
+                        <ModelPicker
+                          label="設定するモデル"
                           value={model.model}
-                          onChange={(e) => update({ model: e.target.value })}
+                          models={[
+                            ...new Set([
+                              ...(model.model ? [model.model] : []),
+                              ...catalog,
+                            ]),
+                          ].map((id) => ({ id, name: id }))}
+                          onChange={(id) => update({ model: id })}
+                          disabled={busy || loginPending}
                         />
-                      </label>
+                      </div>
                       <label className="form-label">
                         認証方式
                         <select
@@ -345,28 +375,21 @@ export function Settings({ onClose }: { onClose: () => void }) {
                               className="form-control"
                               type="password"
                               autoComplete="new-password"
-                              value={model.key ?? ""}
+                              value={
+                                model.key ??
+                                (current?.hasKey && current.auth !== "oauth"
+                                  ? secretMask
+                                  : "")
+                              }
+                              onFocus={(e) => e.target.select()}
                               placeholder={
-                                current?.hasKey
-                                  ? "登録済み（変更するときだけ入力）"
-                                  : "未登録"
+                                current?.hasKey ? "登録済み" : "未登録"
                               }
                               onChange={(e) => update({ key: e.target.value })}
                             />
                           </label>
                         </>
                       )}
-                      <label className="settings-check">
-                        <input
-                          type="radio"
-                          name="default-model"
-                          checked={draft.defaultModel === model.id}
-                          onChange={() =>
-                            change((s) => ({ ...s, defaultModel: model.id }))
-                          }
-                        />
-                        既定のモデル
-                      </label>
                       <p className="small fg-2">
                         {current?.status ?? "未保存"}
                       </p>
@@ -382,7 +405,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           onClick={() => {
                             if (
                               window.confirm(
-                                "少量の推論を実行します。選択した認証方式の利用枠または API 料金を消費します。続けますか？",
+                                "テストには利用枠または料金がかかります。実行しますか？",
                               )
                             )
                               void perform(async () => {
@@ -393,11 +416,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                                     { confirmPaid: true },
                                   ),
                                 );
-                                setNotice("接続テストが終了しました。");
+                                setNotice("テストが終了しました。");
                               });
                           }}
                         >
-                          接続テスト（推論あり）
+                          テスト
                         </button>
                         {model.auth === "oauth" ? (
                           <>
@@ -438,16 +461,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                               ChatGPT 認証を解除
                             </button>
                           </>
-                        ) : (
-                          <>
-                            <button
-                              className="btn-text theme-secondary btn-sm"
-                              onClick={() => update({ key: "" })}
-                            >
-                              API キーを削除
-                            </button>
-                          </>
-                        )}
+                        ) : null}
                         <button
                           className="btn-text theme-danger btn-sm"
                           onClick={() =>
@@ -488,7 +502,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             )}
             {tab === "mcp" && (
               <>
-                {draft.mcp.map((server, index) => {
+                {draft.mcp.map((server) => {
                   const current = saved?.mcp.find((m) => m.id === server.id);
                   const update = (patch: Partial<typeof server>) =>
                     change((s) => ({
@@ -499,15 +513,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     }));
                   return (
                     <fieldset key={server.id} className="settings-card">
-                      <legend>MCP {index + 1}</legend>
-                      <label className="form-label">
-                        名前
-                        <input
-                          className="form-control"
-                          value={server.name}
-                          onChange={(e) => update({ name: e.target.value })}
-                        />
-                      </label>
+                      <legend>{server.name || "新しい MCP"}</legend>
                       <label className="settings-check">
                         <input
                           type="checkbox"
@@ -517,6 +523,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           }
                         />
                         有効
+                      </label>
+                      <label className="form-label">
+                        名前
+                        <input
+                          className="form-control"
+                          value={server.name}
+                          onChange={(e) => update({ name: e.target.value })}
+                        />
                       </label>
                       <label className="form-label">
                         接続方式
@@ -531,16 +545,17 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             })
                           }
                         >
-                          <option value="stdio">stdio（作業ユーザー）</option>
+                          <option value="stdio">stdio</option>
                           <option value="http">Streamable HTTP</option>
                         </select>
                       </label>
                       {server.transport === "stdio" ? (
                         <>
                           <label className="form-label">
-                            コマンド（絶対パス）
+                            コマンド
                             <input
                               className="form-control"
+                              placeholder="/usr/bin/npx"
                               value={server.command}
                               onChange={(e) =>
                                 update({ command: e.target.value })
@@ -548,9 +563,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             />
                           </label>
                           <label className="form-label">
-                            引数（1行に1つ）
+                            引数
                             <textarea
                               className="form-control"
+                              placeholder={
+                                "-y\n@modelcontextprotocol/server-filesystem\n/workspace"
+                              }
                               value={server.args.join("\n")}
                               onChange={(e) =>
                                 update({
@@ -561,41 +579,112 @@ export function Settings({ onClose }: { onClose: () => void }) {
                               }
                             />
                           </label>
-                          <label className="form-label">
-                            環境変数（JSON・全置換）
-                            <input
-                              className="form-control"
-                              type="password"
-                              autoComplete="new-password"
-                              value={environments[server.id] ?? ""}
-                              placeholder={
-                                current?.envNames.length
-                                  ? `登録済み: ${current.envNames.join(", ")}`
-                                  : '{"TOKEN":"…"}'
-                              }
-                              onChange={(e) => {
+                          <div className="environment-fields">
+                            <span>環境変数</span>
+                            {(
+                              environments[server.id] ??
+                              current?.envNames.map<EnvironmentRow>((name) => ({
+                                name,
+                              })) ??
+                              []
+                            ).map((row: EnvironmentRow, index, rows) => {
+                              const editRows = (next: EnvironmentRow[]) => {
                                 setEnvironments((v) => ({
                                   ...v,
-                                  [server.id]: e.target.value,
+                                  [server.id]: next,
+                                }));
+                                setDirty(true);
+                              };
+                              return (
+                                <div className="environment-row" key={index}>
+                                  <input
+                                    className="form-control"
+                                    aria-label={`環境変数名 ${index + 1}`}
+                                    placeholder="TOKEN"
+                                    value={row.name}
+                                    onChange={(e) =>
+                                      editRows(
+                                        rows.map((r, i) =>
+                                          i === index
+                                            ? {
+                                                name: e.target.value,
+                                                value: r.value ?? "",
+                                              }
+                                            : r,
+                                        ),
+                                      )
+                                    }
+                                  />
+                                  <input
+                                    className="form-control"
+                                    aria-label={`環境変数の値 ${index + 1}`}
+                                    type="password"
+                                    autoComplete="new-password"
+                                    placeholder="値"
+                                    value={row.value ?? secretMask}
+                                    onFocus={(e) => e.target.select()}
+                                    onChange={(e) =>
+                                      editRows(
+                                        rows.map((r, i) =>
+                                          i === index
+                                            ? { ...r, value: e.target.value }
+                                            : r,
+                                        ),
+                                      )
+                                    }
+                                  />
+                                  <button
+                                    className="btn-text theme-secondary btn-sm"
+                                    aria-label={`環境変数 ${index + 1} を削除`}
+                                    onClick={() =>
+                                      editRows(
+                                        rows.filter((_, i) => i !== index),
+                                      )
+                                    }
+                                  >
+                                    削除
+                                  </button>
+                                </div>
+                              );
+                            })}
+                            <button
+                              className="btn-text theme-secondary btn-sm"
+                              onClick={() => {
+                                setEnvironments((v) => ({
+                                  ...v,
+                                  [server.id]: [
+                                    ...(v[server.id] ??
+                                      current?.envNames.map<EnvironmentRow>(
+                                        (name) => ({ name }),
+                                      ) ??
+                                      []),
+                                    { name: "", value: "" },
+                                  ],
                                 }));
                                 setDirty(true);
                               }}
-                            />
-                          </label>
-                          <p className="small fg-2">
-                            環境変数の資格情報は作業ユーザーへ委譲され、同じユーザーの
-                            Shell からもアクセスされ得ます。
-                          </p>
+                            >
+                              環境変数を追加
+                            </button>
+                          </div>
                         </>
                       ) : (
                         <>
                           <label className="form-label">
-                            HTTPS URL
+                            URL
                             <input
                               className="form-control"
                               type="url"
                               value={server.url}
-                              onChange={(e) => update({ url: e.target.value })}
+                              placeholder="https://mcp.example.com/mcp"
+                              onChange={(e) =>
+                                update({
+                                  url: e.target.value,
+                                  ...(e.target.value.startsWith("http:")
+                                    ? { auth: "none" as const }
+                                    : {}),
+                                })
+                              }
                             />
                           </label>
                           <label className="form-label">
@@ -611,8 +700,18 @@ export function Settings({ onClose }: { onClose: () => void }) {
                               }
                             >
                               <option value="none">なし</option>
-                              <option value="bearer">Bearer Token</option>
-                              <option value="oauth">OAuth 2.0</option>
+                              <option
+                                value="bearer"
+                                disabled={server.url.startsWith("http:")}
+                              >
+                                Bearer Token
+                              </option>
+                              <option
+                                value="oauth"
+                                disabled={server.url.startsWith("http:")}
+                              >
+                                OAuth 2.0
+                              </option>
                             </select>
                           </label>
                           {server.auth === "bearer" && (
@@ -622,7 +721,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                                 className="form-control"
                                 type="password"
                                 autoComplete="new-password"
-                                value={server.bearer ?? ""}
+                                value={
+                                  server.bearer ??
+                                  (current?.hasBearer ? secretMask : "")
+                                }
+                                onFocus={(e) => e.target.select()}
                                 placeholder={
                                   current?.hasBearer ? "登録済み" : "未登録"
                                 }
@@ -635,7 +738,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           {server.auth === "oauth" && (
                             <>
                               <label className="form-label">
-                                Client ID（動的登録なら空欄）
+                                Client ID
                                 <input
                                   className="form-control"
                                   value={server.clientId}
@@ -645,12 +748,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
                                 />
                               </label>
                               <label className="form-label">
-                                Client Secret（必要な場合）
+                                Client Secret
                                 <input
                                   className="form-control"
                                   type="password"
                                   autoComplete="new-password"
-                                  value={server.clientSecret ?? ""}
+                                  value={
+                                    server.clientSecret ??
+                                    (current?.hasClientSecret ? secretMask : "")
+                                  }
+                                  onFocus={(e) => e.target.select()}
                                   placeholder={
                                     current?.hasClientSecret
                                       ? "登録済み"
@@ -668,26 +775,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
                               </p>
                             </>
                           )}
-                          <details>
-                            <summary>詳細設定</summary>
-                            <label className="form-label">
-                              社内・VPN 接続を許可するホスト（1行に1つ）
-                              <textarea
-                                className="form-control"
-                                value={server.privateHosts.join("\n")}
-                                onChange={(e) =>
-                                  update({
-                                    privateHosts: e.target.value
-                                      ? e.target.value.split("\n")
-                                      : [],
-                                  })
-                                }
-                              />
-                            </label>
-                            <p className="small fg-2">
-                              指定ホストへのプライベートネットワーク接続を許可します。認証サーバーは別途指定します。loopback・リンクローカルは許可できません。
-                            </p>
-                          </details>
                         </>
                       )}
                       <p className="small fg-2" role="status">
@@ -696,7 +783,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       {!!current?.status.tools.length && (
                         <details>
                           <summary>
-                            公開ツール（{current.status.tools.length}）
+                            ツール（{current.status.tools.length}）
                           </summary>
                           <ul>
                             {current.status.tools.map((t) => (
@@ -713,7 +800,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           disabled={dirty || !current || !server.enabled}
                           onClick={() => void mcpAction(server.id, "test")}
                         >
-                          接続テスト
+                          テスト
                         </button>
                         {server.auth === "oauth" && (
                           <button

@@ -127,6 +127,7 @@ export async function createServer(
     }
     return { csrf: sessions.get(token)!.csrf };
   });
+  app.get("/api/model-options", async () => service.modelOptions());
   app.get("/api/settings", async () => service.management());
   app.put("/api/settings", async (request) =>
     service.saveSettings(request.body),
@@ -228,12 +229,16 @@ export async function createServer(
   );
   app.post("/api/conversations", async (request, reply) => {
     const body = z
-      .object({ requestId, title: z.string().min(1).max(200) })
+      .object({
+        requestId,
+        title: z.string().min(1).max(200),
+        modelId: z.string().uuid().optional(),
+      })
       .strict()
       .parse(request.body);
     return reply
       .code(201)
-      .send(await service.create(body.requestId, body.title));
+      .send(await service.create(body.requestId, body.title, body.modelId));
   });
   app.get("/api/conversations/:id", async (request) => {
     const { id } = identifier.parse(request.params),
@@ -248,6 +253,14 @@ export async function createServer(
           ) as Cursor)
       : undefined;
     return safe(await service.view(id, parsed));
+  });
+  app.put("/api/conversations/:id/model", async (request) => {
+    const { id } = identifier.parse(request.params);
+    const { modelId } = z
+      .object({ modelId: z.string().uuid() })
+      .strict()
+      .parse(request.body);
+    return safe(await service.selectModel(id, modelId));
   });
   app.post("/api/conversations/:id/messages", async (request, reply) => {
     const { id } = identifier.parse(request.params),

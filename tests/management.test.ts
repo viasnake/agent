@@ -15,6 +15,7 @@ import { connectionIdentity, settingsInput } from "../src/settings.js";
 import { mcpToolName } from "../src/tools.js";
 import { remoteFixture } from "./remote-fixture.js";
 import {
+  remoteFetch,
   allowedAddress,
   remoteUrl,
   resolveRemote,
@@ -553,4 +554,185 @@ test("remote URL/DNS policy blocks metadata, special IPv4/IPv6 and mixed DNS ans
       { address: "127.0.0.1", family: 4 },
     ]),
   );
+});
+
+test("conversation model selection survives restart, preserves history and cannot replace an active model", async () => {
+  let f = await fixture([
+    call("bash", { command: "sleep 1; printf done" }),
+    answer("first model"),
+  ]);
+  const { app, headers } = await http(f.service);
+  const one = randomUUID(),
+    two = randomUUID();
+  try {
+    const s = input(f.service);
+    s.models = [
+      {
+        id: one,
+        provider: "openai",
+        model: "gpt-4.1",
+        key: "model-one-secret",
+      },
+      { id: two, provider: "openai", model: "faux-1", key: "model-two-secret" },
+    ];
+    s.defaultModel = one;
+    await f.service.saveSettings(s);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/conversations",
+      headers,
+      payload: {
+        requestId: randomUUID(),
+        title: "Selected model model-one-secret",
+        modelId: two,
+      },
+    });
+    const id = created.json().id as string;
+    assert.equal((await f.service.conversation(id)).modelConfigId, two);
+    assert.equal(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `/api/conversations/${id}/model`,
+          headers: { ...headers, "x-csrf-token": "bad" },
+          payload: { modelId: one },
+        })
+      ).statusCode,
+      403,
+    );
+    await f.service.send(id, randomUUID(), "start");
+    await until(
+      async () => (await f.service.view(id)).progress.tools.length > 0,
+    );
+    const before = await f.service.conversation(id);
+    assert.equal(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `/api/conversations/${id}/model`,
+          headers,
+          payload: { modelId: one },
+        })
+      ).statusCode,
+      409,
+    );
+    assert.equal((await f.service.conversation(id)).modelConfigId, two);
+    assert.equal((await f.service.conversation(id)).requests, before.requests);
+    await until(
+      async () => (await f.service.conversation(id)).status === "idle",
+    );
+    const result = await app.inject({
+      method: "PUT",
+      url: `/api/conversations/${id}/model`,
+      headers,
+      payload: { modelId: one },
+    });
+    assert.equal(result.statusCode, 200);
+    assert.equal(result.json().conversation.modelConfigId, one);
+    assert.ok(!result.body.includes("model-one-secret"));
+    f.faux.setResponses([answer("second model")]);
+    await f.service.send(id, randomUUID(), "continue");
+    await until(
+      async () => (await f.service.conversation(id)).status === "idle",
+    );
+    const raw = JSON.stringify(
+      await (
+        await f.service.piConversation(id)
+      ).entries({}, 100, undefined, ctx),
+    );
+    assert.match(raw, /faux-1/);
+    assert.match(raw, /gpt-4.1/);
+    assert.match(raw, /first model/);
+    assert.match(raw, /second model/);
+    assert.ok(!raw.includes("model-one-secret"));
+    const other = await f.service.create(randomUUID(), "Another", two);
+    f.faux.setResponses([answer("other conversation")]);
+    await f.service.send(other.id, randomUUID(), "other");
+    await until(
+      async () => (await f.service.conversation(other.id)).status === "idle",
+    );
+    assert.equal((await f.service.conversation(id)).modelConfigId, one);
+    const root = f.root;
+    await app.close();
+    await f.service.close();
+    f = await fixture([], { root });
+    assert.equal((await f.service.conversation(id)).modelConfigId, one);
+    assert.match(JSON.stringify(await f.service.view(id)), /second model/);
+    const deleted = input(f.service);
+    deleted.models = deleted.models.filter((m) => m.id !== one);
+    deleted.defaultModel = two;
+    await f.service.saveSettings(deleted);
+    await assert.rejects(
+      f.service.send(id, randomUUID(), "must not silently switch"),
+      /選び直/,
+    );
+    assert.equal((await f.service.conversation(id)).modelConfigId, one);
+  } finally {
+    await app.close();
+    await f.service.close();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("HTTP MCP calls use the configured private target without permitting metadata, redirects or plaintext credentials", async () => {
+  const remote = await remoteFixture();
+  const port = new URL(remote.local).port;
+  const target = `http://fixture.example:${port}`;
+  let resolutions = 0;
+  const f = await fixture([], {
+    remote: {
+      network: {
+        resolve: async (url, hosts) => {
+          assert.equal(url.origin, target);
+          const validated = await resolveRemote(url, hosts, async () => [
+            { address: "10.20.30.40", family: 4 },
+          ]);
+          assert.equal(validated.address, "10.20.30.40");
+          resolutions++;
+          return { address: "127.0.0.1", family: 4 };
+        },
+      },
+    },
+  });
+  try {
+    const s = input(f.service),
+      server = remoteConfig(`${target}/public`);
+    s.mcp = [server];
+    await f.service.saveSettings(s);
+    assert.equal(
+      (await f.service.testMcp(server.id)).mcp[0]!.status.state,
+      "ready",
+    );
+    const result = await f.service.remote.use(
+      f.service.mcpServer(server.id),
+      "http://127.0.0.1:8080",
+      (client) =>
+        client.callTool({ name: "greet", arguments: { name: "HTTP" } }),
+    );
+    assert.match(JSON.stringify(result), /HTTP/);
+    assert.ok(resolutions >= 2);
+    const denied = input(f.service);
+    denied.mcp[0]!.auth = "bearer";
+    denied.mcp[0]!.bearer = "never-send";
+    await assert.rejects(f.service.saveSettings(denied));
+    const http = remoteFetch(["169.254.169.254"], {
+      httpOrigin: "http://169.254.169.254",
+      resolve: (url, hosts) => resolveRemote(url, hosts),
+    });
+    await assert.rejects(http("http://169.254.169.254/latest"), /許可/);
+    await assert.rejects(http("http://other.example/latest"), /登録/);
+    const plain = remoteFetch(["fixture.example"], {
+      httpOrigin: target,
+      resolve: async () => ({ address: "127.0.0.1", family: 4 }),
+    });
+    await assert.rejects(
+      plain(`${target}/public`, {
+        headers: { Authorization: "Bearer never-send" },
+      }),
+      /HTTPS/,
+    );
+  } finally {
+    await f.service.close();
+    await remote.close();
+  }
 });

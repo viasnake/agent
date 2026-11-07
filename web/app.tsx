@@ -1,3 +1,5 @@
+import { ModelPicker } from "./model-picker.js";
+import type { ReactNode } from "react";
 import { Settings } from "./settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -20,11 +22,12 @@ import {
   statuses,
   upload,
 } from "./api.js";
-import type { Conversation, Entry, Files, View } from "./api.js";
+import type { Conversation, Entry, Files, View, ModelOptions } from "./api.js";
 import {
   AssistantMessage,
   ConversationId,
   threadMessages,
+  toolLabel,
   UserMessage,
 } from "./messages.js";
 import { Icon } from "./icons.js";
@@ -33,6 +36,8 @@ type ThreadProps = {
   view: View | null;
   entries: Entry[];
   cursor: unknown;
+  modelPicker: ReactNode;
+  loading: boolean;
   sending: boolean;
   attachments: File[];
   setAttachments: (files: File[]) => void;
@@ -65,6 +70,8 @@ function Chat({
   setAttachments,
   onSend,
   onEarlier,
+  modelPicker,
+  loading,
 }: ThreadProps) {
   const messages = useMemo(
     () => threadMessages(entries, view),
@@ -97,14 +104,21 @@ function Chat({
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ConversationId.Provider value={view?.conversation.id ?? null}>
-        <ThreadPrimitive.Root className="chat-thread">
+        <ThreadPrimitive.Root
+          className={`chat-thread ${!messages.length && !loading ? "chat-empty" : ""}`}
+        >
           <ThreadPrimitive.Viewport
             className="thread-viewport"
             id="transcript"
             aria-label="会話の履歴"
           >
             <div className="thread-content">
-              {!messages.length && (
+              {loading && (
+                <div className="history-loading" role="status">
+                  会話を読み込み中…
+                </div>
+              )}
+              {!messages.length && !loading && (
                 <div className="empty-thread">
                   <span className="empty-icon">
                     <Icon name="agent" />
@@ -135,8 +149,8 @@ function Chat({
                   {view.progress.tools.some((tool) => tool.status !== "done")
                     ? `${view.progress.tools
                         .filter((tool) => tool.status !== "done")
-                        .map((tool) => tool.name)
-                        .join("・")} を実行中`
+                        .map((tool) => toolLabel(tool.name))
+                        .join("・")}…`
                     : "応答中"}
                 </div>
               )}
@@ -224,11 +238,13 @@ function Chat({
                   type="button"
                   className="btn-text theme-secondary btn-sm"
                   disabled={sending}
+                  aria-label="添付"
+                  title="添付"
                   onClick={() => input.current?.click()}
                 >
                   <Icon name="attach" />
-                  添付
                 </button>
+                {modelPicker}
                 <span id="input-status" className="small fg-2">
                   {view?.pendingInputs
                     ? `反映待ち：${view.pendingInputs}`
@@ -248,6 +264,13 @@ function Chat({
 }
 
 function App() {
+  const [modelOptions, setModelOptions] = useState<ModelOptions>({
+    catalog: [],
+    models: [],
+    initialModel: null,
+  });
+  const [draftModel, setDraftModel] = useState("");
+  const [changingModel, setChangingModel] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(
     new URLSearchParams(location.search).has("settings"),
   );
@@ -318,6 +341,44 @@ function App() {
     void connect();
   }, [connect]);
   useEffect(() => {
+    if (!ready || settingsOpen) return;
+    let active = true;
+    void api<ModelOptions>("/api/model-options")
+      .then((options) => {
+        if (!active) return;
+        setModelOptions(options);
+        setDraftModel((old) =>
+          options.models.some((m) => m.id === old)
+            ? old
+            : (options.initialModel ?? ""),
+        );
+      })
+      .catch(notice);
+    return () => {
+      active = false;
+    };
+  }, [ready, settingsOpen, notice]);
+  async function changeModel(modelId: string) {
+    if (!selectedRef.current) {
+      setDraftModel(modelId);
+      return;
+    }
+    setChangingModel(true);
+    try {
+      merge(
+        await api<View>(
+          `/api/conversations/${selectedRef.current}/model`,
+          "PUT",
+          { modelId },
+        ),
+      );
+    } catch (error) {
+      notice(error);
+    } finally {
+      setChangingModel(false);
+    }
+  }
+  useEffect(() => {
     if (!ready) return;
     void list().catch(notice);
   }, [ready, list, notice]);
@@ -377,7 +438,14 @@ function App() {
         const created = await api<{ id: string }>(
           "/api/conversations",
           "POST",
-          { requestId: await requestId("create", { title }), title },
+          {
+            requestId: await requestId("create", {
+              title,
+              ...(draftModel ? { modelId: draftModel } : {}),
+            }),
+            title,
+            ...(draftModel ? { modelId: draftModel } : {}),
+          },
         );
         id = created.id;
         // Keep the composer mounted so a rejected/lost response can restore its draft.
@@ -642,7 +710,27 @@ function App() {
             view={view}
             entries={entries}
             cursor={cursor}
-            sending={sending}
+            sending={sending || changingModel || (selected !== null && !view)}
+            loading={selected !== null && !view}
+            modelPicker={
+              <ModelPicker
+                label="会話のモデル"
+                compact
+                value={view?.conversation.modelConfigId ?? draftModel}
+                models={modelOptions.models}
+                disabled={
+                  sending ||
+                  changingModel ||
+                  (selected !== null && !view) ||
+                  currentStatus === "running" ||
+                  currentStatus === "stopping"
+                }
+                onChange={(id) => void changeModel(id)}
+                onManage={() => {
+                  setSettingsOpen(true);
+                }}
+              />
+            }
             attachments={attachments}
             setAttachments={setAttachments}
             onSend={send}

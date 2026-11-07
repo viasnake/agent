@@ -13,6 +13,7 @@ export type Conversation = {
   status: string;
   detail: string;
   updatedAt: number;
+  modelConfigId?: string;
 };
 export type View = {
   conversation: Conversation;
@@ -117,3 +118,9 @@ export const statuses: Record<string, string> = {
 export function fileSize(size: number) {
   return size < 1024 ? `${size} B` : `${(size / 1024).toFixed(1)} KiB`;
 }
+
+export type ModelOptions = {
+  catalog: string[];
+  models: { id: string; name: string; available: boolean }[];
+  initialModel: string | null;
+};

@@ -18,6 +18,7 @@ export type McpStatus = {
   tools: ToolInfo[];
 };
 export type RemoteOptions = {
+  network?: Parameters<typeof remoteFetch>[1];
   fetch?: (server: McpConfig) => typeof fetch;
   validateAuthorizationUrl?: (url: URL, server: McpConfig) => Promise<void>;
 };
@@ -35,8 +36,23 @@ export class RemoteMcp {
     private store: SettingsStore,
     private options: RemoteOptions = {},
   ) {}
+  private allowedHosts(server: McpConfig) {
+    // Registering this target permits its private/VPN address, not other hosts
+    // suggested by discovery. Loopback and metadata restrictions still apply.
+    return [
+      ...server.privateHosts,
+      new URL(server.url).hostname.replace(/^\[|\]$/g, ""),
+    ];
+  }
   private fetch(server: McpConfig) {
-    return this.options.fetch?.(server) ?? remoteFetch(server.privateHosts);
+    const url = remoteUrl(server.url, server.auth === "none");
+    return (
+      this.options.fetch?.(server) ??
+      remoteFetch(this.allowedHosts(server), {
+        ...this.options.network,
+        httpOrigin: url.protocol === "http:" ? url.origin : undefined,
+      })
+    );
   }
   private provider(
     server: McpConfig,
@@ -106,7 +122,7 @@ export class RemoteMcp {
         remoteUrl(url);
         if (this.options.validateAuthorizationUrl)
           await this.options.validateAuthorizationUrl(url, server);
-        else await validateRemote(url, server.privateHosts);
+        else await validateRemote(url, this.allowedHosts(server));
         login.redirect(url.toString());
       },
       saveCodeVerifier: (value) => {
