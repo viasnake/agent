@@ -547,19 +547,25 @@ export class AgentService {
           role: message.role,
           isError: message.role === "toolResult" ? message.isError : false,
           toolName: message.role === "toolResult" ? message.toolName : null,
+          toolCallId: message.role === "toolResult" ? message.toolCallId : null,
+          toolCalls:
+            message.role === "assistant"
+              ? message.content
+                  .filter((block) => block.type === "toolCall")
+                  .map((block) => ({
+                    id: block.id,
+                    name: block.name,
+                    argsText: this.redact(
+                      JSON.stringify(block.arguments).slice(0, 2000),
+                    ),
+                  }))
+              : [],
           content:
             typeof message.content === "string"
               ? message.content
               : message.content
-                  .filter(
-                    (block) =>
-                      block.type === "text" || block.type === "toolCall",
-                  )
-                  .map((block) =>
-                    block.type === "text"
-                      ? block.text
-                      : `${block.name} ${JSON.stringify(block.arguments).slice(0, 2000)}`,
-                  )
+                  .filter((block) => block.type === "text")
+                  .map((block) => block.text)
                   .join("\n"),
         }))
         .map((message) => ({

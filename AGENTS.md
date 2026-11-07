@@ -42,7 +42,11 @@ generated output or live provider responses.
   official MCP client and bounded attachment/output transfers.
 - src/provider.ts: model dispatch limit and active-conversation binding.
 - src/server.ts and web/: authentication, conversation projections and SSE.
-  Use Bootstrap 6 components and utilities with locally bundled CSS. Keep UI
+  Use assistant-ui React primitives with an external-store adapter to the existing
+  API; Pi remains the only conversation/execution owner. Never enable client-side
+  tool execution or cloud persistence. Bundle browser dependencies locally with
+  esbuild and use Bootstrap 6 utilities. Keep Markdown HTML and remote images
+  disabled; allow only safe external links and scoped output downloads. Keep UI
   copy to labels, status and actionable errors; avoid explanatory prose.
 - vm/: manual host scripts, initial disk setup, fixed UID launcher and guest units.
 
