@@ -1,146 +1,121 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createServer as netServer } from "node:net";
-import { resolve } from "node:path";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { createServer as portProbe } from "node:net";
 import { chromium } from "playwright";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fixture, answer, call, until } from "../support.js";
 import { createServer } from "../../src/server.js";
-import { fixture, codeResponses, untilJob } from "../support.js";
-
-test("A02 A04 A12 S08: real authenticated UI, disconnect/reconnect, safe text and downloadable patch", async () => {
-  let release!: () => void, entered!: () => void;
-  const held = new Promise<void>((resolveHeld) => {
-    release = resolveHeld;
-  });
-  const ready = new Promise<void>((resolveReady) => {
-    entered = resolveReady;
-  });
-  const { service, config } = await fixture(
-    [
-      async () => {
-        entered();
-        await held;
-        return fauxAssistantMessage(
-          fauxToolCall("validate_command", {
-            command: "cd project && python3 -B -m unittest -v",
-          }),
-          { stopReason: "toolUse" },
-        );
-      },
-      ...codeResponses().slice(1),
-    ],
-    { codeFixture: true },
-  );
-  const reservation = netServer();
-  await new Promise<void>((resolveListen) =>
-    reservation.listen(0, "127.0.0.1", resolveListen),
-  );
-  const address = reservation.address();
+test("real browser conversation: no category, attachments, response-loss retry, reconnect, CSV download and continuation without a new job", async () => {
+  const f = await fixture([
+    call("bash", {
+      command:
+        "test -f attachments/*-input.csv && mkdir -p outputs && printf 'name,total\\nAlice,12\\n' > outputs/clean.csv",
+    }),
+    answer(
+      "CSV を保存しました。<script>window.pwned=1</script><img src=https://evil.invalid/track>",
+    ),
+  ]);
+  const password = "synthetic-password-for-ui-123456789012345",
+    probe = portProbe();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const address = probe.address();
   assert.ok(address && typeof address !== "string");
   const port = address.port;
-  await new Promise<void>((resolveClose) =>
-    reservation.close(() => resolveClose()),
-  );
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
   const origin = `http://127.0.0.1:${port}`;
-  config.server.origins = [origin];
-  const app = await createServer(
-    service,
-    "synthetic-ui-password-longer-than-32-characters",
-    resolve("dist/web"),
+  f.config.server.origins = [origin];
+  const server = await createServer(
+    f.service,
+    password,
+    resolve("dist/web") + "/",
   );
-  await app.listen({ host: "127.0.0.1", port });
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    viewport: { width: 1440, height: 1050 },
-    acceptDownloads: true,
-    locale: "ja-JP",
-    timezoneId: "Asia/Tokyo",
-  });
-  const external: string[] = [];
-  context.on("request", (request) => {
-    if (request.url().startsWith("https://attacker.invalid"))
-      external.push(request.url());
+  await server.listen({ host: "127.0.0.1", port });
+  const browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox"],
+    }),
+    context = await browser.newContext({
+      acceptDownloads: true,
+      viewport: { width: 1440, height: 1000 },
+    });
+  const page = await context.newPage();
+  let external = 0;
+  page.on("request", (request) => {
+    if (request.url().includes("evil.invalid")) external++;
   });
   try {
-    let page = await context.newPage();
     await page.goto(origin);
-    await page
-      .getByLabel("認証情報")
-      .fill("synthetic-ui-password-longer-than-32-characters");
+    await page.locator("#password").fill(password);
     await page.getByRole("button", { name: "ログイン", exact: true }).click();
-    await page.getByRole("heading", { name: "何を進めましょうか。" }).waitFor();
-    await mkdir("test-results", { recursive: true });
-    await page.screenshot({
-      path: "test-results/ui-request.png",
-      fullPage: true,
+    await page.locator("#app").waitFor({ state: "visible" });
+    assert.equal(await page.locator("select").count(), 0);
+    await page.locator("#message").fill("CSV を整形して CSV を返してください");
+    await page.locator("#attachments").setInputFiles({
+      name: "input.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("name,total\n Alice,12\n"),
     });
-    await page.getByLabel("依頼名").fill("計算バグを修正");
-    await page
-      .getByLabel("依頼内容")
-      .fill(
-        '計算バグを修正してください。<img src="https://attacker.invalid/pixel" onerror="alert(1)">',
-      );
-    await page.getByLabel("完成の条件").fill("テスト成功\n差分の納品");
-    let loseResponse = true;
-    await page.route("**/api/jobs", async (route) => {
-      if (route.request().method() === "POST" && loseResponse) {
-        loseResponse = false;
-        const accepted = await route.fetch();
-        assert.equal(accepted.status(), 202);
-        await route.abort("connectionreset");
+    let lost = false;
+    await page.route("**/api/conversations/*/messages", async (route) => {
+      if (!lost) {
+        lost = true;
+        await route.fetch();
+        await route.abort("failed");
       } else await route.continue();
     });
-    await page
-      .getByRole("button", { name: "仕事を依頼する", exact: true })
-      .click();
-    await page.locator("#error").waitFor({ state: "visible" });
-    await page
-      .getByRole("button", { name: "仕事を依頼する", exact: true })
-      .click();
-    await page.locator("#detail").waitFor({ state: "visible" });
-    await ready;
-    assert.equal((await service.snapshot()).jobs.length, 1);
-    const id = (await service.snapshot()).jobs[0]!.id;
-    await page.close();
-    release();
-    const job = await untilJob(
-      service,
-      id,
-      (job) => job.status === "succeeded" || job.status === "failed",
+    await page.getByRole("button", { name: "送る", exact: true }).click();
+    await until(async () => lost);
+    await page.locator("#send").waitFor({ state: "visible" });
+    await page.waitForFunction(
+      () => !(document.getElementById("send") as HTMLButtonElement).disabled,
     );
-    assert.equal(job.status, "succeeded", job.detail);
-    page = await context.newPage();
-    await page.goto(origin);
-    await page.locator(".job-link").first().click();
-    await page.locator("#job-state").filter({ hasText: "納品済み" }).waitFor();
-    const count = await page.locator(".message").count();
-    await page.waitForTimeout(800);
-    assert.equal(await page.locator(".message").count(), count);
-    assert.equal(await page.locator("#original img").count(), 0);
-    assert.deepEqual(external, []);
+    await page.getByRole("button", { name: "送る", exact: true }).click();
+    await page.getByRole("link", { name: /clean.csv/ }).waitFor();
+    const conversations = await f.service.list();
+    assert.equal(conversations.length, 1);
+    const id = conversations[0]!.id;
     const downloadPromise = page.waitForEvent("download");
-    await page.getByRole("link", { name: /changes.patch/ }).click();
+    await page.getByRole("link", { name: /clean.csv/ }).click();
     const download = await downloadPromise;
     const path = await download.path();
     assert.ok(path);
-    assert.match((await readFile(path)).toString(), /return sum\(values\)/);
+    assert.equal(
+      (await f.service.download(id, "outputs/clean.csv")).toString(),
+      "name,total\nAlice,12\n",
+    );
+    await page.reload();
+    await page.locator("#app").waitFor({ state: "visible" });
+    await page.locator("#conversations button").first().click();
+    await page.getByRole("link", { name: /clean.csv/ }).waitFor();
+    f.faux.setResponses([
+      call("write", {
+        path: "outputs/note.md",
+        content: "# 続き\n確認しました。",
+      }),
+      answer("Markdown だけを保存しました。"),
+    ]);
+    await page.locator("#message").fill("続けて Markdown を作って");
+    await page.getByRole("button", { name: "送る", exact: true }).click();
+    await page.getByRole("link", { name: /note.md/ }).waitFor();
+    assert.equal((await f.service.list()).length, 1);
+    assert.equal(external, 0);
+    assert.equal(
+      await page.evaluate(() => Object.hasOwn(window, "pwned")),
+      false,
+    );
+    await mkdir("test-results", { recursive: true });
     await page.screenshot({
-      path: "test-results/ui-delivered.png",
+      path: "test-results/conversation.png",
       fullPage: true,
     });
-    const anonymous = await browser.newContext();
-    const denied = await anonymous.request.get(`${origin}/api/jobs`);
-    assert.equal(denied.status(), 401);
-    await anonymous.close();
-    console.log(
-      `Screenshots: ${resolve("test-results/ui-request.png")}, ${resolve("test-results/ui-delivered.png")}`,
-    );
+    const home = await mkdtemp(join(tmpdir(), "agent-ui-download-"));
+    await download.saveAs(join(home, "clean.csv"));
   } finally {
-    release();
+    await context.close();
     await browser.close();
-    app.server.closeAllConnections();
-    await app.close();
-    await service.close();
+    await server.close();
+    await f.service.close();
   }
 });

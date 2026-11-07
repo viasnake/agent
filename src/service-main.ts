@@ -1,18 +1,10 @@
 import { loadConfig, checkDataRoot, privateFile } from "./config.js";
 import { AgentService } from "./service.js";
 import { createServer } from "./server.js";
-import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 process.umask(0o077);
 const config = await loadConfig(process.argv[2]!);
 await checkDataRoot(config);
-const recovery = await lstat("/run/agent-recovery-hold").catch(() => null);
-if (
-  recovery &&
-  (!recovery.isFile() || recovery.uid !== 0 || recovery.mode & 0o022)
-)
-  throw new Error("Invalid recovery marker");
-config.recoveryHold ||= !!recovery;
 const service = await AgentService.open(config);
 const server = await createServer(
   service,

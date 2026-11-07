@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$VmHome, [ValidateRange(1,32)][int]$Cpus=4, [ValidateRange(2048,65536)][int]$MemoryMiB=8192, [switch]$RecoveryHold)
+param([Parameter(Mandatory=$true)][string]$VmHome, [ValidateRange(1,32)][int]$Cpus=4, [ValidateRange(2048,65536)][int]$MemoryMiB=8192)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $vmDir = [IO.Path]::GetFullPath($VmHome)
@@ -16,7 +16,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Disk check failed: $name" }
   }
   $qemuArgs = @('-accel','whpx','-machine','pc','-smp',"cores=$Cpus",'-m',"$MemoryMiB",'-drive',"file=$vmDir/os.qcow2,if=virtio,format=qcow2",'-drive',"file=$vmDir/data.qcow2,if=none,id=agentdata,format=qcow2",'-device','virtio-blk-pci,drive=agentdata,serial=AGENT_DATA_DISK','-drive',"file=$vmDir/seed.iso,media=cdrom,readonly=on",'-nic','user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:8080-:8080,hostfwd=tcp:127.0.0.1:2222-:22','-display','none','-monitor','none','-serial','stdio')
-  if ($RecoveryHold) { $qemuArgs += @('-fw_cfg','name=opt/agent/recovery-hold,string=1') }
   & $qemu @qemuArgs
   if ($LASTEXITCODE -ne 0) { throw "QEMU exited with $LASTEXITCODE" }
 } finally { $lock.Dispose() }

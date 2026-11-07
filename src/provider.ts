@@ -9,11 +9,6 @@ import type {
 export function guardedProvider(
   provider: Provider,
   reserve: (sessionId: string | undefined, modelId: string) => Promise<void>,
-  onError: (
-    message: string,
-    sessionId: string | undefined,
-    modelId: string,
-  ) => void,
 ): Provider {
   function guarded(
     start: () => AssistantMessageEventStream,
@@ -26,12 +21,6 @@ export function guardedProvider(
         await reserve(sessionId, modelId);
         const upstream = start();
         for await (const event of upstream) {
-          if (event.type === "error")
-            onError(
-              event.error.errorMessage ?? "provider error",
-              sessionId,
-              modelId,
-            );
           stream.push(event);
         }
         stream.end(await upstream.result());

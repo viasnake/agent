@@ -4,26 +4,22 @@ import { z } from "zod";
 import { parse } from "yaml";
 import { DEFAULT_LIMITS } from "./state.js";
 
-const maxima = {
-  ...DEFAULT_LIMITS,
-  modelRequests: 600,
-  deadlineSeconds: 86400,
-  repairs: 10,
-};
 const limitShape = Object.fromEntries(
   Object.entries(DEFAULT_LIMITS).map(([key, value]) => [
     key,
-    z
-      .number()
-      .int()
-      .min(key === "logBytes" ? 1024 : 1)
-      .max(maxima[key as keyof typeof maxima])
-      .default(value),
+    z.number().int().positive().max(value).default(value),
   ]),
 );
+export const mcpServerSchema = z
+  .object({
+    name: z.string().min(1).max(100),
+    command: z.string().startsWith("/"),
+    args: z.array(z.string()).max(100).default([]),
+  })
+  .strict();
 const schema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(2),
     dataRoot: z
       .string()
       .refine(
@@ -45,17 +41,9 @@ const schema = z
       })
       .nullable()
       .default(null),
-    github: z
-      .object({
-        repositories: z.array(
-          z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
-        ),
-        tokenFile: z.string().startsWith("/"),
-      })
-      .nullable()
-      .default(null),
+    mcp: z.array(mcpServerSchema).max(10).default([]),
+    instructions: z.string().max(16000).default(""),
     limits: z.object(limitShape).default(DEFAULT_LIMITS),
-    recoveryHold: z.boolean().default(false),
   })
   .strict();
 export type Config = z.infer<typeof schema> & { limits: typeof DEFAULT_LIMITS };
@@ -108,12 +96,7 @@ export async function checkDataRoot(config: Config): Promise<void> {
     (await realpath(`/dev/disk/by-uuid/${expectedUuid}`)) !== label
   )
     throw new Error("Unexpected data disk");
-  for (const name of [
-    "control",
-    "control/secrets",
-    "control/artifacts",
-    "control/uploads",
-  ]) {
+  for (const name of ["control", "control/secrets"]) {
     const path = resolve(root, name),
       info = await stat(path);
     if (

@@ -54,7 +54,6 @@ test("V02 V06 V07 V08: VM script contracts, explicit public key, native seed, fi
     assert.match(code, /127\.0\.0\.1:8080-:8080/);
     assert.match(code, /127\.0\.0\.1:2222-:22/);
     assert.match(code, /AGENT_DATA_DISK/);
-    assert.match(code, /recovery-hold/);
     assert.doesNotMatch(code, /-accel tcg|-virtfs|-qmp|-vnc/);
   }
   assert.match(await readFile("vm/init.ps1", "utf8"), /IMAPI2FS/);

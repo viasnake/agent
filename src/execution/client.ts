@@ -16,14 +16,17 @@ async function trusted(path: string): Promise<void> {
 }
 export class WorkerClient implements Runner {
   private child?: ChildProcessWithoutNullStreams;
-  private pending?: {
-    id: string;
-    resolve: (value: WorkerResult) => void;
-    reject: (error: Error) => void;
-  };
+  private pending = new Map<
+    string,
+    { resolve: (value: WorkerResult) => void; reject: (error: Error) => void }
+  >();
+  private opening?: Promise<void>;
   private buffer = Buffer.alloc(0);
   private broken = false;
-  async ready(): Promise<void> {
+  ready(): Promise<void> {
+    return (this.opening ??= this.open());
+  }
+  private async open(): Promise<void> {
     if (this.broken)
       throw new AppError(
         503,
@@ -53,24 +56,25 @@ export class WorkerClient implements Runner {
         this.fail();
         return;
       }
-      const end = this.buffer.indexOf(10);
-      if (end < 0) return;
-      try {
-        const reply = replySchema.parse(
-          JSON.parse(this.buffer.subarray(0, end).toString("utf8")),
-        );
-        this.buffer = this.buffer.subarray(end + 1);
-        const pending = this.pending;
-        if (!pending || reply.id !== pending.id || this.buffer.length)
-          throw new Error("Unsolicited runner response");
-        this.pending = undefined;
-        if (reply.ok && reply.result) pending.resolve(reply.result);
-        else
-          pending.reject(
-            new AppError(503, reply.error ?? "作業プロセスで失敗しました"),
+      let end: number;
+      while ((end = this.buffer.indexOf(10)) >= 0) {
+        try {
+          const reply = replySchema.parse(
+            JSON.parse(this.buffer.subarray(0, end).toString("utf8")),
           );
-      } catch {
-        this.fail();
+          this.buffer = this.buffer.subarray(end + 1);
+          const pending = this.pending.get(reply.id);
+          if (!pending) throw new Error("Unsolicited runner response");
+          this.pending.delete(reply.id);
+          if (reply.ok && reply.result) pending.resolve(reply.result);
+          else
+            pending.reject(
+              new AppError(503, reply.error ?? "作業プロセスで失敗しました"),
+            );
+        } catch {
+          this.fail();
+          return;
+        }
       }
     });
     // Worker stderr is intentionally not a service log channel.
@@ -85,22 +89,28 @@ export class WorkerClient implements Runner {
   }
   private fail(): void {
     this.broken = true;
-    this.pending?.reject(
-      new AppError(503, "作業プロセスが応答しません。処理結果の確認が必要です"),
-    );
-    this.pending = undefined;
+    for (const pending of this.pending.values())
+      pending.reject(
+        new AppError(
+          503,
+          "作業プロセスが応答しません。処理結果の確認が必要です",
+        ),
+      );
+    this.pending.clear();
+    this.child?.stdin.end();
   }
+
   async call(
-    jobId: string,
+    conversationId: string,
     op: WorkerRequest["op"],
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<WorkerResult> {
-    if (!this.child || this.broken || this.pending)
+    if (!this.child || this.broken)
       throw new AppError(503, "作業環境を利用できません");
     if (signal?.aborted) throw new AppError(409, "処理は停止されています");
     const id = randomUUID(),
-      wire = JSON.stringify({ id, jobId, op, args }) + "\n";
+      wire = JSON.stringify({ id, conversationId, op, args }) + "\n";
     if (Buffer.byteLength(wire) > PROTOCOL_BYTES)
       throw new AppError(413, "作業入力が上限を超えています");
     let timer: NodeJS.Timeout | undefined;
@@ -108,7 +118,7 @@ export class WorkerClient implements Runner {
       this.child?.stdin.write(JSON.stringify({ type: "cancel", id }) + "\n");
     try {
       return await new Promise<WorkerResult>((resolve, reject) => {
-        this.pending = { id, resolve, reject };
+        this.pending.set(id, { resolve, reject });
         signal?.addEventListener("abort", cancel, { once: true });
         if (signal?.aborted) cancel();
         timer = setTimeout(() => {

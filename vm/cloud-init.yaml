@@ -35,26 +35,7 @@ packages:
   - apparmor
   - sudo
   - util-linux
-  - fonts-noto-cjk
-  - poppler-utils
-  - libnss3
-  - libatk1.0-0t64
-  - libatk-bridge2.0-0t64
-  - libcups2t64
-  - libdrm2
-  - libxkbcommon0
-  - libxcomposite1
-  - libxdamage1
-  - libxfixes3
-  - libxrandr2
-  - libgbm1
-  - libasound2t64
-  - libpango-1.0-0
-  - libcairo2
 write_files:
-  - path: /etc/modules-load.d/agent-fw-cfg.conf
-    permissions: "0644"
-    content: qemu_fw_cfg
   - path: /usr/local/libexec/agent-initial-disk
     permissions: "0700"
     encoding: b64

@@ -13,7 +13,13 @@ import {
 } from "node:fs/promises";
 import { createServer } from "node:http";
 
-const ids = ["S01", "S02", "S03", "S04", "S05", "W02", "R10", "V09"];
+const ids = [
+  "guest-uid",
+  "guest-egress",
+  "guest-cli",
+  "guest-cgroup",
+  "guest-lock",
+];
 function blocked(reason) {
   console.log(JSON.stringify({ result: "blocked", ids, reason }));
   process.exit(77);
@@ -143,12 +149,17 @@ try {
   assert.equal(health.uid, 981);
   await runner.call(id, "init", {});
   const shell = async (text) => {
-    const result = await runner.call(id, "shell", {
-      command: text,
-      timeout: 15,
-      maxBytes: 1048576,
+    const result = await runner.call(id, "tool", {
+      name: "bash",
+      args: { command: text },
+      commandSeconds: 15,
+      commandBytes: 1048576,
     });
-    assert.equal(result.exitCode, 0, "Worker boundary check failed");
+    assert.equal(
+      result.result?.isError,
+      undefined,
+      "Worker boundary check failed",
+    );
     return result;
   };
   await shell(
@@ -160,27 +171,30 @@ try {
   await shell(
     "getent ahostsv4 example.com >/dev/null && curl --connect-timeout 5 -fsS https://example.com/ >/dev/null && curl --connect-timeout 2 -fsS http://127.0.0.1:3098/ >/dev/null",
   );
-  const shellQuote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
-  const browserScript = `import {chromium} from '/opt/agent/node_modules/playwright/index.mjs'; const b=await chromium.launch({headless:true,chromiumSandbox:true});try{const p=await b.newPage();let blocked=false;try{await p.goto('http://127.0.0.1:8080/',{timeout:3000})}catch{blocked=true}if(!blocked)throw Error('control API reachable');await p.goto('http://127.0.0.1:3098/');if(!await p.title())throw Error('preview failed')}finally{await b.close()}`;
-  await shell(
-    `/opt/agent-node/bin/node --input-type=module -e ${shellQuote(browserScript)}`,
-  );
-  await runner.call(id, "write", {
-    path: "project/dependency/package.json",
-    text: '{"name":"guest-local-fixture","version":"1.0.0","main":"index.js"}',
+  await runner.call(id, "tool", {
+    name: "write",
+    args: {
+      path: "dependency/package.json",
+      content:
+        '{"name":"guest-local-fixture","version":"1.0.0","main":"index.js"}',
+    },
+    commandSeconds: 15,
+    commandBytes: 1048576,
   });
-  await runner.call(id, "write", {
-    path: "project/dependency/index.js",
-    text: "module.exports = 42;\n",
+  await runner.call(id, "tool", {
+    name: "write",
+    args: { path: "dependency/index.js", content: "module.exports = 42;\n" },
+    commandSeconds: 15,
+    commandBytes: 1048576,
   });
   await shell(
-    "cd project && npm install --ignore-scripts --no-audit --no-fund ./dependency && node -e 'if(require(\"guest-local-fixture\")!==42)process.exit(1)' && python3 -m venv .venv",
+    "npm install --ignore-scripts --no-audit --no-fund ./dependency && node -e 'if(require(\"guest-local-fixture\")!==42)process.exit(1)' && python3 -m venv .venv",
   );
   assert.equal((await runner.call(id, "cleanup", {})).cleanup, true);
   await runner.close();
   await writeFile(
     probePath,
-    `import {WorkerClient} from '/opt/agent/dist/src/execution/client.js';const r=new WorkerClient();await r.ready();await r.call('${id}','shell',{command:'setsid /bin/sh -c "sleep 300" >/dev/null 2>&1 & wait',timeout:300,maxBytes:1048576});`,
+    `import {WorkerClient} from '/opt/agent/dist/src/execution/client.js';const r=new WorkerClient();await r.ready();await r.call('${id}','tool',{name:'bash',args:{command:'setsid /bin/sh -c "sleep 300" >/dev/null 2>&1 & wait'},commandSeconds:300,commandBytes:1048576});`,
     { flag: "wx", mode: 0o644 },
   );
   command("systemd-run", [
@@ -236,5 +250,8 @@ try {
   spawnSync("systemctl", ["stop", unit]);
   await unlink(secret).catch(() => undefined);
   await unlink(probePath).catch(() => undefined);
-  await rm(`/srv/agent-data/work/jobs/${id}`, { recursive: true, force: true });
+  await rm(`/srv/agent-data/work/conversations/${id}`, {
+    recursive: true,
+    force: true,
+  });
 }

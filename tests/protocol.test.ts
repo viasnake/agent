@@ -10,7 +10,7 @@ import type { WorkerRequest, WorkerResult } from "../src/execution/protocol.js";
 
 test("S02: real worker stdio protocol, file operations, command cancellation and allowlisted shell environment", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-worker-protocol-")),
-    jobId = randomUUID();
+    conversationId = randomUUID();
   const child = spawn(
     process.execPath,
     [resolve(".test-dist/tests/worker-child.js"), root],
@@ -48,36 +48,37 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
     const result = new Promise<WorkerResult>((resolve, reject) => {
       pending.set(id, { resolve, reject });
     });
-    child.stdin.write(JSON.stringify({ id, jobId, op, args }) + "\n");
+    child.stdin.write(JSON.stringify({ id, conversationId, op, args }) + "\n");
     return { id, result };
   };
   try {
     assert.equal((await send("health", {}).result).uid, process.getuid?.());
     await send("init", {}).result;
-    await send("write", {
-      path: "project/message.txt",
-      text: "実プロトコルの確認",
+    const tool = (name: string, args: Record<string, unknown>) =>
+      send("tool", { name, args, commandSeconds: 40, commandBytes: 1048576 });
+    await tool("write", {
+      path: "outputs/message.txt",
+      content: "実プロトコルの確認",
     }).result;
-    assert.equal(
-      (await send("read", { path: "project/message.txt" }).result).text,
-      "実プロトコルの確認",
+    assert.match(
+      JSON.stringify(
+        await tool("read", { path: "outputs/message.txt" }).result,
+      ),
+      /実プロトコルの確認/,
     );
-    const environment = await send("shell", {
+    const environment = await tool("bash", {
       command:
         'test -z "${AGENT_CONTROL_TOKEN-}${NODE_OPTIONS-}${LD_PRELOAD-}"',
-      env: { NODE_OPTIONS: "--invalid-injection" },
-      timeout: 5,
-      maxBytes: 1048576,
     }).result;
-    assert.equal(environment.exitCode, 0);
-    const running = send("shell", {
+    assert.equal(environment.result?.isError, undefined);
+    const running = tool("bash", {
       command: "printf started > child-marker; sleep 30",
-      timeout: 40,
-      maxBytes: 1048576,
     });
     for (let attempt = 0; attempt < 200; attempt++) {
       try {
-        await readFile(join(root, "jobs", jobId, "child-marker"));
+        await readFile(
+          join(root, "conversations", conversationId, "child-marker"),
+        );
         break;
       } catch {
         await new Promise((resolveWait) => setTimeout(resolveWait, 10));
@@ -86,7 +87,7 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
     child.stdin.write(
       JSON.stringify({ type: "cancel", id: running.id }) + "\n",
     );
-    assert.equal((await running.result).exitCode, 124);
+    assert.equal((await running.result).result?.isError, true);
     assert.equal((await send("cleanup", {}).result).cleanup, true);
   } finally {
     const exit = new Promise<void>((resolveExit, reject) => {

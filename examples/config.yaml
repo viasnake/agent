@@ -1,19 +1,29 @@
-schemaVersion: 1
+schemaVersion: 2
 dataRoot: /srv/agent-data
 expectedMountLabel: AGENT_DATA
 server:
   host: 0.0.0.0
   port: 8080
-  origins: [http://127.0.0.1:8080, http://localhost:8080]
-# Register a model only after approving external disclosure and paid API use.
+  origins:
+    - http://127.0.0.1:8080
+    - http://localhost:8080
+model: null
 # model:
 #   provider: openai
 #   id: YOUR_SELECTED_MODEL_ID
 #   keyFile: /srv/agent-data/control/secrets/model-key
 #   disclosureApproved: true
-model: null
-# github:
-#   repositories: [YOUR_OWNER/YOUR_REPOSITORY]
-#   tokenFile: /srv/agent-data/control/secrets/github-token
-github: null
-recoveryHold: false
+instructions: ""
+# Only stdio is supported. Commands run as agent-work, with its HOME and permissions.
+# Configure only explicitly approved servers. Use existing work-side credential files.
+mcp: []
+# mcp:
+#   - name: local-tools
+#     command: /absolute/path/to/server
+#     args: []
+limits:
+  modelRequests: 60
+  runSeconds: 3600
+  commandSeconds: 300
+  commandBytes: 10485760
+  fileBytes: 20971520

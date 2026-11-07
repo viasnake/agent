@@ -12,22 +12,7 @@ import { AppError } from "./security.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 
 const requestId = z.string().uuid();
-const revision = z.number().int().positive();
 const identifier = z.object({ id: z.string().uuid() });
-const createSchema = z
-  .object({
-    requestId,
-    title: z.string().min(1).max(200),
-    objective: z.string().min(1).max(64000),
-    kind: z.enum(["code", "research"]),
-    acceptance: z.array(z.string().min(1).max(1000)).min(1).max(20),
-    project: z.string().max(100).default(""),
-    parentId: z.string().uuid().optional(),
-    repoUrl: z.string().url().max(2000).optional(),
-    attachmentIds: z.array(z.string().uuid()).max(20).default([]),
-    externalAllowed: z.boolean().default(false),
-  })
-  .strict();
 const digest = (value: string) => createHash("sha256").update(value).digest();
 type Session = { csrf: string; expires: number };
 export async function createServer(
@@ -167,162 +152,100 @@ export async function createServer(
       );
     return value;
   };
-  app.get("/api/jobs", async (request) => {
-    const { offset, limit } = z
-      .object({
-        offset: z.coerce.number().int().min(0).default(0),
-        limit: z.coerce.number().int().min(1).max(50).default(30),
-      })
-      .parse(request.query);
-    const state = await service.snapshot();
-    return safe({
-      jobs: [...state.jobs]
-        .reverse()
-        .slice(offset, offset + limit)
-        .map((job) => ({
-          id: job.id,
-          title: job.title,
-          status: job.status,
-          waitReason: job.waitReason,
-          detail: job.detail,
-          revision: job.revision,
-          updatedAt: job.updatedAt,
-        })),
-      nextOffset: offset + limit < state.jobs.length ? offset + limit : null,
-    });
+  app.get("/api/conversations", async () =>
+    safe({ conversations: (await service.list()).reverse() }),
+  );
+  app.post("/api/conversations", async (request, reply) => {
+    const body = z
+      .object({ requestId, title: z.string().min(1).max(200) })
+      .strict()
+      .parse(request.body);
+    return reply
+      .code(201)
+      .send(await service.create(body.requestId, body.title));
   });
-  app.post("/api/jobs", async (request, reply) => {
-    const result = await service.create(createSchema.parse(request.body));
-    return reply.code(202).send(result);
-  });
-  app.get("/api/jobs/:id", async (request) => {
-    const { id } = identifier.parse(request.params);
-    const { cursor } = z
-      .object({ cursor: z.string().max(3000).optional() })
-      .parse(request.query);
-    const parsedCursor = cursor
+  app.get("/api/conversations/:id", async (request) => {
+    const { id } = identifier.parse(request.params),
+      { cursor } = z
+        .object({ cursor: z.string().max(3000).optional() })
+        .parse(request.query);
+    const parsed = cursor
       ? (z
           .record(z.string(), z.json())
           .parse(
             JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")),
           ) as Cursor)
       : undefined;
-    const view = await service.view(id, parsedCursor);
-    return safe(view);
+    return safe(await service.view(id, parsed));
   });
-  app.post("/api/jobs/:id/inputs", async (request, reply) => {
+  app.post("/api/conversations/:id/messages", async (request, reply) => {
     const { id } = identifier.parse(request.params),
       body = z
-        .object({ requestId, text: z.string().min(1).max(16000) })
+        .object({ requestId, text: z.string().min(1).max(64000) })
         .strict()
         .parse(request.body);
     return reply
       .code(202)
-      .send(await service.input(id, body.requestId, body.text));
+      .send(await service.send(id, body.requestId, body.text));
   });
-  app.post("/api/jobs/:id/actions", async (request, reply) => {
+  app.post("/api/conversations/:id/resume", async (request, reply) => {
     const { id } = identifier.parse(request.params),
-      body = z
-        .object({
-          requestId,
-          revision,
-          action: z.enum(["pause", "resume", "cancel"]),
-          extensionSeconds: z.number().int().min(60).max(86400).optional(),
-          additionalModelRequests: z.number().int().min(1).max(60).optional(),
-          useConfiguredModel: z.boolean().optional(),
-        })
-        .strict()
-        .parse(request.body);
+      body = z.object({ requestId }).strict().parse(request.body);
     return reply
       .code(202)
-      .send(
-        await service.action(
-          id,
-          body.requestId,
-          body.revision,
-          body.action,
-          body.extensionSeconds,
-          body.additionalModelRequests,
-          body.useConfiguredModel,
-        ),
-      );
+      .send(await service.send(id, body.requestId, "", true));
   });
-  app.post("/api/jobs/:id/approvals", async (request, reply) => {
-    const { id } = identifier.parse(request.params),
-      body = z
-        .object({
-          requestId,
-          revision,
-          operationId: z.string().uuid(),
-          approved: z.boolean(),
-        })
-        .strict()
-        .parse(request.body);
-    return reply
-      .code(202)
-      .send(
-        await service.approve(
-          id,
-          body.requestId,
-          body.revision,
-          body.operationId,
-          body.approved,
-        ),
-      );
+  app.post("/api/conversations/:id/stop", async (request) => {
+    const { id } = identifier.parse(request.params);
+    z.object({}).strict().parse(request.body);
+    return service.stop(id);
   });
-  app.post("/api/jobs/:id/reconciliations", async (request, reply) => {
+  app.get("/api/conversations/:id/files", async (request) => {
+    const { id } = identifier.parse(request.params);
+    return service.files(id);
+  });
+  app.get("/api/conversations/:id/download", async (request, reply) => {
     const { id } = identifier.parse(request.params),
-      body = z
-        .object({
-          requestId,
-          revision,
-          operationId: z.string().max(100),
-          resolution: z.enum([
-            "check_github",
-            "completed",
-            "not_executed",
-            "acknowledge_recovery",
-          ]),
-          evidence: z.string().min(8).max(8000),
-        })
+      { path } = z
+        .object({ path: z.string().max(240) })
         .strict()
-        .parse(request.body);
+        .parse(request.query);
+    const bytes = await service.download(id, path),
+      name = path.split("/").at(-1)!;
     return reply
-      .code(202)
-      .send(
-        await service.reconcile(
-          id,
-          body.requestId,
-          body.revision,
-          body.operationId,
-          body.resolution,
-          body.evidence,
-        ),
-      );
+      .header("Content-Type", "application/octet-stream")
+      .header(
+        "Content-Disposition",
+        `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      )
+      .header("Content-Security-Policy", "sandbox; default-src 'none'")
+      .send(bytes);
   });
   app.post(
-    "/api/uploads",
+    "/api/conversations/:id/uploads",
     { bodyLimit: 28 * 1024 * 1024 },
     async (request, reply) => {
-      const body = z
-        .object({
-          requestId,
-          name: z
-            .string()
-            .min(1)
-            .max(150)
-            .refine((s) => !/[\\/\x00-\x1f]/.test(s)),
-          data: z
-            .string()
-            .max(28 * 1024 * 1024)
-            .regex(/^[A-Za-z0-9+/]*={0,2}$/),
-        })
-        .strict()
-        .parse(request.body);
+      const { id } = identifier.parse(request.params),
+        body = z
+          .object({
+            requestId,
+            name: z
+              .string()
+              .min(1)
+              .max(150)
+              .refine((s) => !/[\\/\x00-\x1f]/.test(s)),
+            data: z
+              .string()
+              .max(28 * 1024 * 1024)
+              .regex(/^[A-Za-z0-9+/]*={0,2}$/),
+          })
+          .strict()
+          .parse(request.body);
       return reply
         .code(201)
         .send(
           await service.upload(
+            id,
             body.requestId,
             body.name,
             Buffer.from(body.data, "base64"),
@@ -330,70 +253,13 @@ export async function createServer(
         );
     },
   );
-  app.get("/api/artifacts/:id/download", async (request, reply) => {
+  app.get("/api/conversations/:id/events", async (request, reply) => {
     const { id } = identifier.parse(request.params),
-      state = await service.snapshot();
-    const artifact = state.jobs
-      .flatMap((job) => job.artifacts)
-      .find((item) => item.id === id);
-    if (!artifact) throw new AppError(404, "成果物がありません");
-    const bytes = await service.artifacts.read(artifact);
-    return reply
-      .header("Content-Type", artifact.mediaType)
-      .header(
-        "Content-Disposition",
-        `attachment; filename="artifact"; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
-      )
-      .header("Content-Security-Policy", "sandbox; default-src 'none'")
-      .send(bytes);
-  });
-  app.get("/api/settings", async () => {
-    const state = await service.snapshot();
-    return safe({
-      ...state.settings,
-      modelConfigured: service.modelState() === "ready",
-      modelState: service.modelState(),
-      model: service.config.model
-        ? {
-            provider: service.config.model.provider,
-            id: service.config.model.id,
-          }
-        : null,
-      repositories: service.config.github?.repositories ?? [],
-      recoveryHold: state.recoveryHold,
-      limits: service.config.limits,
-    });
-  });
-  app.patch("/api/settings", async (request) => {
-    const body = z
-      .object({
-        requestId,
-        revision,
-        commonInstructions: z.string().max(16000),
-        projectNotes: z
-          .record(z.string().max(100), z.string().max(16000))
-          .refine((value) => Object.keys(value).length <= 50),
-      })
-      .strict()
-      .parse(request.body);
-    return service.settings(
-      body.requestId,
-      body.revision,
-      body.commonInstructions,
-      body.projectNotes,
-    );
-  });
-  app.get("/api/jobs/:id/events", async (request, reply) => {
-    const { id } = identifier.parse(request.params),
-      job = await service.job(id);
+      pi = await service.piConversation(id);
     if (streams >= 8) throw new AppError(429, "進捗接続の上限に達しました");
+    const watch = await pi.watch(ctx, { min: 20, max: 40 }),
+      token = request.cookies.agent_session!;
     streams++;
-    const sessionToken = request.cookies.agent_session!,
-      conversation = (await service.harness.conversation(
-        job.conversationId,
-        ctx,
-      ))!,
-      watch = await conversation.watch(ctx, { min: 20, max: 40 });
     reply.hijack();
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -405,75 +271,72 @@ export async function createServer(
     let closed = false,
       pending = false,
       sending = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      streams--;
+      clearInterval(heartbeat);
+      service.notifications.delete(changed);
+      void watch.stop();
+      reply.raw.end();
+    };
     const send = async () => {
-      if (closed || sending) {
+      if (closed) return;
+      if (sending) {
         pending = true;
-        return;
-      }
-      if (
-        !sessions.has(sessionToken) ||
-        sessions.get(sessionToken)!.expires < Date.now()
-      ) {
-        reply.raw.end();
         return;
       }
       sending = true;
       try {
-        const view = safe(await service.view(id));
-        const packet = `event: snapshot\ndata: ${JSON.stringify(view)}\n\n`;
-        if (!reply.raw.write(packet))
-          await new Promise<void>((resolve) => {
-            reply.raw.once("drain", resolve);
-            reply.raw.once("close", resolve);
-          });
+        do {
+          pending = false;
+          const session = sessions.get(token);
+          if (!session || session.expires < Date.now()) {
+            close();
+            return;
+          }
+          const wire = `event: snapshot\ndata: ${JSON.stringify(safe(await service.view(id)))}\n\n`;
+          if (reply.raw.writableLength > 512 * 1024) {
+            close();
+            return;
+          }
+          if (!reply.raw.write(wire))
+            await new Promise<void>((resolve) => {
+              reply.raw.once("drain", resolve);
+              reply.raw.once("close", resolve);
+            });
+        } while (pending && !closed);
       } catch {
-        reply.raw.end();
+        close();
       } finally {
         sending = false;
       }
     };
-    const update = () => {
-      pending = true;
+    const changed = () => {
+      void send();
     };
-    service.notifications.add(update);
-    watch.start(async () => {
-      pending = true;
-    });
-    const flush = setInterval(() => {
-      if (pending) {
-        pending = false;
-        void send();
-      }
-    }, 250);
     const heartbeat = setInterval(() => {
-      if (!closed && !sending) {
-        if (!sessions.has(sessionToken)) reply.raw.end();
-        else reply.raw.write(": heartbeat\n\n");
+      if (!closed) {
+        if (!service.healthy()) close();
+        else changed();
       }
-    }, 15000);
-    reply.raw.on("close", () => {
-      closed = true;
-      clearInterval(flush);
-      clearInterval(heartbeat);
-      service.notifications.delete(update);
-      streams--;
-      void watch.stop();
+    }, 10000);
+    service.notifications.add(changed);
+    request.raw.on("close", close);
+    reply.raw.on("close", close);
+    watch.start(async () => {
+      await send();
     });
     await send();
   });
-  for (const [route, file, type] of [
+  for (const [path, name, type] of [
     ["/", "index.html", "text/html; charset=utf-8"],
     ["/app.js", "app.js", "text/javascript; charset=utf-8"],
     ["/style.css", "style.css", "text/css; charset=utf-8"],
   ]) {
-    app.get(route!, async (_request, reply) =>
-      reply.type(type!).send(await readFile(joinPath(webRoot, file!))),
+    app.get(path!, async (_request, reply) =>
+      reply.type(type!).send(await readFile(webRoot + name!)),
     );
   }
   return app;
-}
-function joinPath(root: string, name: string): string {
-  return fileURLToPath(
-    new URL(name, root.endsWith("/") ? `file://${root}` : `file://${root}/`),
-  );
 }

@@ -63,7 +63,7 @@ def provision():
     subprocess.run(["mount", "/srv/agent-data"], check=not os.path.ismount(root))
     if run("findmnt", "-n", "-o", "UUID", "--mountpoint", str(root)) != uuid:
         raise RuntimeError("Wrong data mount")
-    for user, names in {"agent-control": ["control", "control/secrets", "control/artifacts", "control/uploads"], "agent-work": ["work", "work/jobs", "work/home", "work/tmp"]}.items():
+    for user, names in {"agent-control": ["control", "control/secrets"], "agent-work": ["work", "work/conversations", "work/home", "work/tmp"]}.items():
         account = pwd.getpwnam(user)
         for name in names:
             path = root / name
