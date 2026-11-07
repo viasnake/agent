@@ -29,7 +29,9 @@ export const modelInput = z
   .object({
     id: identifier,
     provider: z.literal("openai"),
-    model: z.string().trim().min(1).max(200),
+    // Legacy model choices remain readable; new entries only configure credentials.
+    model: z.string().trim().min(1).max(200).optional(),
+    name: z.string().trim().max(100).optional(),
     key: secret.optional(),
     auth: z.enum(["api_key", "oauth"]).optional(),
   })
@@ -71,6 +73,7 @@ export const mcpInput = z
       if (!s.command.startsWith("/") || s.auth !== "none")
         ctx.addIssue({
           code: "custom",
+          path: [!s.command.startsWith("/") ? "command" : "auth"],
           message:
             "stdio requires an absolute command and environment authentication",
         });
@@ -88,6 +91,7 @@ export const mcpInput = z
       } catch {
         ctx.addIssue({
           code: "custom",
+          path: ["url"],
           message: "HTTP(S) URL required; authentication requires HTTPS",
         });
       }

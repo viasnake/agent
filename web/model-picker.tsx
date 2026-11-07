@@ -2,7 +2,7 @@ import { useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "./icons.js";
 
-type Choice = { id: string; name: string; available?: boolean };
+type Choice = { id: string; name: string; available?: boolean; group?: string };
 export function ModelPicker({
   value,
   models,
@@ -26,7 +26,9 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const selected = models.find((m) => m.id === value);
   const choices = models.filter((m) =>
-    `${m.name} OpenAI`.toLowerCase().includes(query.trim().toLowerCase()),
+    `${m.name} ${m.group ?? "OpenAI"}`
+      .toLowerCase()
+      .includes(query.trim().toLowerCase()),
   );
   function close() {
     dialog.current?.close();
@@ -119,33 +121,41 @@ export function ModelPicker({
                 buttons[next]?.focus();
               }}
             >
-              {choices.length > 0 && <div className="model-group">OpenAI</div>}
-              {choices.map((m) => (
-                <button
-                  type="button"
-                  key={m.id}
-                  className="model-option"
-                  aria-pressed={m.id === value}
-                  onClick={() => {
-                    close();
-                    onChange(m.id);
-                  }}
-                >
-                  <span className="model-option-icon">
-                    <Icon name="agent" />
-                  </span>
-                  <span className="model-option-name">
-                    {m.name}
-                    {m.available === false && <small>未認証</small>}
-                  </span>
-                  {m.id === value && <Icon name="check" />}
-                </button>
-              ))}
+              {[...new Set(choices.map((m) => m.group ?? "OpenAI"))].map(
+                (group) => (
+                  <div key={group} role="group" aria-label={group}>
+                    <div className="model-group">{group}</div>
+                    {choices
+                      .filter((m) => (m.group ?? "OpenAI") === group)
+                      .map((m) => (
+                        <button
+                          type="button"
+                          key={m.id}
+                          className="model-option"
+                          aria-pressed={m.id === value}
+                          onClick={() => {
+                            close();
+                            onChange(m.id);
+                          }}
+                        >
+                          <span className="model-option-icon">
+                            <Icon name="agent" />
+                          </span>
+                          <span className="model-option-name">
+                            {m.name}
+                            {m.available === false && <small>未認証</small>}
+                          </span>
+                          {m.id === value && <Icon name="check" />}
+                        </button>
+                      ))}
+                  </div>
+                ),
+              )}
               {!choices.length && (
                 <p className="model-empty">
                   {models.length
                     ? "一致するモデルがありません"
-                    : "モデルが登録されていません"}
+                    : "接続が登録されていません"}
                 </p>
               )}
             </div>
@@ -160,7 +170,7 @@ export function ModelPicker({
                   }}
                 >
                   <Icon name="plus" />
-                  モデルを管理
+                  接続を管理
                 </button>
               </footer>
             )}

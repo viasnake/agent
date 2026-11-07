@@ -14,6 +14,7 @@ export type Conversation = {
   detail: string;
   updatedAt: number;
   modelConfigId?: string;
+  model?: string;
 };
 export type View = {
   conversation: Conversation;
@@ -121,6 +122,24 @@ export function fileSize(size: number) {
 
 export type ModelOptions = {
   catalog: string[];
-  models: { id: string; name: string; available: boolean }[];
+  models: { id: string; name: string; model?: string; available: boolean }[];
   initialModel: string | null;
 };
+
+export function modelChoices(options: ModelOptions) {
+  return options.models.flatMap((connection) =>
+    [
+      ...new Set([
+        ...(connection.model ? [connection.model] : []),
+        ...options.catalog,
+      ]),
+    ].map((model) => ({
+      id: JSON.stringify([connection.id, model]),
+      name: model,
+      group: connection.name,
+      connectionId: connection.id,
+      model,
+      available: connection.available,
+    })),
+  );
+}

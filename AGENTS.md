@@ -96,10 +96,12 @@ discovered internal hosts do not inherit this permission. Preserve existing gran
 without exposing a separate host-list editor. Consult /etc/agent/protected-cidrs.nft;
 missing network policy fails closed.
 
-Store the selected model configuration ID in each conversation through Pi Documents.
+Store the selected credential configuration ID and actual model ID in each conversation
+through Pi Documents. Settings entries manage provider credentials independently
+of model choice; keep legacy per-entry model values readable without rewriting data.
 Only idle/interrupted conversations can change it; never silently replace a deleted
 selection with another model. Keep legacy defaultModel only as the initial selection.
-Expose model catalog choices in settings and configured models in the conversation UI.
+Expose the Pi model catalog under each configured connection in the conversation UI.
 Apply settings at the next idle execution admission. Do not mutate a running
 provider, tools or budgets. Install/uninstall server extensions using the Pi
 Registry; isolate each connection failure and never replay an ambiguous tool
@@ -110,8 +112,13 @@ Use short UI labels (Test, stdio, arguments) and named MCP cards with enabled fi
 Environment variables use name/value rows; unchanged secret values stay server-side.
 A blank edited key deletes that credential, not its model or conversation.
 Keep credential-delegation rules in this guidance, not helper prose in forms.
-Use a searchable model picker shared by settings and the conversation composer;
+Use a searchable model picker in the conversation composer;
 persist selections server-side and retain keyboard navigation and focus restoration.
+Model and MCP settings use collapsible sections. Do not show application branding.
+Transient results use one dismissible bottom-right notification with timed dismissal;
+pause dismissal on keyboard focus and keep essential connection state visible.
+Starting ChatGPT authorization saves edited settings first; deleting a connection
+removes its stored credentials while retaining conversations and their selections.
 A model connection test requires explicit inference/usage confirmation.
 OpenAI API-key and ChatGPT OAuth are separate explicit selections: never fall back
 between billing sources or to ambient credentials. Persist the installation UUID,

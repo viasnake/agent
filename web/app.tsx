@@ -1,3 +1,4 @@
+import { NotificationProvider, useNotify } from "./notifications.js";
 import { ModelPicker } from "./model-picker.js";
 import type { ReactNode } from "react";
 import { Settings } from "./settings.js";
@@ -14,6 +15,7 @@ import {
 import type { AppendMessage } from "@assistant-ui/react";
 import {
   api,
+  modelChoices,
   ApiError,
   setCsrf,
   fileSize,
@@ -264,11 +266,13 @@ function Chat({
 }
 
 function App() {
+  const notify = useNotify();
   const [modelOptions, setModelOptions] = useState<ModelOptions>({
     catalog: [],
     models: [],
     initialModel: null,
   });
+  const choices = useMemo(() => modelChoices(modelOptions), [modelOptions]);
   const [draftModel, setDraftModel] = useState("");
   const [changingModel, setChangingModel] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(
@@ -289,12 +293,16 @@ function App() {
   const [sidebar, setSidebar] = useState(false);
   const [connection, setConnection] = useState("接続中");
   const [error, setError] = useState("");
-  const notice = useCallback((error: unknown) => {
-    if (error instanceof ApiError && error.status === 401) setReady(false);
-    setError(
-      error instanceof Error ? error.message : "操作を完了できませんでした",
-    );
-  }, []);
+  const notice = useCallback(
+    (error: unknown) => {
+      if (error instanceof ApiError && error.status === 401) setReady(false);
+      const message =
+        error instanceof Error ? error.message : "操作を完了できませんでした";
+      setError(message);
+      notify(message, true);
+    },
+    [notify],
+  );
   const list = useCallback(async () => {
     const result = await api<{ conversations: Conversation[] }>(
       "/api/conversations",
@@ -347,10 +355,14 @@ function App() {
       .then((options) => {
         if (!active) return;
         setModelOptions(options);
+        const available = modelChoices(options);
         setDraftModel((old) =>
-          options.models.some((m) => m.id === old)
+          available.some((m) => m.id === old)
             ? old
-            : (options.initialModel ?? ""),
+            : (available.find((m) => m.connectionId === options.initialModel)
+                ?.id ??
+              available[0]?.id ??
+              ""),
         );
       })
       .catch(notice);
@@ -358,9 +370,11 @@ function App() {
       active = false;
     };
   }, [ready, settingsOpen, notice]);
-  async function changeModel(modelId: string) {
+  async function changeModel(choiceId: string) {
+    const choice = choices.find((m) => m.id === choiceId);
+    if (!choice) return;
     if (!selectedRef.current) {
-      setDraftModel(modelId);
+      setDraftModel(choiceId);
       return;
     }
     setChangingModel(true);
@@ -369,7 +383,7 @@ function App() {
         await api<View>(
           `/api/conversations/${selectedRef.current}/model`,
           "PUT",
-          { modelId },
+          { modelId: choice.connectionId, model: choice.model },
         ),
       );
     } catch (error) {
@@ -435,16 +449,20 @@ function App() {
       let id = selectedRef.current;
       if (!id) {
         const title = text.slice(0, 80);
+        const choice = choices.find((m) => m.id === draftModel);
+        const selection = choice
+          ? { modelId: choice.connectionId, model: choice.model }
+          : {};
         const created = await api<{ id: string }>(
           "/api/conversations",
           "POST",
           {
             requestId: await requestId("create", {
               title,
-              ...(draftModel ? { modelId: draftModel } : {}),
+              ...selection,
             }),
             title,
-            ...(draftModel ? { modelId: draftModel } : {}),
+            ...selection,
           },
         );
         id = created.id;
@@ -547,19 +565,13 @@ function App() {
         id="sidebar"
         className={`sidebar ${sidebar ? "sidebar-open" : ""}`}
       >
-        <div className="brand">
-          <span className="brand-icon">
-            <Icon name="agent" />
-          </span>
-          <span>Agent</span>
-          <button
-            className="mobile-only btn-text theme-secondary btn-sm ms-auto"
-            aria-label="会話一覧を閉じる"
-            onClick={() => setSidebar(false)}
-          >
-            <Icon name="close" />
-          </button>
-        </div>
+        <button
+          className="sidebar-close mobile-only btn-text theme-secondary btn-sm"
+          aria-label="会話一覧を閉じる"
+          onClick={() => setSidebar(false)}
+        >
+          <Icon name="close" />
+        </button>
         <button
           id="new-conversation"
           className="btn-outline theme-secondary new-conversation"
@@ -643,22 +655,6 @@ function App() {
               )}
             </div>
           </header>
-          {error && (
-            <div
-              id="error"
-              className="alert theme-danger workspace-notice"
-              role="alert"
-            >
-              {error}
-              <button
-                className="btn-text theme-secondary btn-sm"
-                aria-label="エラーを閉じる"
-                onClick={() => setError("")}
-              >
-                <Icon name="close" />
-              </button>
-            </div>
-          )}
           {currentStatus === "interrupted" && (
             <p
               id="detail"
@@ -716,8 +712,19 @@ function App() {
               <ModelPicker
                 label="会話のモデル"
                 compact
-                value={view?.conversation.modelConfigId ?? draftModel}
-                models={modelOptions.models}
+                value={
+                  view?.conversation.modelConfigId
+                    ? JSON.stringify([
+                        view.conversation.modelConfigId,
+                        view.conversation.model ??
+                          modelOptions.models.find(
+                            (m) => m.id === view.conversation.modelConfigId,
+                          )?.model ??
+                          modelOptions.catalog[0],
+                      ])
+                    : draftModel
+                }
+                models={choices}
                 disabled={
                   sending ||
                   changingModel ||
@@ -741,4 +748,8 @@ function App() {
     </div>
   );
 }
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <NotificationProvider>
+    <App />
+  </NotificationProvider>,
+);

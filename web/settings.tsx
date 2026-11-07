@@ -1,4 +1,4 @@
-import { ModelPicker } from "./model-picker.js";
+import { useNotify } from "./notifications.js";
 import { useEffect, useState } from "react";
 import type { ModelLogin } from "../src/model-auth.js";
 import type { AgentService } from "../src/service.js";
@@ -14,9 +14,10 @@ function editable(s: PublicSettings): SettingsInput {
     defaultModel: s.defaultModel,
     instructions: s.instructions,
     limits: s.limits,
-    models: s.models.map(({ id, provider, model, auth }) => ({
+    models: s.models.map(({ id, provider, model, auth, name }) => ({
       id,
       provider,
+      name,
       model,
       auth,
     })),
@@ -48,6 +49,16 @@ function editable(s: PublicSettings): SettingsInput {
   };
 }
 export function Settings({ onClose }: { onClose: () => void }) {
+  const notify = useNotify();
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  function toggle(id: string, open: boolean) {
+    setExpanded((old) => {
+      const next = new Set(old);
+      if (open) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
   const [login, setLogin] = useState<ModelLogin>();
   const [callbackUrl, setCallbackUrl] = useState("");
   const loginPending =
@@ -60,10 +71,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       : "models",
   );
   const [busy, setBusy] = useState(false),
-    [dirty, setDirty] = useState(false),
-    [error, setError] = useState(""),
-    [notice, setNotice] = useState("");
-  const [catalog, setCatalog] = useState<string[]>([]);
+    [dirty, setDirty] = useState(false);
   const [environments, setEnvironments] = useState<
     Record<string, EnvironmentRow[]>
   >({});
@@ -75,12 +83,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
   }
   async function perform(action: () => Promise<void>) {
     setBusy(true);
-    setError("");
-    setNotice("");
+
     try {
       await action();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "設定を更新できません");
+      notify(e instanceof Error ? e.message : "設定を更新できません", true);
     } finally {
       setBusy(false);
     }
@@ -88,15 +95,15 @@ export function Settings({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     void perform(async () => {
       accept(await api<PublicSettings>("/api/settings"));
-      setCatalog(
-        (await api<{ catalog: string[] }>("/api/model-options")).catalog,
-      );
       setLogin(
         (await api<ModelLogin | null>("/api/settings/model-login")) ??
           undefined,
       );
     });
   }, []);
+  useEffect(() => {
+    if (login?.state === "error") notify(login.message, true);
+  }, [login?.id, login?.state, notify]);
   useEffect(() => {
     if (!loginPending || !login) return;
     let disposed = false;
@@ -111,13 +118,15 @@ export function Settings({ onClose }: { onClose: () => void }) {
         if (next.state === "complete") {
           accept(await api<PublicSettings>("/api/settings"));
           setCallbackUrl("");
+          notify("ChatGPT に接続しました。");
         }
         if (["waiting", "exchanging"].includes(next.state))
           timer = setTimeout(() => void poll(), 1000);
       } catch {
         if (!disposed)
-          setError(
+          notify(
             "認証状態を確認できません。認証を中止してやり直してください。",
+            true,
           );
       }
     }
@@ -130,31 +139,35 @@ export function Settings({ onClose }: { onClose: () => void }) {
   function change(update: (value: SettingsInput) => SettingsInput) {
     setDraft((value) => (value ? update(value) : value));
     setDirty(true);
-    setNotice("");
+  }
+  async function persist(value: SettingsInput) {
+    const input = structuredClone(value);
+    for (const server of input.mcp)
+      if (environments[server.id] !== undefined) {
+        const rows = environments[server.id]!;
+        if (
+          new Set(rows.map((r) => r.name)).size !== rows.length ||
+          rows.some((r) => !r.name)
+        )
+          throw new Error("環境変数の名前を確認してください");
+        server.envKeep = rows
+          .filter((r) => r.value === undefined)
+          .map((r) => r.name);
+        server.env = Object.fromEntries(
+          rows
+            .filter((r) => r.value !== undefined)
+            .map((r) => [r.name, r.value!]),
+        );
+      }
+    const result = await api<PublicSettings>("/api/settings", "PUT", input);
+    accept(result);
+    return result;
   }
   async function save() {
     if (!draft) return;
     await perform(async () => {
-      const input = structuredClone(draft);
-      for (const server of input.mcp)
-        if (environments[server.id] !== undefined) {
-          const rows = environments[server.id]!;
-          if (
-            new Set(rows.map((r) => r.name)).size !== rows.length ||
-            rows.some((r) => !r.name)
-          )
-            throw new Error("環境変数の名前を確認してください");
-          server.envKeep = rows
-            .filter((r) => r.value === undefined)
-            .map((r) => r.name);
-          server.env = Object.fromEntries(
-            rows
-              .filter((r) => r.value !== undefined)
-              .map((r) => [r.name, r.value!]),
-          );
-        }
-      accept(await api<PublicSettings>("/api/settings", "PUT", input));
-      setNotice("保存しました。");
+      await persist(draft);
+      notify("保存しました。");
     });
   }
   async function mcpAction(id: string, action: string) {
@@ -168,17 +181,21 @@ export function Settings({ onClose }: { onClose: () => void }) {
         location.assign(result.url);
         return;
       }
-      accept(
-        await api<PublicSettings>(
-          `/api/settings/mcp/${id}/${action}`,
-          "POST",
-          {},
-        ),
+      const result = await api<PublicSettings>(
+        `/api/settings/mcp/${id}/${action}`,
+        "POST",
+        {},
       );
-      setNotice(
+      accept(result);
+      const failed =
+        result.mcp.find((m) => m.id === id)?.status.state === "error";
+      notify(
         action === "disconnect"
           ? "認証情報を解除しました。"
-          : "テストが終了しました。",
+          : failed
+            ? "接続失敗"
+            : "接続成功",
+        failed,
       );
     });
   }
@@ -227,18 +244,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         ))}
       </nav>
       <div className="settings-content">
-        {error && (
-          <p className="alert theme-danger" role="alert">
-            {error}
-          </p>
-        )}
-        {notice && <p role="status">{notice}</p>}
-        {saved?.pending && (
-          <p className="small fg-2" role="status">
-            次の応答から反映されます
-          </p>
-        )}
-        {login && (
+        {loginPending && login && (
           <section className="settings-card" aria-label="ChatGPT 認証">
             <p role="status">{login.message}</p>
             {loginPending && (
@@ -296,6 +302,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           ),
                         );
                         setCallbackUrl("");
+                        notify("認証を中止しました。");
                       })
                     }
                   >
@@ -322,163 +329,168 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       ),
                     }));
                   return (
-                    <fieldset key={model.id} className="settings-card">
-                      <legend>{model.model || "新しいモデル"}</legend>
-                      <label className="form-label">
-                        プロバイダー
-                        <select
-                          className="form-control"
-                          aria-label="プロバイダー"
-                          value={model.provider}
-                          disabled
-                        >
-                          <option value="openai">OpenAI</option>
-                        </select>
-                      </label>
-                      <div className="form-label">
-                        モデル
-                        <ModelPicker
-                          label="設定するモデル"
-                          value={model.model}
-                          models={[
-                            ...new Set([
-                              ...(model.model ? [model.model] : []),
-                              ...catalog,
-                            ]),
-                          ].map((id) => ({ id, name: id }))}
-                          onChange={(id) => update({ model: id })}
-                          disabled={busy || loginPending}
-                        />
-                      </div>
-                      <label className="form-label">
-                        認証方式
-                        <select
-                          className="form-control"
-                          aria-label="認証方式"
-                          value={model.auth ?? "api_key"}
-                          onChange={(e) =>
-                            update({
-                              auth: e.target.value as "api_key" | "oauth",
-                              key: undefined,
-                            })
-                          }
-                        >
-                          <option value="api_key">API キー</option>
-                          <option value="oauth">ChatGPT（OAuth）</option>
-                        </select>
-                      </label>
-                      {model.auth !== "oauth" && (
-                        <>
-                          <label className="form-label">
-                            API キー
-                            <input
-                              className="form-control"
-                              type="password"
-                              autoComplete="new-password"
-                              value={
-                                model.key ??
-                                (current?.hasKey && current.auth !== "oauth"
-                                  ? secretMask
-                                  : "")
-                              }
-                              onFocus={(e) => e.target.select()}
-                              placeholder={
-                                current?.hasKey ? "登録済み" : "未登録"
-                              }
-                              onChange={(e) => update({ key: e.target.value })}
-                            />
-                          </label>
-                        </>
-                      )}
-                      <p className="small fg-2">
-                        {current?.status ?? "未保存"}
-                      </p>
-                      <div className="settings-actions">
-                        <button
-                          className="btn-outline theme-secondary btn-sm"
-                          disabled={
-                            dirty ||
-                            !(model.auth === "oauth"
-                              ? current?.authorized
-                              : current?.hasKey)
-                          }
-                          onClick={() => {
-                            if (
-                              window.confirm(
-                                "テストには利用枠または料金がかかります。実行しますか？",
+                    <details
+                      key={model.id}
+                      className="settings-disclosure"
+                      open={expanded.has(model.id)}
+                      onToggle={(e) => toggle(model.id, e.currentTarget.open)}
+                    >
+                      <summary>
+                        <span>
+                          {model.name ||
+                            (model.auth === "oauth" ? "ChatGPT" : "OpenAI API")}
+                        </span>
+                        <small>
+                          {current?.status === "未確認" ? "" : current?.status}
+                        </small>
+                      </summary>
+                      <div className="settings-card">
+                        <label className="form-label">
+                          プロバイダー
+                          <select
+                            className="form-control"
+                            aria-label="プロバイダー"
+                            value={model.provider}
+                            disabled
+                          >
+                            <option value="openai">OpenAI</option>
+                          </select>
+                        </label>
+                        <label className="form-label">
+                          名前
+                          <input
+                            className="form-control"
+                            aria-label="接続名"
+                            placeholder={
+                              model.auth === "oauth" ? "ChatGPT" : "OpenAI API"
+                            }
+                            value={model.name ?? ""}
+                            onChange={(e) => update({ name: e.target.value })}
+                          />
+                        </label>
+                        <label className="form-label">
+                          認証方式
+                          <select
+                            className="form-control"
+                            aria-label="認証方式"
+                            value={model.auth ?? "api_key"}
+                            onChange={(e) =>
+                              update({
+                                auth: e.target.value as "api_key" | "oauth",
+                                key: undefined,
+                              })
+                            }
+                          >
+                            <option value="api_key">API キー</option>
+                            <option value="oauth">ChatGPT（OAuth）</option>
+                          </select>
+                        </label>
+                        {model.auth !== "oauth" && (
+                          <>
+                            <label className="form-label">
+                              API キー
+                              <input
+                                className="form-control"
+                                type="password"
+                                autoComplete="new-password"
+                                value={
+                                  model.key ??
+                                  (current?.hasKey && current.auth !== "oauth"
+                                    ? secretMask
+                                    : "")
+                                }
+                                onFocus={(e) => e.target.select()}
+                                placeholder={
+                                  current?.hasKey ? "登録済み" : "未登録"
+                                }
+                                onChange={(e) =>
+                                  update({ key: e.target.value })
+                                }
+                              />
+                            </label>
+                          </>
+                        )}
+                        <div className="settings-actions">
+                          <button
+                            className="btn-outline theme-secondary btn-sm"
+                            disabled={
+                              dirty ||
+                              !(model.auth === "oauth"
+                                ? current?.authorized
+                                : current?.hasKey)
+                            }
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  "テストには利用枠または料金がかかります。実行しますか？",
+                                )
                               )
-                            )
-                              void perform(async () => {
-                                accept(
-                                  await api<PublicSettings>(
+                                void perform(async () => {
+                                  const result = await api<PublicSettings>(
                                     `/api/settings/models/${model.id}/test`,
                                     "POST",
                                     { confirmPaid: true },
+                                  );
+                                  accept(result);
+                                  const failed =
+                                    result.models.find((m) => m.id === model.id)
+                                      ?.status !== "接続成功";
+                                  notify(
+                                    failed ? "接続失敗" : "接続成功",
+                                    failed,
+                                  );
+                                });
+                            }}
+                          >
+                            テスト
+                          </button>
+                          {model.auth === "oauth" ? (
+                            <>
+                              <button
+                                className="btn-outline theme-primary btn-sm"
+                                onClick={() =>
+                                  void perform(async () => {
+                                    if (dirty || !current) await persist(draft);
+                                    setCallbackUrl("");
+                                    setLogin(
+                                      await api<ModelLogin>(
+                                        `/api/settings/models/${model.id}/oauth`,
+                                        "POST",
+                                        {},
+                                      ),
+                                    );
+                                  })
+                                }
+                              >
+                                Continue with ChatGPT
+                              </button>
+                            </>
+                          ) : null}
+                          <button
+                            className="btn-text theme-danger btn-sm"
+                            onClick={() =>
+                              void perform(async () => {
+                                await persist({
+                                  ...draft,
+                                  models: draft.models.filter(
+                                    (m) => m.id !== model.id,
                                   ),
-                                );
-                                setNotice("テストが終了しました。");
-                              });
-                          }}
-                        >
-                          テスト
-                        </button>
-                        {model.auth === "oauth" ? (
-                          <>
-                            <button
-                              className="btn-outline theme-primary btn-sm"
-                              disabled={dirty}
-                              onClick={() =>
-                                void perform(async () => {
-                                  setCallbackUrl("");
-                                  setLogin(
-                                    await api<ModelLogin>(
-                                      `/api/settings/models/${model.id}/oauth`,
-                                      "POST",
-                                      {},
-                                    ),
-                                  );
-                                })
-                              }
-                            >
-                              Continue with ChatGPT
-                            </button>
-                            <button
-                              className="btn-text theme-secondary btn-sm"
-                              disabled={dirty || !current?.authorized}
-                              onClick={() =>
-                                void perform(async () => {
-                                  accept(
-                                    await api<PublicSettings>(
-                                      `/api/settings/models/${model.id}/disconnect`,
-                                      "POST",
-                                      {},
-                                    ),
-                                  );
+                                  defaultModel:
+                                    draft.defaultModel === model.id
+                                      ? null
+                                      : draft.defaultModel,
+                                });
+                                if (login?.modelId === model.id)
                                   setLogin(undefined);
-                                })
-                              }
-                            >
-                              ChatGPT 認証を解除
-                            </button>
-                          </>
-                        ) : null}
-                        <button
-                          className="btn-text theme-danger btn-sm"
-                          onClick={() =>
-                            change((s) => ({
-                              ...s,
-                              models: s.models.filter((m) => m.id !== model.id),
-                              defaultModel:
-                                s.defaultModel === model.id
-                                  ? null
-                                  : s.defaultModel,
-                            }))
-                          }
-                        >
-                          モデルを削除
-                        </button>
+                                notify("接続を削除しました。");
+                              })
+                            }
+                          >
+                            接続を削除
+                          </button>
+                        </div>
                       </div>
-                    </fieldset>
+                    </details>
                   );
                 })}
                 <button
@@ -486,17 +498,18 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   disabled={draft.models.length >= 10}
                   onClick={() => {
                     const id = crypto.randomUUID();
+                    toggle(id, true);
                     change((s) => ({
                       ...s,
                       models: [
                         ...s.models,
-                        { id, provider: "openai", model: "" },
+                        { id, provider: "openai", name: "" },
                       ],
                       defaultModel: s.defaultModel ?? id,
                     }));
                   }}
                 >
-                  モデルを追加
+                  接続を追加
                 </button>
               </>
             )}
@@ -512,340 +525,359 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       ),
                     }));
                   return (
-                    <fieldset key={server.id} className="settings-card">
-                      <legend>{server.name || "新しい MCP"}</legend>
-                      <label className="settings-check">
-                        <input
-                          type="checkbox"
-                          checked={server.enabled}
-                          onChange={(e) =>
-                            update({ enabled: e.target.checked })
-                          }
-                        />
-                        有効
-                      </label>
-                      <label className="form-label">
-                        名前
-                        <input
-                          className="form-control"
-                          value={server.name}
-                          onChange={(e) => update({ name: e.target.value })}
-                        />
-                      </label>
-                      <label className="form-label">
-                        接続方式
-                        <select
-                          className="form-control"
-                          aria-label="接続方式"
-                          value={server.transport}
-                          onChange={(e) =>
-                            update({
-                              transport: e.target.value as "stdio" | "http",
-                              auth: "none",
-                            })
-                          }
-                        >
-                          <option value="stdio">stdio</option>
-                          <option value="http">Streamable HTTP</option>
-                        </select>
-                      </label>
-                      {server.transport === "stdio" ? (
-                        <>
-                          <label className="form-label">
-                            コマンド
-                            <input
-                              className="form-control"
-                              placeholder="/usr/bin/npx"
-                              value={server.command}
-                              onChange={(e) =>
-                                update({ command: e.target.value })
-                              }
-                            />
-                          </label>
-                          <label className="form-label">
-                            引数
-                            <textarea
-                              className="form-control"
-                              rows={5}
-                              placeholder={
-                                "-y\n@modelcontextprotocol/server-filesystem\n/workspace"
-                              }
-                              value={server.args.join("\n")}
-                              onChange={(e) =>
-                                update({
-                                  args: e.target.value
-                                    ? e.target.value.split("\n")
-                                    : [],
-                                })
-                              }
-                            />
-                          </label>
-                          <div className="environment-fields">
-                            <span>環境変数</span>
-                            {(
-                              environments[server.id] ??
-                              current?.envNames.map<EnvironmentRow>((name) => ({
-                                name,
-                              })) ??
-                              []
-                            ).map((row: EnvironmentRow, index, rows) => {
-                              const editRows = (next: EnvironmentRow[]) => {
-                                setEnvironments((v) => ({
-                                  ...v,
-                                  [server.id]: next,
-                                }));
-                                setDirty(true);
-                              };
-                              return (
-                                <div className="environment-row" key={index}>
-                                  <input
-                                    className="form-control"
-                                    aria-label={`環境変数名 ${index + 1}`}
-                                    placeholder="TOKEN"
-                                    value={row.name}
-                                    onChange={(e) =>
-                                      editRows(
-                                        rows.map((r, i) =>
-                                          i === index
-                                            ? {
-                                                name: e.target.value,
-                                                value: r.value ?? "",
-                                              }
-                                            : r,
-                                        ),
-                                      )
-                                    }
-                                  />
-                                  <input
-                                    className="form-control"
-                                    aria-label={`環境変数の値 ${index + 1}`}
-                                    type="password"
-                                    autoComplete="new-password"
-                                    placeholder="値"
-                                    value={row.value ?? secretMask}
-                                    onFocus={(e) => e.target.select()}
-                                    onChange={(e) =>
-                                      editRows(
-                                        rows.map((r, i) =>
-                                          i === index
-                                            ? { ...r, value: e.target.value }
-                                            : r,
-                                        ),
-                                      )
-                                    }
-                                  />
-                                  <button
-                                    className="btn-text theme-secondary btn-sm"
-                                    aria-label={`環境変数 ${index + 1} を削除`}
-                                    onClick={() =>
-                                      editRows(
-                                        rows.filter((_, i) => i !== index),
-                                      )
-                                    }
-                                  >
-                                    削除
-                                  </button>
-                                </div>
-                              );
-                            })}
-                            <button
-                              className="btn-text theme-secondary btn-sm"
-                              onClick={() => {
-                                setEnvironments((v) => ({
-                                  ...v,
-                                  [server.id]: [
-                                    ...(v[server.id] ??
-                                      current?.envNames.map<EnvironmentRow>(
-                                        (name) => ({ name }),
-                                      ) ??
-                                      []),
-                                    { name: "", value: "" },
-                                  ],
-                                }));
-                                setDirty(true);
-                              }}
-                            >
-                              環境変数を追加
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <label className="form-label">
-                            URL
-                            <input
-                              className="form-control"
-                              type="url"
-                              value={server.url}
-                              placeholder="https://mcp.example.com/mcp"
-                              onChange={(e) =>
-                                update({
-                                  url: e.target.value,
-                                  ...(e.target.value.startsWith("http:")
-                                    ? { auth: "none" as const }
-                                    : {}),
-                                })
-                              }
-                            />
-                          </label>
-                          <label className="form-label">
-                            認証
-                            <select
-                              className="form-control"
-                              aria-label="MCP 認証"
-                              value={server.auth}
-                              onChange={(e) =>
-                                update({
-                                  auth: e.target.value as typeof server.auth,
-                                })
-                              }
-                            >
-                              <option value="none">なし</option>
-                              <option
-                                value="bearer"
-                                disabled={server.url.startsWith("http:")}
-                              >
-                                Bearer Token
-                              </option>
-                              <option
-                                value="oauth"
-                                disabled={server.url.startsWith("http:")}
-                              >
-                                OAuth 2.0
-                              </option>
-                            </select>
-                          </label>
-                          {server.auth === "bearer" && (
+                    <details
+                      key={server.id}
+                      className="settings-disclosure"
+                      open={expanded.has(server.id)}
+                      onToggle={(e) => toggle(server.id, e.currentTarget.open)}
+                    >
+                      <summary>
+                        <span>{server.name || "新しい MCP"}</span>
+                        <small>
+                          {!server.enabled
+                            ? "無効"
+                            : current?.status.state === "untested"
+                              ? ""
+                              : current?.status.message}
+                        </small>
+                      </summary>
+                      <div className="settings-card">
+                        <label className="settings-check">
+                          <input
+                            type="checkbox"
+                            checked={server.enabled}
+                            onChange={(e) =>
+                              update({ enabled: e.target.checked })
+                            }
+                          />
+                          有効
+                        </label>
+                        <label className="form-label">
+                          名前
+                          <input
+                            className="form-control"
+                            value={server.name}
+                            onChange={(e) => update({ name: e.target.value })}
+                          />
+                        </label>
+                        <label className="form-label">
+                          接続方式
+                          <select
+                            className="form-control"
+                            aria-label="接続方式"
+                            value={server.transport}
+                            onChange={(e) =>
+                              update({
+                                transport: e.target.value as "stdio" | "http",
+                                auth: "none",
+                              })
+                            }
+                          >
+                            <option value="stdio">stdio</option>
+                            <option value="http">Streamable HTTP</option>
+                          </select>
+                        </label>
+                        {server.transport === "stdio" ? (
+                          <>
                             <label className="form-label">
-                              Bearer Token
+                              コマンド
                               <input
                                 className="form-control"
-                                type="password"
-                                autoComplete="new-password"
-                                value={
-                                  server.bearer ??
-                                  (current?.hasBearer ? secretMask : "")
-                                }
-                                onFocus={(e) => e.target.select()}
-                                placeholder={
-                                  current?.hasBearer ? "登録済み" : "未登録"
-                                }
+                                placeholder="/usr/bin/npx"
+                                value={server.command}
                                 onChange={(e) =>
-                                  update({ bearer: e.target.value })
+                                  update({ command: e.target.value })
                                 }
                               />
                             </label>
-                          )}
-                          {server.auth === "oauth" && (
-                            <>
+                            <label className="form-label">
+                              引数
+                              <textarea
+                                className="form-control"
+                                rows={5}
+                                placeholder={
+                                  "-y\n@modelcontextprotocol/server-filesystem\n/workspace"
+                                }
+                                value={server.args.join("\n")}
+                                onChange={(e) =>
+                                  update({
+                                    args: e.target.value
+                                      ? e.target.value.split("\n")
+                                      : [],
+                                  })
+                                }
+                              />
+                            </label>
+                            <div className="environment-fields">
+                              <span>環境変数</span>
+                              {(
+                                environments[server.id] ??
+                                current?.envNames.map<EnvironmentRow>(
+                                  (name) => ({
+                                    name,
+                                  }),
+                                ) ??
+                                []
+                              ).map((row: EnvironmentRow, index, rows) => {
+                                const editRows = (next: EnvironmentRow[]) => {
+                                  setEnvironments((v) => ({
+                                    ...v,
+                                    [server.id]: next,
+                                  }));
+                                  setDirty(true);
+                                };
+                                return (
+                                  <div className="environment-row" key={index}>
+                                    <input
+                                      className="form-control"
+                                      aria-label={`環境変数名 ${index + 1}`}
+                                      placeholder="TOKEN"
+                                      value={row.name}
+                                      onChange={(e) =>
+                                        editRows(
+                                          rows.map((r, i) =>
+                                            i === index
+                                              ? {
+                                                  name: e.target.value,
+                                                  value: r.value ?? "",
+                                                }
+                                              : r,
+                                          ),
+                                        )
+                                      }
+                                    />
+                                    <input
+                                      className="form-control"
+                                      aria-label={`環境変数の値 ${index + 1}`}
+                                      type="password"
+                                      autoComplete="new-password"
+                                      placeholder="値"
+                                      value={row.value ?? secretMask}
+                                      onFocus={(e) => e.target.select()}
+                                      onChange={(e) =>
+                                        editRows(
+                                          rows.map((r, i) =>
+                                            i === index
+                                              ? { ...r, value: e.target.value }
+                                              : r,
+                                          ),
+                                        )
+                                      }
+                                    />
+                                    <button
+                                      className="btn-text theme-secondary btn-sm"
+                                      aria-label={`環境変数 ${index + 1} を削除`}
+                                      onClick={() =>
+                                        editRows(
+                                          rows.filter((_, i) => i !== index),
+                                        )
+                                      }
+                                    >
+                                      削除
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                              <button
+                                className="btn-text theme-secondary btn-sm"
+                                onClick={() => {
+                                  setEnvironments((v) => ({
+                                    ...v,
+                                    [server.id]: [
+                                      ...(v[server.id] ??
+                                        current?.envNames.map<EnvironmentRow>(
+                                          (name) => ({ name }),
+                                        ) ??
+                                        []),
+                                      { name: "", value: "" },
+                                    ],
+                                  }));
+                                  setDirty(true);
+                                }}
+                              >
+                                環境変数を追加
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <label className="form-label">
+                              URL
+                              <input
+                                className="form-control"
+                                type="url"
+                                value={server.url}
+                                placeholder="https://mcp.example.com/mcp"
+                                onChange={(e) =>
+                                  update({
+                                    url: e.target.value,
+                                    ...(e.target.value.startsWith("http:")
+                                      ? { auth: "none" as const }
+                                      : {}),
+                                  })
+                                }
+                              />
+                            </label>
+                            <label className="form-label">
+                              認証
+                              <select
+                                className="form-control"
+                                aria-label="MCP 認証"
+                                value={server.auth}
+                                onChange={(e) =>
+                                  update({
+                                    auth: e.target.value as typeof server.auth,
+                                  })
+                                }
+                              >
+                                <option value="none">なし</option>
+                                <option
+                                  value="bearer"
+                                  disabled={server.url.startsWith("http:")}
+                                >
+                                  Bearer Token
+                                </option>
+                                <option
+                                  value="oauth"
+                                  disabled={server.url.startsWith("http:")}
+                                >
+                                  OAuth 2.0
+                                </option>
+                              </select>
+                            </label>
+                            {server.auth === "bearer" && (
                               <label className="form-label">
-                                Client ID
-                                <input
-                                  className="form-control"
-                                  value={server.clientId}
-                                  onChange={(e) =>
-                                    update({ clientId: e.target.value })
-                                  }
-                                />
-                              </label>
-                              <label className="form-label">
-                                Client Secret
+                                Bearer Token
                                 <input
                                   className="form-control"
                                   type="password"
                                   autoComplete="new-password"
                                   value={
-                                    server.clientSecret ??
-                                    (current?.hasClientSecret ? secretMask : "")
+                                    server.bearer ??
+                                    (current?.hasBearer ? secretMask : "")
                                   }
                                   onFocus={(e) => e.target.select()}
                                   placeholder={
-                                    current?.hasClientSecret
-                                      ? "登録済み"
-                                      : "未登録"
+                                    current?.hasBearer ? "登録済み" : "未登録"
                                   }
                                   onChange={(e) =>
-                                    update({ clientSecret: e.target.value })
+                                    update({ bearer: e.target.value })
                                   }
                                 />
                               </label>
-                              <p className="small fg-2">
-                                コールバック: {location.origin}/oauth/callback
-                                <br />
-                                {current?.authorized ? "認証済み" : "未認証"}
-                              </p>
-                            </>
-                          )}
-                        </>
-                      )}
-                      <p className="small fg-2" role="status">
-                        {current?.status.message ?? "未保存"}
-                      </p>
-                      {!!current?.status.tools.length && (
-                        <details>
-                          <summary>
-                            ツール（{current.status.tools.length}）
-                          </summary>
-                          <ul>
-                            {current.status.tools.map((t) => (
-                              <li key={t.name}>
-                                <strong>{t.name}</strong> {t.description}
-                              </li>
-                            ))}
-                          </ul>
-                        </details>
-                      )}
-                      <div className="settings-actions">
-                        <button
-                          className="btn-outline theme-secondary btn-sm"
-                          disabled={dirty || !current || !server.enabled}
-                          onClick={() => void mcpAction(server.id, "test")}
-                        >
-                          テスト
-                        </button>
-                        {server.auth === "oauth" && (
+                            )}
+                            {server.auth === "oauth" && (
+                              <>
+                                <label className="form-label">
+                                  Client ID
+                                  <input
+                                    className="form-control"
+                                    value={server.clientId}
+                                    onChange={(e) =>
+                                      update({ clientId: e.target.value })
+                                    }
+                                  />
+                                </label>
+                                <label className="form-label">
+                                  Client Secret
+                                  <input
+                                    className="form-control"
+                                    type="password"
+                                    autoComplete="new-password"
+                                    value={
+                                      server.clientSecret ??
+                                      (current?.hasClientSecret
+                                        ? secretMask
+                                        : "")
+                                    }
+                                    onFocus={(e) => e.target.select()}
+                                    placeholder={
+                                      current?.hasClientSecret
+                                        ? "登録済み"
+                                        : "未登録"
+                                    }
+                                    onChange={(e) =>
+                                      update({ clientSecret: e.target.value })
+                                    }
+                                  />
+                                </label>
+                                <p className="small fg-2">
+                                  コールバック: {location.origin}/oauth/callback
+                                  <br />
+                                  {current?.authorized ? "認証済み" : "未認証"}
+                                </p>
+                              </>
+                            )}
+                          </>
+                        )}
+                        {!!current?.status.tools.length && (
+                          <details>
+                            <summary>
+                              ツール（{current.status.tools.length}）
+                            </summary>
+                            <ul>
+                              {current.status.tools.map((t) => (
+                                <li key={t.name}>
+                                  <strong>{t.name}</strong> {t.description}
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                        <div className="settings-actions">
                           <button
                             className="btn-outline theme-secondary btn-sm"
-                            disabled={dirty || !current}
-                            onClick={() => void mcpAction(server.id, "oauth")}
+                            disabled={dirty || !current || !server.enabled}
+                            onClick={() => void mcpAction(server.id, "test")}
                           >
-                            {current?.authorized ? "再認証" : "認証する"}
+                            テスト
                           </button>
-                        )}
-                        <button
-                          className="btn-text theme-secondary btn-sm"
-                          disabled={dirty || !current}
-                          onClick={() =>
-                            void mcpAction(server.id, "disconnect")
-                          }
-                        >
-                          認証情報を解除
-                        </button>
-                        <button
-                          className="btn-text theme-danger btn-sm"
-                          onClick={() =>
-                            change((s) => ({
-                              ...s,
-                              mcp: s.mcp.filter((m) => m.id !== server.id),
-                            }))
-                          }
-                        >
-                          MCP を削除
-                        </button>
+                          {server.auth === "oauth" && (
+                            <button
+                              className="btn-outline theme-secondary btn-sm"
+                              disabled={dirty || !current}
+                              onClick={() => void mcpAction(server.id, "oauth")}
+                            >
+                              {current?.authorized ? "再認証" : "認証する"}
+                            </button>
+                          )}
+                          <button
+                            className="btn-text theme-secondary btn-sm"
+                            disabled={dirty || !current}
+                            onClick={() =>
+                              void mcpAction(server.id, "disconnect")
+                            }
+                          >
+                            認証情報を解除
+                          </button>
+                          <button
+                            className="btn-text theme-danger btn-sm"
+                            onClick={() =>
+                              change((s) => ({
+                                ...s,
+                                mcp: s.mcp.filter((m) => m.id !== server.id),
+                              }))
+                            }
+                          >
+                            MCP を削除
+                          </button>
+                        </div>
                       </div>
-                    </fieldset>
+                    </details>
                   );
                 })}
                 <button
                   className="btn-outline theme-secondary"
                   disabled={draft.mcp.length >= 10}
-                  onClick={() =>
+                  onClick={() => {
+                    const id = crypto.randomUUID();
+                    toggle(id, true);
                     change((s) => ({
                       ...s,
                       mcp: [
                         ...s.mcp,
                         {
-                          id: crypto.randomUUID(),
+                          id,
                           name: "",
                           enabled: true,
                           transport: "stdio",
@@ -857,8 +889,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           clientId: "",
                         },
                       ],
-                    }))
-                  }
+                    }));
+                  }}
                 >
                   MCP を追加
                 </button>
@@ -929,7 +961,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
         >
           読み直す
         </button>
-        {dirty && <span className="small fg-2">未保存</span>}
       </footer>
     </section>
   );

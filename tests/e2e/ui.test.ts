@@ -147,6 +147,8 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       await page.emulateMedia({ colorScheme });
       await assertReadable(page.locator("#error"));
     }
+    await page.getByRole("button", { name: "通知を閉じる" }).click();
+    await page.locator("#error").waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "送る", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
     const conversations = await f.service.list();

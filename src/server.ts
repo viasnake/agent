@@ -15,6 +15,59 @@ import type { Cursor } from "@earendil-works/pi-durable";
 const requestId = z.string().uuid();
 const identifier = z.object({ id: z.string().uuid() });
 type Session = { csrf: string; expires: number };
+function inputError(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return "入力が不正です";
+  // Only trusted schema labels reach the UI; paths and values may contain secrets.
+  const labels: Record<string, string> = {
+    models: "モデル接続",
+    mcp: "MCP",
+    name: "名前",
+    model: "モデル",
+    provider: "プロバイダー",
+    key: "API キー",
+    auth: "認証方式",
+    transport: "接続方式",
+    command: "コマンド",
+    args: "引数",
+    env: "環境変数",
+    envKeep: "環境変数",
+    url: "URL",
+    bearer: "Bearer Token",
+    clientId: "クライアント ID",
+    clientSecret: "クライアントシークレット",
+    instructions: "共通指示",
+    modelRequests: "モデル呼び出し上限",
+    runSeconds: "実行時間",
+    commandSeconds: "コマンド実行時間",
+    title: "会話名",
+    text: "メッセージ",
+    confirmPaid: "テストの確認",
+  };
+  const field = issue.path.findLast(
+    (part) => typeof part === "string" && Object.hasOwn(labels, part),
+  );
+  const label =
+    issue.path[0] === "models" && field === "name"
+      ? "接続名"
+      : typeof field === "string"
+        ? labels[field]!
+        : "入力";
+  if (issue.code === "too_big") {
+    const unit =
+      issue.origin === "string" ? "文字" : issue.origin === "array" ? "件" : "";
+    return `${label}は${issue.maximum}${unit}以内です`;
+  }
+  if (issue.code === "too_small") {
+    if (issue.origin === "string") return `${label}を入力してください`;
+    return `${label}は${issue.minimum}以上です`;
+  }
+  if (issue.code === "custom" && field === "command")
+    return "コマンドは絶対パスで指定してください";
+  if (issue.code === "custom" && field === "url")
+    return "URL が不正です（認証には HTTPS が必要です）";
+  return `${label}が不正です`;
+}
 export async function createServer(
   service: AgentService,
   webRoot = fileURLToPath(new URL("../web/", import.meta.url)),
@@ -81,9 +134,7 @@ export async function createServer(
   });
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof z.ZodError) {
-      void reply
-        .code(400)
-        .send({ error: "入力の形式・上限を確認してください" });
+      void reply.code(400).send({ error: inputError(error) });
       return;
     }
     const code =
@@ -233,12 +284,20 @@ export async function createServer(
         requestId,
         title: z.string().min(1).max(200),
         modelId: z.string().uuid().optional(),
+        model: z.string().min(1).max(200).optional(),
       })
       .strict()
       .parse(request.body);
     return reply
       .code(201)
-      .send(await service.create(body.requestId, body.title, body.modelId));
+      .send(
+        await service.create(
+          body.requestId,
+          body.title,
+          body.modelId,
+          body.model,
+        ),
+      );
   });
   app.get("/api/conversations/:id", async (request) => {
     const { id } = identifier.parse(request.params),
@@ -256,11 +315,14 @@ export async function createServer(
   });
   app.put("/api/conversations/:id/model", async (request) => {
     const { id } = identifier.parse(request.params);
-    const { modelId } = z
-      .object({ modelId: z.string().uuid() })
+    const { modelId, model } = z
+      .object({
+        modelId: z.string().uuid(),
+        model: z.string().min(1).max(200).optional(),
+      })
       .strict()
       .parse(request.body);
-    return safe(await service.selectModel(id, modelId));
+    return safe(await service.selectModel(id, modelId, model));
   });
   app.post("/api/conversations/:id/messages", async (request, reply) => {
     const { id } = identifier.parse(request.params),

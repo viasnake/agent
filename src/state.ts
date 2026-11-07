@@ -10,6 +10,7 @@ export type Conversation = {
   updatedAt: number;
   workspaceCreated?: boolean;
   modelConfigId?: string;
+  model?: string;
   requests: number;
   deadlineAt: number | null;
 };

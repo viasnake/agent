@@ -97,22 +97,21 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
   try {
     await page.goto(origin);
     await page.getByRole("button", { name: "設定", exact: true }).click();
-    await page
-      .getByRole("button", { name: "モデルを追加", exact: true })
-      .click();
-    await page
-      .getByRole("button", { name: "設定するモデル", exact: true })
-      .click();
-    await page.getByRole("searchbox", { name: "モデルを検索" }).fill("gpt-4.1");
-    await page
-      .getByRole("dialog")
-      .getByRole("button", { name: "gpt-4.1", exact: true })
-      .click();
+    assert.equal(await page.locator(".brand").count(), 0);
+    await page.getByRole("button", { name: "接続を追加", exact: true }).click();
+    assert.equal(
+      await page.getByRole("button", { name: "設定するモデル" }).count(),
+      0,
+    );
+    await page.getByLabel("接続名").fill("Personal");
     await page
       .getByLabel("API キー", { exact: true })
       .fill("browser-dummy-key");
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page.getByText("保存しました。").waitFor();
+    await page
+      .locator(".notification")
+      .filter({ hasText: "保存しました。" })
+      .waitFor();
     assert.equal(
       await page.getByLabel("API キー", { exact: true }).inputValue(),
       "••••••••",
@@ -132,8 +131,12 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
         .count(),
       0,
     );
+    await page.getByRole("button", { name: "接続を削除", exact: true }).click();
+    await page.getByText("接続を削除しました。", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "接続を追加", exact: true }).click();
+    await page.getByLabel("接続名").fill("Personal");
     await page.getByLabel("認証方式", { exact: true }).selectOption("oauth");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    // Starting authorization saves the edited connection without a separate Save click.
     await page
       .getByRole("button", { name: "Continue with ChatGPT", exact: true })
       .click();
@@ -153,6 +156,16 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       );
     await page.getByRole("button", { name: "認証を完了", exact: true }).click();
     await page.getByText("ChatGPT 認証済み", { exact: true }).waitFor();
+    assert.equal(await page.locator(".settings-disclosure[open]").count(), 0);
+    await page.locator(".settings-disclosure > summary").first().click();
+    await page
+      .locator(".notification")
+      .filter({ hasText: "ChatGPT に接続しました。" })
+      .waitFor();
+    const toast = await page.locator(".notification").boundingBox();
+    assert.ok(toast && toast.x > 800 && toast.y > 700);
+    await page.getByRole("button", { name: "通知を閉じる" }).click();
+    await page.locator(".notification").waitFor({ state: "hidden" });
     assert.ok(!(await page.content()).includes("browser-access-secret"));
     assert.ok(!(await page.content()).includes("browser-refresh-secret"));
     await mkdir("test-results", { recursive: true });
@@ -174,38 +187,36 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       path: "test-results/model-oauth-mobile-dark.png",
       animations: "disabled",
     });
-    await page
-      .getByRole("button", { name: "ChatGPT 認証を解除", exact: true })
-      .click();
-    await page.getByText("ChatGPT 未認証", { exact: true }).waitFor();
-    await page.getByLabel("認証方式", { exact: true }).selectOption("api_key");
+    assert.equal(
+      await page.getByRole("button", { name: "ChatGPT 認証を解除" }).count(),
+      0,
+    );
+    await page.getByRole("button", { name: "接続を削除", exact: true }).click();
+    await page.getByText("接続を削除しました。", { exact: true }).waitFor();
+    assert.equal(f.service.management().models.length, 0);
+    assert.ok(
+      !JSON.stringify(f.service.settings.snapshot()).includes(
+        "browser-access-secret",
+      ),
+    );
+    await page.getByRole("button", { name: "接続を追加", exact: true }).click();
+    await page.getByLabel("接続名").fill("Personal");
     await page
       .getByLabel("API キー", { exact: true })
       .fill("browser-replaced-key");
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page.getByText("保存しました。").waitFor();
+    await page
+      .locator(".notification")
+      .filter({ hasText: "保存しました。" })
+      .waitFor();
+    assert.equal(f.service.management().models[0]!.model, undefined);
+    await page.locator(".settings-disclosure > summary").first().click();
+    assert.equal(
+      await page.getByLabel("API キー", { exact: true }).isVisible(),
+      false,
+    );
     await page.emulateMedia({ colorScheme: "light" });
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page
-      .getByRole("button", { name: "モデルを追加", exact: true })
-      .click();
-    await page
-      .getByRole("button", { name: "設定するモデル", exact: true })
-      .last()
-      .click();
-    const search = page.getByRole("searchbox", { name: "モデルを検索" });
-    await search.fill("no-matching-model");
-    await page.getByText("一致するモデルがありません").waitFor();
-    await search.fill("gpt-4.1-mini");
-    await page.screenshot({ path: "test-results/model-picker-light.png" });
-    await search.press("ArrowDown");
-    await page.keyboard.press("Enter");
-    await page
-      .getByLabel("API キー", { exact: true })
-      .last()
-      .fill("second-dummy-key");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page.getByText("保存しました。").waitFor();
     await page.getByRole("button", { name: "MCP", exact: true }).click();
     await page.getByRole("button", { name: "MCP を追加", exact: true }).click();
     await page.getByLabel("接続方式", { exact: true }).selectOption("http");
@@ -249,8 +260,14 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .getByLabel("環境変数の値 1", { exact: true })
       .fill("browser-stdio-secret");
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page.getByText("保存しました。").waitFor();
-    assert.equal(await page.locator("legend").last().textContent(), "Fixture");
+    await page
+      .locator(".notification")
+      .filter({ hasText: "保存しました。" })
+      .waitFor();
+    assert.match(
+      await page.locator(".settings-disclosure > summary").last().innerText(),
+      /Fixture/,
+    );
     assert.equal(
       await page.getByLabel("環境変数の値 1", { exact: true }).inputValue(),
       "••••••••",
@@ -263,7 +280,10 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .getByLabel("環境変数の値 2", { exact: true })
       .fill("extra-value");
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page.getByText("保存しました。", { exact: true }).waitFor();
+    await page
+      .locator(".notification")
+      .filter({ hasText: "保存しました。" })
+      .waitFor();
     assert.equal(
       f.service.settings.snapshot().mcp[0]!.env!.FIXTURE_KEY,
       "browser-stdio-secret",
@@ -272,19 +292,30 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .getByRole("button", { name: "環境変数 2 を削除", exact: true })
       .click();
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page.getByText("保存しました。", { exact: true }).waitFor();
+    await page
+      .locator(".notification")
+      .filter({ hasText: "保存しました。" })
+      .waitFor();
     assert.equal(f.service.settings.snapshot().mcp[0]!.env!.EXTRA, undefined);
     await page.getByRole("button", { name: "テスト", exact: true }).click();
-    await page.getByText("接続済み", { exact: true }).waitFor();
+    await page.getByText("接続済み", { exact: true }).first().waitFor();
     await page.getByText("ツール（1）").click();
     await page.getByText("greet", { exact: true }).waitFor();
+    await page.locator(".settings-disclosure > summary").first().click();
+    assert.equal(
+      await page.getByLabel("コマンド", { exact: true }).isVisible(),
+      false,
+    );
     await page.getByRole("button", { name: "Agent 設定", exact: true }).click();
     await page
       .getByLabel("共通指示", { exact: true })
       .fill("Keep replies short.");
     await page.getByLabel("モデル呼び出し上限").fill("5");
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page.getByText("保存しました。").waitFor();
+    await page
+      .locator(".notification")
+      .filter({ hasText: "保存しました。" })
+      .waitFor();
     await mkdir("test-results", { recursive: true });
     await page.screenshot({ path: "test-results/settings-light.png" });
     await page.emulateMedia({ colorScheme: "dark" });
@@ -307,6 +338,13 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page
       .getByRole("button", { name: "会話のモデル", exact: true })
       .click();
+    const search = page.getByRole("searchbox", { name: "モデルを検索" });
+    await search.fill("no-matching-model");
+    await page.getByText("一致するモデルがありません").waitFor();
+    await search.fill("gpt-4.1");
+    await page.screenshot({
+      path: "test-results/model-picker-mobile-dark.png",
+    });
     await page
       .getByRole("dialog")
       .getByRole("button", { name: "gpt-4.1", exact: true })
@@ -334,9 +372,11 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .getByRole("button", { name: "gpt-4.1-mini", exact: true })
       .click();
     await until(
-      async () =>
-        (await f.service.list())[0]?.modelConfigId ===
-        f.service.management().models[1]!.id,
+      async () => (await f.service.list())[0]?.model === "gpt-4.1-mini",
+    );
+    assert.equal(
+      (await f.service.list())[0]?.modelConfigId,
+      f.service.management().models[0]!.id,
     );
     await page.screenshot({
       path: "test-results/conversation-model-mobile-dark.png",

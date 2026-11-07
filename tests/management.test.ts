@@ -147,6 +147,9 @@ test("Web settings protect secrets, require CSRF, preserve history, persist rest
     await until(
       async () => (await f.service.conversation(id)).status === "idle",
     );
+    // Saving a connection does not overwrite a conversation's selected model.
+    assert.equal((await f.service.conversation(id)).model, "faux-1");
+    await f.service.selectModel(id, modelId, "gpt-4.1");
     f.faux.setResponses([answer("second")]);
     await f.service.send(id, randomUUID(), "continue");
     await until(
@@ -176,6 +179,45 @@ test("Web settings protect secrets, require CSRF, preserve history, persist rest
     deleted.models[0]!.key = "";
     await f.service.saveSettings(deleted);
     assert.equal(f.service.management().models[0]!.hasKey, false);
+  } finally {
+    await app.close();
+    await f.service.close();
+  }
+});
+test("model connections save without a model and invalid settings identify the field without exposing values", async () => {
+  const f = await fixture([]);
+  const { app, headers } = await http(f.service);
+  try {
+    const settings = input(f.service);
+    settings.models = [
+      {
+        id: randomUUID(),
+        provider: "openai",
+        name: "Personal",
+        key: "dummy-private-key",
+      },
+    ];
+    settings.defaultModel = null;
+    const save = (payload: object) =>
+      app.inject({ method: "PUT", url: "/api/settings", headers, payload });
+    const saved = await save(settings);
+    assert.equal(saved.statusCode, 200);
+    assert.equal(saved.json().models[0].name, "Personal");
+    assert.ok(!saved.body.includes("dummy-private-key"));
+    const current = input(f.service);
+    for (const [patch, expected] of [
+      [{ name: "x".repeat(101) }, "接続名は100文字以内です"],
+      [{ key: "secret".repeat(3000) }, "API キーは16384文字以内です"],
+      [{ provider: "private-unsupported-provider" }, "プロバイダーが不正です"],
+    ] as const) {
+      const result = await save({
+        ...current,
+        models: [{ ...current.models[0], ...patch }],
+      });
+      assert.equal(result.statusCode, 400);
+      assert.deepEqual(result.json(), { error: expected });
+      assert.equal(f.service.settings.snapshot().revision, current.revision);
+    }
   } finally {
     await app.close();
     await f.service.close();
@@ -734,5 +776,90 @@ test("HTTP MCP calls use the configured private target without permitting metada
   } finally {
     await f.service.close();
     await remote.close();
+  }
+});
+
+test("one credential connection supports independent conversation models and preserves selections on restart", async () => {
+  let f = await fixture([]);
+  const connection = randomUUID();
+  try {
+    const s = input(f.service);
+    s.models = [
+      {
+        id: connection,
+        provider: "openai",
+        name: "Personal",
+        key: "connection-secret",
+      },
+    ];
+    s.defaultModel = connection;
+    await f.service.saveSettings(s);
+    const first = await f.service.create(
+      randomUUID(),
+      "First",
+      connection,
+      "gpt-4.1",
+    );
+    const second = await f.service.create(
+      randomUUID(),
+      "Second",
+      connection,
+      "gpt-4.1-mini",
+    );
+    for (const item of [first, second]) {
+      f.faux.setResponses([answer("completed")]);
+      await f.service.send(item.id, randomUUID(), "hello");
+      await until(
+        async () => (await f.service.conversation(item.id)).status === "idle",
+      );
+    }
+    assert.equal((await f.service.conversation(first.id)).model, "gpt-4.1");
+    assert.equal(
+      (await f.service.conversation(second.id)).model,
+      "gpt-4.1-mini",
+    );
+    assert.equal(f.service.settings.snapshot().models[0]!.model, undefined);
+    await f.service.selectModel(first.id, connection, "gpt-4.1-mini");
+    f.faux.setResponses([answer("continued")]);
+    await f.service.send(first.id, randomUUID(), "continue");
+    await until(
+      async () => (await f.service.conversation(first.id)).status === "idle",
+    );
+    const history = JSON.stringify(
+      await (
+        await f.service.piConversation(first.id)
+      ).entries({}, 100, undefined, ctx),
+    );
+    assert.match(history, /gpt-4.1/);
+    assert.match(history, /gpt-4.1-mini/);
+    assert.match(history, /continued/);
+    assert.ok(!history.includes("connection-secret"));
+    await assert.rejects(
+      f.service.selectModel(first.id, connection, "unknown-model"),
+      /選び直/,
+    );
+    const root = f.root;
+    await f.service.close();
+    f = await fixture([], { root });
+    assert.equal(
+      (await f.service.conversation(first.id)).model,
+      "gpt-4.1-mini",
+    );
+    assert.equal(
+      (await f.service.conversation(second.id)).model,
+      "gpt-4.1-mini",
+    );
+    const removed = input(f.service);
+    removed.models = [];
+    removed.defaultModel = null;
+    await f.service.saveSettings(removed);
+    await assert.rejects(
+      f.service.send(first.id, randomUUID(), "no fallback"),
+      /選び直/,
+    );
+    assert.match(JSON.stringify(await f.service.view(first.id)), /continued/);
+  } finally {
+    await f.service.close();
+    await rm(f.root, { recursive: true, force: true });
   }
 });

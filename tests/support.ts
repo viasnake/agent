@@ -77,7 +77,7 @@ export async function fixture(
   };
   const faux = fauxProvider({
     tokensPerSecond: Infinity,
-    models: [{ id: "faux-1" }, { id: "gpt-4.1" }],
+    models: [{ id: "faux-1" }, { id: "gpt-4.1" }, { id: "gpt-4.1-mini" }],
   });
   faux.setResponses(responses);
   const runner = options.runner ?? new TestRunner(join(root, "work"));

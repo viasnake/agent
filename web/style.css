@@ -39,23 +39,6 @@ button {
   padding: 24px;
   background: var(--bs-bg-1);
 }
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 19px;
-  font-weight: 650;
-  letter-spacing: -0.03em;
-}
-.brand-icon {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: var(--bs-primary-bg);
-  color: var(--bs-primary-contrast);
-}
 .app-shell {
   display: flex;
   height: 100dvh;
@@ -69,10 +52,6 @@ button {
   padding: 24px 14px 12px;
   background: var(--bs-bg-1);
   border-right: 1px solid var(--bs-border-muted);
-}
-.sidebar .brand {
-  padding: 0 10px;
-  margin-bottom: 28px;
 }
 .new-conversation {
   --bs-btn-bg: var(--bs-bg-body);
@@ -928,4 +907,74 @@ button {
 .tool-state {
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+.sidebar-close {
+  align-self: flex-end;
+  margin-bottom: 8px;
+}
+.settings-disclosure {
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 12px;
+  margin-bottom: 12px;
+  background: var(--bs-bg-body);
+}
+.settings-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  padding: 16px;
+  list-style: none;
+}
+.settings-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.settings-disclosure > summary > span {
+  flex: 1;
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.settings-disclosure > summary small {
+  font-size: 11px;
+  color: var(--bs-fg-2);
+}
+.settings-disclosure > summary::after {
+  content: "⌄";
+  color: var(--bs-fg-2);
+}
+.settings-disclosure[open] > summary::after {
+  transform: rotate(180deg);
+}
+.settings-disclosure > .settings-card {
+  border: 0;
+  border-top: 1px solid var(--bs-border-muted);
+  border-radius: 0;
+  margin: 0;
+}
+.notification-region {
+  position: fixed;
+  z-index: 100;
+  bottom: max(20px, env(safe-area-inset-bottom));
+  right: 20px;
+  width: min(400px, calc(100vw - 40px));
+  pointer-events: none;
+}
+.notification {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  box-shadow: var(--bs-box-shadow-lg);
+  pointer-events: auto;
+}
+.notification > span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.notification > button {
+  flex-shrink: 0;
 }
