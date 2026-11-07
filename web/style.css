@@ -175,6 +175,7 @@ button {
   font-weight: 600;
 }
 #state {
+  color: var(--bs-theme-fg-emphasis);
   flex-shrink: 0;
   font-size: 11px;
 }

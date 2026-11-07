@@ -257,6 +257,11 @@ test("real browser conversation: no category, attachments, response-loss retry, 
         () => false,
       ),
     );
+    await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await assertReadable(page.locator("#state"));
+    }
     await page.locator("#message").fill("追加指示を保持してください");
     await page.getByRole("button", { name: "送る", exact: true }).click();
     await until(async () => (await f.service.view(id)).pendingInputs === 1);
