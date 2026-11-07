@@ -177,6 +177,55 @@ test("connection tests use the real provider model independently of the injected
         streamFailure = "";
       }
     }
+    // Exercise conversation dispatch too: a passing management test alone is insufficient.
+    const real = await fixture([], { noModel: true });
+    try {
+      const settings = edit(real);
+      const connection = randomUUID();
+      settings.models = [{ id: connection, provider: "openai", auth: "oauth" }];
+      await real.service.saveSettings(settings);
+      const model = real.service.settings.snapshot().models[0]!;
+      await real.service.settings.setModelOAuth(connection, model.authVersion, {
+        type: "oauth",
+        access: "fixture-oauth-access",
+        refresh: "fixture-oauth-refresh",
+        expires: Date.now() + 3600000,
+        clientId: "oaiapp_fixture",
+        scopes: ["chatgpt.tokens.use.direct"],
+      });
+      const conversation = await real.service.create(
+        randomUUID(),
+        "OAuth conversation",
+        connection,
+        "gpt-6.1-sol",
+      );
+      const before = requests.length;
+      await real.service.send(conversation.id, randomUUID(), "Reply OK");
+      await until(
+        async () =>
+          (await real.service.conversation(conversation.id)).status !==
+          "running",
+      );
+      assert.equal(
+        (await real.service.conversation(conversation.id)).status,
+        "idle",
+      );
+      assert.match(
+        JSON.stringify((await real.service.view(conversation.id)).transcript),
+        /OK/,
+      );
+      assert.equal(requests.length, before + 1);
+      assert.equal(requests.at(-1)!.body.model, "gpt-6.1-sol");
+      assert.equal(requests.at(-1)!.key, "Bearer fixture-oauth-access");
+      assert.ok(
+        !JSON.stringify(await real.service.view(conversation.id)).includes(
+          "fixture-oauth",
+        ),
+      );
+    } finally {
+      await real.service.close();
+      await rm(real.root, { recursive: true, force: true });
+    }
   } finally {
     await f.service.close();
     await rm(f.root, { recursive: true, force: true });

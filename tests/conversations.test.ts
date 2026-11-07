@@ -22,8 +22,6 @@ import {
   TestRunner,
 } from "./support.js";
 import { assertFileDescriptorPath } from "../src/execution/worker.js";
-import { WorkerClient } from "../src/execution/client.js";
-import { AgentService } from "../src/service.js";
 
 test("CSV and Markdown use unmodified Pi file/edit/bash tools, outputs are downloadable without registration, and an answered conversation continues", async () => {
   const { service, runner, root, faux } = await fixture(csvResponses());
@@ -270,7 +268,7 @@ test("downloads reject traversal, absolute paths, symlinks, hardlinks, FIFO and 
   }
 });
 
-test("unconfigured model keeps history available and missing production separation has no fallback", async () => {
+test("unconfigured models and unavailable workers refuse execution without losing history", async () => {
   const f = await fixture([], { noModel: true });
   try {
     const { id } = await f.service.create(randomUUID(), "モデルなし");
@@ -280,10 +278,22 @@ test("unconfigured model keeps history available and missing production separati
   } finally {
     await f.service.close();
   }
-  const runner = new WorkerClient();
-  await assert.rejects(runner.ready());
-  await runner.close();
-  assert.equal(typeof AgentService.open, "function");
+  const configured = await fixture([answer("must not run")]);
+  try {
+    (configured.runner as TestRunner).available = false;
+    const { id } = await configured.service.create(
+      randomUUID(),
+      "Unavailable worker",
+    );
+    await assert.rejects(
+      configured.service.send(id, randomUUID(), "hello"),
+      /作業 UID・通信制限・子プロセスの回収を確認できません/,
+    );
+    assert.equal((await configured.service.conversation(id)).status, "idle");
+    assert.equal((await configured.service.view(id)).transcript.length, 0);
+  } finally {
+    await configured.service.close();
+  }
 });
 
 test("an opened file whose parent moved outside the expected path is refused", async () => {
@@ -301,6 +311,27 @@ test("an opened file whose parent moved outside the expected path is refused", a
     } finally {
       await handle.close();
     }
+  } finally {
+    await f.service.close();
+  }
+});
+
+test("an unavailable provider model is refused before input admission or work initialization", async () => {
+  const f = await fixture();
+  try {
+    const { id } = await f.service.create(
+      randomUUID(),
+      "Unavailable model",
+      undefined,
+      "chat-latest",
+    );
+    await assert.rejects(
+      f.service.send(id, randomUUID(), "hello"),
+      /モデルを選び直してください/,
+    );
+    assert.equal((await f.service.conversation(id)).status, "idle");
+    assert.equal((await f.service.conversation(id)).workspaceCreated, false);
+    assert.equal((await f.service.view(id)).transcript.length, 0);
   } finally {
     await f.service.close();
   }

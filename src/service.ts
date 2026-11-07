@@ -161,7 +161,7 @@ export class AgentService {
       for (const conversation of state.conversations)
         if (conversation.status !== "idle") {
           conversation.status = "interrupted";
-          conversation.detail = interrupted;
+          conversation.detail = "応答が中断されました";
         }
     }, ctx);
     // Opening never grants execution. Abort recovered scopes behind closed provider/tool gates before any user request can resume scheduling.
@@ -713,6 +713,8 @@ export class AgentService {
           409,
           "設定画面でモデルの認証を完了してください。会話は保存されています",
         );
+      if (!this.models.getModel(this.providerId, this.modelId))
+        throw new AppError(409, "モデルを選び直してください");
       const starting = !this.active;
       if (starting) {
         await this.workspace(id);
@@ -840,7 +842,13 @@ export class AgentService {
           if (conversation.status !== "running") return;
           conversation.status = live?.runFailure ? "interrupted" : "idle";
           conversation.detail = live?.runFailure
-            ? `応答は終了していません：${live.runFailure.reason}`
+            ? live.runFailure.reason === "no_model"
+              ? "モデルを選び直してください"
+              : live.runFailure.reason === "model_error"
+                ? "応答を取得できませんでした"
+                : live.runFailure.reason === "turn_limit"
+                  ? "モデル呼び出しの上限に達しました"
+                  : "応答が中断されました"
             : "応答が終了しました";
           conversation.updatedAt = Date.now();
         }, ctx);
@@ -881,7 +889,10 @@ export class AgentService {
           );
       }
   }
-  async stop(id: string, detail = interrupted): Promise<{ id: string }> {
+  async stop(
+    id: string,
+    detail = "応答を停止しました",
+  ): Promise<{ id: string }> {
     return this.exclusive(async () => {
       this.assertHealthy();
       const conversation = await this.conversation(id);

@@ -371,3 +371,120 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await f.service.close();
   }
 });
+
+test("conversation navigation preserves selection, ignores stale loads and contains failures in the thread", async () => {
+  const f = await fixture([answer("最初の応答")]);
+  const { randomUUID } = await import("node:crypto");
+  const a = await f.service.create(randomUUID(), "会話 A");
+  await f.service.create(randomUUID(), "会話 B");
+  await f.service.send(a.id, randomUUID(), "最初の入力");
+  await until(
+    async () => (await f.service.conversation(a.id)).status === "idle",
+  );
+  const probe = portProbe();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  const origin = `http://127.0.0.1:${port}`;
+  f.config.server.origins = [origin];
+  const server = await createServer(f.service, resolve("dist/web") + "/");
+  await server.listen({ host: "127.0.0.1", port });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox"],
+  });
+  const page = await browser.newPage();
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    await page.goto(origin);
+    const selectA = page.getByRole("button", { name: "会話 A", exact: true });
+    const selectB = page.getByRole("button", { name: "会話 B", exact: true });
+    await selectA.click();
+    await page.getByText("最初の応答", { exact: true }).waitFor();
+    await page.locator("#message").fill("未送信の入力");
+    await selectA.click({ clickCount: 3 });
+    assert.equal(await page.locator("#message").inputValue(), "未送信の入力");
+    assert.equal(await page.locator(".history-loading").count(), 0);
+    assert.equal(
+      await page.getByText("最初の応答", { exact: true }).count(),
+      1,
+    );
+
+    f.faux.setResponses([
+      call("bash", { command: "sleep 30" }),
+      answer("unused"),
+    ]);
+    await page.locator("#send").click();
+    await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
+    await selectB.click();
+    await page.locator("#title").filter({ hasText: "会話 B" }).waitFor();
+    assert.equal(
+      await page.getByText("最初の応答", { exact: true }).count(),
+      0,
+    );
+    await selectA.click();
+    await page.getByRole("button", { name: "停止", exact: true }).waitFor();
+    await selectA.click({ clickCount: 3 });
+    await page.getByRole("button", { name: "停止", exact: true }).click();
+    await page.locator("#transcript #detail").waitFor();
+    assert.equal(await page.locator(".workspace > #detail").count(), 0);
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await assertReadable(page.locator("#detail"));
+    }
+
+    // A delayed HTTP load must not overwrite a newer SSE snapshot, even after A-B-A.
+    await selectB.click();
+    let captured = false;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/api/conversations/${a.id}`, async (route) => {
+      const response = await route.fetch();
+      captured = true;
+      await held;
+      await route.fulfill({ response });
+    });
+    await selectA.click();
+    await until(async () => captured);
+    await page.getByRole("button", { name: "再開", exact: true }).waitFor();
+    f.faux.setResponses([answer("新しい応答")]);
+    await f.service.send(a.id, randomUUID(), "新しい入力");
+    await page.getByText("新しい応答", { exact: true }).waitFor();
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+    assert.equal(await page.locator("#state").textContent(), "応答終了");
+    assert.equal(await page.locator("#detail").count(), 0);
+
+    // Failed initial loading offers an in-thread retry instead of an endless spinner.
+    await selectB.click();
+    await page.route(`**/api/conversations/${a.id}/events`, (route) =>
+      route.abort(),
+    );
+    await page.route(`**/api/conversations/${a.id}`, (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "unavailable" }),
+      }),
+    );
+    await selectA.click();
+    await page
+      .getByRole("button", { name: "再読み込み", exact: true })
+      .waitFor();
+    assert.equal(await page.locator(".history-loading").count(), 0);
+    await page.unrouteAll({ behavior: "wait" });
+    await page.getByRole("button", { name: "再読み込み", exact: true }).click();
+    await page.getByText("新しい応答", { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally {
+    await page.close();
+    await browser.close();
+    await server.close();
+    await f.service.close();
+  }
+});

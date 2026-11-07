@@ -40,6 +40,8 @@ type ThreadProps = {
   cursor: unknown;
   modelPicker: ReactNode;
   loading: boolean;
+  loadError: string;
+  onRetry: () => void;
   sending: boolean;
   attachments: File[];
   setAttachments: (files: File[]) => void;
@@ -74,6 +76,8 @@ function Chat({
   onEarlier,
   modelPicker,
   loading,
+  loadError,
+  onRetry,
 }: ThreadProps) {
   const messages = useMemo(
     () => threadMessages(entries, view),
@@ -120,7 +124,18 @@ function Chat({
                   会話を読み込み中…
                 </div>
               )}
-              {!messages.length && !loading && (
+              {loadError && (
+                <div className="conversation-notice" role="alert">
+                  <span>{loadError}</span>
+                  <button
+                    className="btn-outline theme-secondary btn-sm"
+                    onClick={onRetry}
+                  >
+                    再読み込み
+                  </button>
+                </div>
+              )}
+              {!messages.length && !loading && !loadError && (
                 <div className="empty-thread">
                   <span className="empty-icon">
                     <Icon name="agent" />
@@ -145,6 +160,11 @@ function Chat({
                   )
                 }
               </ThreadPrimitive.Messages>
+              {view?.conversation.status === "interrupted" && (
+                <div id="detail" className="conversation-notice" role="status">
+                  {view.conversation.detail}
+                </div>
+              )}
               {view?.conversation.status === "running" && (
                 <div id="live" role="status" className="live-status">
                   <span className="running-dot" />
@@ -282,6 +302,9 @@ function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const selectedRef = useRef(selected);
+  const selectionVersion = useRef(0);
+  const [reload, setReload] = useState(0);
+  const [loadError, setLoadError] = useState("");
   const [view, setView] = useState<View | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<unknown>(null);
@@ -310,8 +333,10 @@ function App() {
     setConversations(result.conversations);
   }, []);
   const refreshFiles = useCallback(async (id: string) => {
+    const version = selectionVersion.current;
     const result = await api<Files>(`/api/conversations/${id}/files`);
-    if (selectedRef.current === id) setFiles(result);
+    if (selectedRef.current === id && selectionVersion.current === version)
+      setFiles(result);
   }, []);
   const merge = useCallback((next: View) => {
     if (selectedRef.current !== next.conversation.id) return;
@@ -324,6 +349,11 @@ function App() {
   }, []);
   function select(id: string | null) {
     setSettingsOpen(false);
+    setSidebar(false);
+    // Reselecting the visible conversation must preserve its subscription and draft.
+    if (id !== null && selectedRef.current === id) return;
+    selectionVersion.current++;
+    setReload((value) => value + 1);
     selectedRef.current = id;
     setSelected(id);
     setView(null);
@@ -332,8 +362,8 @@ function App() {
     setFiles({ files: [] });
     setAttachments([]);
     setError("");
+    setLoadError("");
     setThreadKey((key) => key + 1);
-    setSidebar(false);
   }
   const connect = useCallback(async () => {
     setError("");
@@ -399,30 +429,48 @@ function App() {
   useEffect(() => {
     if (!ready || !selected) return;
     let active = true;
+    let snapshotReceived = false;
+    let historyInitialized = false;
+    const version = selectionVersion.current;
+    const isCurrent = () => active && selectionVersion.current === version;
     const id = selected;
+    setLoadError("");
+    setConnection("接続中");
     const events = new EventSource(`/api/conversations/${id}/events`);
     void api<View>(`/api/conversations/${id}`)
       .then((next) => {
-        if (active) {
-          merge(next);
-          setCursor(next.cursor);
+        if (isCurrent()) {
+          // The initial HTTP response can arrive after a newer live snapshot.
+          if (!snapshotReceived) merge(next);
+          if (!historyInitialized) setCursor(next.cursor);
+          historyInitialized = true;
         }
       })
-      .catch(notice);
+      .catch((error) => {
+        if (!isCurrent()) return;
+        if (error instanceof ApiError && error.status === 401) notice(error);
+        else if (!snapshotReceived) setLoadError("会話を読み込めませんでした");
+      });
     events.addEventListener("snapshot", (event) => {
-      if (active) merge(JSON.parse((event as MessageEvent).data));
+      if (!isCurrent()) return;
+      const next: View = JSON.parse((event as MessageEvent).data);
+      if (!historyInitialized) setCursor(next.cursor);
+      historyInitialized = true;
+      snapshotReceived = true;
+      setLoadError("");
+      merge(next);
     });
     events.onopen = () => {
-      if (active) setConnection("接続中");
+      if (isCurrent()) setConnection("接続中");
     };
     events.onerror = () => {
-      if (active) setConnection("再接続中");
+      if (isCurrent()) setConnection("再接続中");
     };
     return () => {
       active = false;
       events.close();
     };
-  }, [ready, selected, merge, notice]);
+  }, [ready, selected, reload, merge, notice]);
   const currentStatus = view?.conversation.status;
   useEffect(() => {
     if (!ready || !selected) return;
@@ -499,6 +547,7 @@ function App() {
   }
   async function earlier() {
     if (!selected || !cursor) return;
+    const version = selectionVersion.current;
     try {
       const encoded = btoa(JSON.stringify(cursor))
         .replace(/\+/g, "-")
@@ -507,7 +556,11 @@ function App() {
       const next = await api<View>(
         `/api/conversations/${selected}?cursor=${encodeURIComponent(encoded)}`,
       );
-      if (selectedRef.current !== selected) return;
+      if (
+        selectedRef.current !== selected ||
+        selectionVersion.current !== version
+      )
+        return;
       // Older pages extend the transcript without replacing the current execution state.
       setEntries((previous) => [
         ...new Map(
@@ -516,7 +569,7 @@ function App() {
       ]);
       setCursor(next.cursor);
     } catch (error) {
-      notice(error);
+      if (selectionVersion.current === version) notice(error);
     }
   }
   async function action() {
@@ -659,15 +712,6 @@ function App() {
               )}
             </div>
           </header>
-          {currentStatus === "interrupted" && (
-            <p
-              id="detail"
-              className="workspace-notice small fg-2"
-              role="status"
-            >
-              {view?.conversation.detail}
-            </p>
-          )}
           {files.files.length > 0 && (
             <section
               id="files-section"
@@ -711,7 +755,12 @@ function App() {
             entries={entries}
             cursor={cursor}
             sending={sending || changingModel || (selected !== null && !view)}
-            loading={selected !== null && !view}
+            loading={selected !== null && !view && !loadError}
+            loadError={loadError}
+            onRetry={() => {
+              setLoadError("");
+              setReload((value) => value + 1);
+            }}
             modelPicker={
               <ModelPicker
                 label="会話のモデル"

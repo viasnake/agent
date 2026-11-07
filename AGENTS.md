@@ -63,7 +63,10 @@ generated output or live provider responses.
   focus and disabled states. Verify both light and dark system preferences.
   Keep Markdown HTML and remote images disabled; allow only safe external links
   and scoped output downloads. Keep UI copy to labels, status and actionable
-  errors; avoid explanatory prose.
+  errors; avoid explanatory prose. Keep interruption and history-load failures in
+  the conversation transcript, with a local retry for failed loads. Reselecting
+  a conversation preserves its draft and subscription; ignore stale navigation
+  requests and never let an initial HTTP load overwrite a newer SSE snapshot.
 - vm/: manual host scripts, initial disk setup, fixed UID launcher and guest units.
 
 Inspect installed SDK exports/declarations before changing integration code.
