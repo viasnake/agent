@@ -8,7 +8,6 @@ const paths = {
   file: "M14 2H5v20h14V7zm0 0v5h5M8 12h8M8 16h6",
   down: "M12 4v16m-6-6 6 6 6-6",
   terminal: "m4 6 6 6-6 6m9 0h7",
-  logout: "M9 4H4v16h5m5-13 5 5-5 5m-6-5h11",
 };
 export function Icon({ name }: { name: keyof typeof paths }) {
   return (

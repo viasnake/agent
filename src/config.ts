@@ -29,7 +29,17 @@ const schema = z
     expectedMountLabel: z.string().default("AGENT_DATA"),
     server: z.object({
       host: z.string().default("0.0.0.0"),
-      port: z.number().int().min(1).max(65535).default(8080),
+      // Work-side preview servers may use loopback ports 3000-3999.
+      port: z
+        .number()
+        .int()
+        .min(1)
+        .max(65535)
+        .refine(
+          (port) => port < 3000 || port > 3999,
+          "Web port overlaps work-side preview ports",
+        )
+        .default(8080),
       origins: z.array(z.string().url()).min(1),
     }),
     model: z
@@ -47,18 +57,24 @@ const schema = z
   })
   .strict();
 export type Config = z.infer<typeof schema> & { limits: typeof DEFAULT_LIMITS };
+export function isLocalOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    return (
+      url.origin === origin &&
+      ["http:", "https:"].includes(url.protocol) &&
+      ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) &&
+      !url.username &&
+      !url.password
+    );
+  } catch {
+    return false;
+  }
+}
 export async function loadConfig(path: string): Promise<Config> {
   const config = schema.parse(parse(await readFile(path, "utf8")));
-  for (const origin of config.server.origins) {
-    const url = new URL(origin);
-    if (
-      url.origin !== origin ||
-      !["http:", "https:"].includes(url.protocol) ||
-      url.username ||
-      url.password
-    )
-      throw new Error("Invalid origin");
-  }
+  if (!config.server.origins.every(isLocalOrigin))
+    throw new Error("Only loopback browser origins are supported");
   return config as Config;
 }
 export async function privateFile(path: string): Promise<string> {

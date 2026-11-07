@@ -39,7 +39,7 @@ export class ApiError extends Error {
   }
 }
 let csrf = "";
-export function authenticate(value: string) {
+export function setCsrf(value: string) {
   csrf = value;
 }
 export async function api<T>(

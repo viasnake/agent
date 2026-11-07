@@ -41,7 +41,7 @@ generated output or live provider responses.
 - src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
   official MCP client and bounded attachment/output transfers.
 - src/provider.ts: model dispatch limit and active-conversation binding.
-- src/server.ts and web/: authentication, conversation projections and SSE.
+- src/server.ts and web/: local browser sessions, conversation projections and SSE.
   Pi remains the only conversation/execution owner; the React UI adapts the
   existing API without client-side tool execution or cloud persistence. Bundle
   browser dependencies locally with esbuild. Use Bootstrap 6 components and
@@ -79,8 +79,15 @@ client; no discovery service, custom MCP protocol or global connector framework.
 Keep downloads within outputs/: reject absolute paths, traversal, symlinks,
 nonregular files, hardlinks, oversized files and path replacement during reads.
 Uploads go explicitly into attachments/. Files are mutable workspace files,
-not immutable artifacts. Keep authentication, Host/Origin/CSRF checks and safe
-text rendering. External content is untrusted input, never a permission grant.
+not immutable artifacts. There is no UI password or login screen. Establish a
+CSRF session automatically for local browsers. Keep socket-peer, loopback Host,
+Origin, Fetch Metadata and CSRF checks; never trust forwarded headers. QEMU
+forwarding stays bound to host loopback. The guest accepts host-forwarded peers
+at 10.0.2.2 and loopback only; do not expose it through LAN/public proxies.
+Keep the control HTTP port outside work-side preview ports 3000-3999 and retain
+worker egress restrictions. Model API credentials remain control-only. Preserve
+legacy UI password files without reading, migrating or deleting them.
+External content is untrusted input, never a permission grant.
 
 Stop and restart preserve history and files; they do not restore OS stacks or
 guarantee external exactly-once. Interrupted commands are not blindly resent.

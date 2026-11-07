@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import {
   AssistantRuntimeProvider,
@@ -13,7 +12,7 @@ import type { AppendMessage } from "@assistant-ui/react";
 import {
   api,
   ApiError,
-  authenticate,
+  setCsrf,
   fileSize,
   forget,
   requestId,
@@ -28,70 +27,6 @@ import {
   UserMessage,
 } from "./messages.js";
 import { Icon } from "./icons.js";
-
-function Login({ onLogin }: { onLogin: () => void }) {
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  async function login(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    setBusy(true);
-    setError("");
-    try {
-      const result = await api<{ csrf: string }>("/api/login", "POST", {
-        requestId: crypto.randomUUID(),
-        password: new FormData(form).get("password"),
-      });
-      authenticate(result.csrf);
-      form.reset();
-      onLogin();
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "ログインできません");
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <div id="login" className="login-page">
-      <form
-        id="login-form"
-        className="login-card border rounded p-7"
-        onSubmit={(event) => void login(event)}
-      >
-        <div className="brand mb-7">
-          <span className="brand-icon">
-            <Icon name="agent" />
-          </span>
-          <h1 className="h4 mb-0">Agent</h1>
-        </div>
-        <label htmlFor="password" className="form-label">
-          認証情報
-        </label>
-        <input
-          id="password"
-          name="password"
-          type="password"
-          autoComplete="current-password"
-          className="form-control mb-5"
-          required
-          autoFocus
-        />
-        <button className="btn-solid theme-primary w-100" disabled={busy}>
-          {busy ? "ログイン中…" : "ログイン"}
-        </button>
-        {error && (
-          <p
-            id="login-error"
-            className="fg-danger small mt-4 mb-0"
-            role="alert"
-          >
-            {error}
-          </p>
-        )}
-      </form>
-    </div>
-  );
-}
 
 type ThreadProps = {
   view: View | null;
@@ -312,7 +247,7 @@ function Chat({
 }
 
 function App() {
-  const [authed, setAuthed] = useState<boolean | null>(null);
+  const [ready, setReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const selectedRef = useRef(selected);
@@ -328,7 +263,7 @@ function App() {
   const [connection, setConnection] = useState("接続中");
   const [error, setError] = useState("");
   const notice = useCallback((error: unknown) => {
-    if (error instanceof ApiError && error.status === 401) setAuthed(false);
+    if (error instanceof ApiError && error.status === 401) setReady(false);
     setError(
       error instanceof Error ? error.message : "操作を完了できませんでした",
     );
@@ -364,20 +299,25 @@ function App() {
     setThreadKey((key) => key + 1);
     setSidebar(false);
   }
+  const connect = useCallback(async () => {
+    setError("");
+    try {
+      const session = await api<{ csrf: string }>("/api/session");
+      setCsrf(session.csrf);
+      setReady(true);
+    } catch (error) {
+      notice(error);
+    }
+  }, [notice]);
   useEffect(() => {
-    void api<{ csrf: string }>("/api/session")
-      .then((session) => {
-        authenticate(session.csrf);
-        setAuthed(true);
-      })
-      .catch(() => setAuthed(false));
-  }, []);
+    void connect();
+  }, [connect]);
   useEffect(() => {
-    if (!authed) return;
+    if (!ready) return;
     void list().catch(notice);
-  }, [authed, list, notice]);
+  }, [ready, list, notice]);
   useEffect(() => {
-    if (!authed || !selected) return;
+    if (!ready || !selected) return;
     let active = true;
     const id = selected;
     const events = new EventSource(`/api/conversations/${id}/events`);
@@ -402,13 +342,13 @@ function App() {
       active = false;
       events.close();
     };
-  }, [authed, selected, merge, notice]);
+  }, [ready, selected, merge, notice]);
   const currentStatus = view?.conversation.status;
   useEffect(() => {
-    if (!authed || !selected) return;
+    if (!ready || !selected) return;
     void list().catch(notice);
     void refreshFiles(selected).catch(notice);
-  }, [authed, selected, currentStatus, list, refreshFiles, notice]);
+  }, [ready, selected, currentStatus, list, refreshFiles, notice]);
   useEffect(() => {
     if (!sidebar) return;
     const close = (event: KeyboardEvent) => {
@@ -503,20 +443,23 @@ function App() {
       setActing(false);
     }
   }
-  if (authed === null)
+  if (!ready)
     return (
-      <div className="login-page fg-2" role="status">
-        接続中…
+      <div className="connection-page">
+        {error ? (
+          <div role="alert">
+            <p>{error}</p>
+            <button
+              className="btn-solid theme-primary"
+              onClick={() => void connect()}
+            >
+              再接続
+            </button>
+          </div>
+        ) : (
+          <span role="status">接続中…</span>
+        )}
       </div>
-    );
-  if (!authed)
-    return (
-      <Login
-        onLogin={() => {
-          select(null);
-          setAuthed(true);
-        }}
-      />
     );
   return (
     <div id="app" className="app-shell">
@@ -575,23 +518,6 @@ function App() {
             />
             {connection}
           </span>
-          <button
-            id="logout"
-            className="btn-text theme-secondary btn-sm"
-            aria-label="ログアウト"
-            onClick={() =>
-              void api("/api/logout", "POST", {
-                requestId: crypto.randomUUID(),
-              })
-                .then(() => {
-                  select(null);
-                  setAuthed(false);
-                })
-                .catch(notice)
-            }
-          >
-            <Icon name="logout" />
-          </button>
         </div>
       </aside>
       <main className="workspace">

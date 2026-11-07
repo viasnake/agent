@@ -3,27 +3,24 @@ import type { FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import { readFile } from "node:fs/promises";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import type { AgentService } from "./service.js";
 import { AppError } from "./security.js";
+import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 
 const requestId = z.string().uuid();
 const identifier = z.object({ id: z.string().uuid() });
-const digest = (value: string) => createHash("sha256").update(value).digest();
 type Session = { csrf: string; expires: number };
 export async function createServer(
   service: AgentService,
-  password: string,
   webRoot = fileURLToPath(new URL("../web/", import.meta.url)),
 ): Promise<FastifyInstance> {
-  if (password.length < 32)
-    throw new Error(
-      "A random UI credential of at least 32 characters is required",
-    );
+  if (!service.config.server.origins.every(isLocalOrigin))
+    throw new Error("Only loopback browser origins are supported");
   const app = Fastify({
     logger: false,
     bodyLimit: 128 * 1024,
@@ -32,8 +29,7 @@ export async function createServer(
   });
   await app.register(cookie);
   await app.register(rateLimit, { max: 180, timeWindow: "1 minute" });
-  const sessions = new Map<string, Session>(),
-    loginReceipts = new Map<string, { hash: Buffer; token: string }>();
+  const sessions = new Map<string, Session>();
   const allowedOrigins = new Set(service.config.server.origins),
     hosts = new Set([...allowedOrigins].map((origin) => new URL(origin).host));
   let streams = 0;
@@ -46,6 +42,11 @@ export async function createServer(
         "Content-Security-Policy",
         "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
       );
+    // QEMU user networking presents host-forwarded connections as 10.0.2.2.
+    // Never trust proxy headers to establish the local access boundary.
+    const peer = request.ip.replace(/^::ffff:/, "");
+    if (!["127.0.0.1", "::1", "10.0.2.2"].includes(peer))
+      throw new AppError(403, "ローカル接続のみ利用できます");
     if (request.url === "/healthz") return;
     if (
       !hosts.has(request.headers.host ?? "") ||
@@ -58,11 +59,19 @@ export async function createServer(
       !allowedOrigins.has(request.headers.origin ?? "")
     )
       throw new AppError(403, "Origin の確認が必要です");
-    if (!request.url.startsWith("/api/") || request.url === "/api/login")
+    const site = request.headers["sec-fetch-site"];
+    if (
+      request.url.startsWith("/api/") &&
+      site &&
+      site !== "same-origin" &&
+      site !== "none"
+    )
+      throw new AppError(403, "同じ画面から操作してください");
+    if (!request.url.startsWith("/api/") || request.url === "/api/session")
       return;
     const session = sessions.get(request.cookies.agent_session ?? "");
     if (!session || session.expires < Date.now())
-      throw new AppError(401, "ログインしてください");
+      throw new AppError(401, "接続が切れました。再接続してください");
     if (
       request.method !== "GET" &&
       request.method !== "HEAD" &&
@@ -96,52 +105,27 @@ export async function createServer(
   app.get("/healthz", async (_request, reply) =>
     reply.code(service.healthy() ? 200 : 503).send({ ok: service.healthy() }),
   );
-  app.post(
-    "/api/login",
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      const body = z
-        .object({ requestId, password: z.string().max(1000) })
-        .strict()
-        .parse(request.body);
-      for (const [token, session] of sessions)
-        if (session.expires < Date.now()) sessions.delete(token);
-      if (!timingSafeEqual(digest(body.password), digest(password)))
-        throw new AppError(401, "認証情報が一致しません");
-      const previous = loginReceipts.get(body.requestId);
-      if (previous && !timingSafeEqual(previous.hash, digest(body.password)))
-        throw new AppError(409, "requestId の内容が一致しません");
-      const token = previous?.token ?? randomBytes(32).toString("hex");
-      if (!sessions.has(token)) {
-        if (sessions.size >= 24) {
-          const oldest = sessions.keys().next().value;
-          if (oldest) sessions.delete(oldest);
-        }
-        sessions.set(token, {
-          csrf: randomBytes(32).toString("hex"),
-          expires: Date.now() + 12 * 3600 * 1000,
-        });
-      }
-      if (loginReceipts.size > 100) loginReceipts.clear();
-      loginReceipts.set(body.requestId, { hash: digest(body.password), token });
+  // The local page establishes a CSRF session without user credentials.
+  app.get("/api/session", async (request, reply) => {
+    for (const [token, session] of sessions)
+      if (session.expires < Date.now()) sessions.delete(token);
+    let token = request.cookies.agent_session;
+    if (!token || !sessions.has(token)) {
+      if (sessions.size >= 24) sessions.delete(sessions.keys().next().value!);
+      token = randomBytes(32).toString("hex");
+      sessions.set(token, {
+        csrf: randomBytes(32).toString("hex"),
+        expires: Date.now() + 12 * 3600 * 1000,
+      });
       reply.setCookie("agent_session", token, {
         path: "/",
         httpOnly: true,
         sameSite: "strict",
-        secure: request.headers.origin?.startsWith("https://") === true,
+        secure: request.protocol === "https",
         maxAge: 12 * 3600,
       });
-      return { csrf: sessions.get(token)!.csrf };
-    },
-  );
-  app.get("/api/session", async (request) => ({
-    csrf: sessions.get(request.cookies.agent_session!)!.csrf,
-  }));
-  app.post("/api/logout", async (request, reply) => {
-    z.object({ requestId }).strict().parse(request.body);
-    sessions.delete(request.cookies.agent_session!);
-    reply.clearCookie("agent_session", { path: "/" });
-    return { ok: true };
+    }
+    return { csrf: sessions.get(token)!.csrf };
   });
   const safe = (value: unknown): unknown => {
     if (typeof value === "string") return service.redact(value);

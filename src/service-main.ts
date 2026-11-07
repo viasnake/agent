@@ -1,15 +1,11 @@
-import { loadConfig, checkDataRoot, privateFile } from "./config.js";
+import { loadConfig, checkDataRoot } from "./config.js";
 import { AgentService } from "./service.js";
 import { createServer } from "./server.js";
-import { join } from "node:path";
 process.umask(0o077);
 const config = await loadConfig(process.argv[2]!);
 await checkDataRoot(config);
 const service = await AgentService.open(config);
-const server = await createServer(
-  service,
-  await privateFile(join(config.dataRoot, "control/secrets/ui-password")),
-);
+const server = await createServer(service);
 let stopping = false;
 async function stop(): Promise<void> {
   if (stopping) return;

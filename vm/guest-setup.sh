@@ -49,15 +49,6 @@ visudo -cf "$source_dir/vm/agent.sudoers"
 install -o root -g root -m 0440 "$source_dir/vm/agent.sudoers" /etc/sudoers.d/agent-work
 install -o root -g root -m 0644 "$source_dir/vm/agent.service" /etc/systemd/system/agent.service
 install -o root -g root -m 0644 "$source_dir/vm/agent-egress.service" /etc/systemd/system/agent-egress.service
-python3 - <<'PY'
-import os,pwd,secrets
-from pathlib import Path
-path=Path('/srv/agent-data/control/secrets/ui-password')
-if not path.exists():
-    with path.open('x',opener=lambda p,f:os.open(p,f,0o600)) as stream:
-        stream.write(secrets.token_urlsafe(32)+'\n');stream.flush();os.fsync(stream.fileno())
-    user=pwd.getpwnam('agent-control');os.chown(path,user.pw_uid,user.pw_gid)
-PY
 systemctl daemon-reload
 systemctl enable --now agent.service
-printf 'Installed. Read the private UI credential over administrator SSH; it is not printed to logs.\n'
+printf 'Installed. Open http://127.0.0.1:8080 on the QEMU host.\n'

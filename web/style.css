@@ -32,17 +32,12 @@ a svg {
 button {
   touch-action: manipulation;
 }
-.login-page {
+.connection-page {
   min-height: 100%;
   display: grid;
   place-items: center;
   padding: 24px;
   background: var(--bs-bg-1);
-}
-.login-card {
-  width: min(100%, 360px);
-  background: var(--bs-bg-body);
-  box-shadow: var(--bs-box-shadow-sm);
 }
 .brand {
   display: flex;

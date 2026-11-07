@@ -74,8 +74,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       "## CSV の整形\n\n**保存しました。**\n\n| 名前 | 合計 |\n| --- | --- |\n| Alice | 12 |\n\n```sh\ncat outputs/clean.csv\n```\n\n![外部画像](https://evil.invalid/track)\n\n[不正なリンク](javascript:alert(1))\n\n<script>window.pwned=1</script><img src=https://evil.invalid/track>",
     ),
   ]);
-  const password = "synthetic-password-for-ui-123456789012345",
-    probe = portProbe();
+  const probe = portProbe();
   await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
   const address = probe.address();
   assert.ok(address && typeof address !== "string");
@@ -83,11 +82,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
   await new Promise<void>((resolve) => probe.close(() => resolve()));
   const origin = `http://127.0.0.1:${port}`;
   f.config.server.origins = [origin];
-  const server = await createServer(
-    f.service,
-    password,
-    resolve("dist/web") + "/",
-  );
+  const server = await createServer(f.service, resolve("dist/web") + "/");
   await server.listen({ host: "127.0.0.1", port });
   const browser = await chromium.launch({
       headless: true,
@@ -116,24 +111,12 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       ),
       "Serve the pinned Bootstrap CSS without CDN requests",
     );
-    assert.ok(
-      await page
-        .locator("#password")
-        .evaluate(
-          (input) => parseFloat(getComputedStyle(input).paddingLeft) > 0,
-        ),
+    await page.locator("#app").waitFor({ state: "visible" });
+    assert.equal(
+      await page.locator('input[type="password"], #login, #logout').count(),
+      0,
     );
     await mkdir("test-results", { recursive: true });
-    for (const colorScheme of ["light", "dark"] as const) {
-      await page.emulateMedia({ colorScheme });
-      await assertReadable(
-        page.locator(".login-card label, #password, .login-card button"),
-      );
-      await page.screenshot({ path: `test-results/login-${colorScheme}.png` });
-    }
-    await page.locator("#password").fill(password);
-    await page.getByRole("button", { name: "ログイン", exact: true }).click();
-    await page.locator("#app").waitFor({ state: "visible" });
     assert.equal(await page.locator("select").count(), 0);
     await page.locator("#message").fill("CSV を整形して CSV を返してください");
     await page.locator("#attachments").setInputFiles({
@@ -324,6 +307,12 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       .waitFor({ state: "visible" });
     await page.locator("#conversations button").first().click();
     assert.equal(await page.locator("#sidebar").isVisible(), false);
+    await context.clearCookies();
+    await page.getByRole("button", { name: "更新", exact: true }).click();
+    await page.getByRole("button", { name: "再接続", exact: true }).click();
+    await page.getByRole("link", { name: /note.md/ }).waitFor();
+    assert.equal((await f.service.list()).length, 1);
+    assert.equal((await f.service.conversation(id)).status, "idle");
     assert.deepEqual(errors, []);
     const pi = await f.service.piConversation(id);
     for (let index = 0; index < 45; index++) {

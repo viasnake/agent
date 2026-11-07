@@ -4,13 +4,9 @@ function blocked(reason) {
   console.log(JSON.stringify({ result: "blocked", reason }));
   process.exit(77);
 }
-if (
-  process.env.AGENT_LIVE_TEST !== "1" ||
-  !process.env.AGENT_LIVE_PROMPT_FILE ||
-  !process.env.AGENT_LIVE_PASSWORD_FILE
-)
+if (process.env.AGENT_LIVE_TEST !== "1" || !process.env.AGENT_LIVE_PROMPT_FILE)
   blocked(
-    "Explicit paid-model authorization, a reviewed prompt file and a private UI password file are required",
+    "Explicit paid-model authorization and a reviewed prompt file are required",
   );
 const origin = process.env.AGENT_LIVE_ORIGIN ?? "http://127.0.0.1:8080";
 if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin))
@@ -18,23 +14,14 @@ if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin))
 const text = await readFile(process.env.AGENT_LIVE_PROMPT_FILE, "utf8");
 if (!text.trim() || text.length > 64000)
   throw new Error("Review a bounded, nonempty prompt");
-const login = await fetch(`${origin}/api/login`, {
-  method: "POST",
-  headers: { Origin: origin, "Content-Type": "application/json" },
-  body: JSON.stringify({
-    requestId: randomUUID(),
-    password: (
-      await readFile(process.env.AGENT_LIVE_PASSWORD_FILE, "utf8")
-    ).trim(),
-  }),
-});
-if (!login.ok) throw new Error("Authentication failed");
-const { csrf } = await login.json(),
+const session = await fetch(`${origin}/api/session`);
+if (!session.ok) throw new Error("Local session unavailable");
+const { csrf } = await session.json(),
   headers = {
     Origin: origin,
     "Content-Type": "application/json",
     "X-CSRF-Token": csrf,
-    Cookie: login.headers.get("set-cookie").split(";")[0],
+    Cookie: session.headers.get("set-cookie").split(";")[0],
   };
 const created = await fetch(`${origin}/api/conversations`, {
   method: "POST",

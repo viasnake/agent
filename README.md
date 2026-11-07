@@ -48,15 +48,16 @@ sudo systemctl status agent.service
 
 ## 設定
 
-管理者が `/etc/agent/config.yaml` を編集します。[設定例](examples/config.yaml) の `model` に、課金・外部送信を許可した model ID と資格情報ファイルを指定してください。
+モデルは `/etc/agent/config.yaml` の `model.id`、API キーは `model.keyFile` で指定します。[設定例](examples/config.yaml) の `model` を有効にし、利用を許可したモデル ID に置き換えてください。対応する認証は OpenAI API キーです。OAuth ログインと画面上のモデル切り替えには対応していません。
 
 ```sh
 sudo -u agent-control sh -c 'umask 077; cat > /srv/agent-data/control/secrets/model-key'
-# Paste the key, then press Ctrl-D.
+# API キーを入力し、Ctrl-D で保存します。
 sudoedit /etc/agent/config.yaml
 sudo systemctl restart agent.service
-sudo cat /srv/agent-data/control/secrets/ui-password
 ```
+
+モデルを変更するときは、実行中の会話を停止し、`model.id` を編集してサービスを再起動します。再読み込み後、同じ会話に追記するか「再開」で新しいモデルを使います。API キーを変更する場合も再起動が必要です。
 
 CLI・ライブラリは必要なものだけゲストへ導入します。MCP は設定例の `mcp` に stdio サーバーの絶対パスと引数を指定し、サービスを再起動してください。
 作業側の HOME は `/srv/agent-data/work/home` です。ここへ登録した CLI・MCP の資格情報は Agent が利用できます。
@@ -64,10 +65,12 @@ CLI・ライブラリは必要なものだけゲストへ導入します。MCP �
 
 ## 操作
 
-1. ホストの `http://127.0.0.1:8080` を開き、UI 認証情報でログインします。
+1. ホストの `http://127.0.0.1:8080` を開きます。ログイン操作は不要です。
 2. 「新しい会話」から依頼を送ります。続きや追加指示は同じ会話へ送ります。`Ctrl / ⌘ + Enter` でも送信できます。
 3. 取得するファイルは会話の `outputs/` に保存させます。添付は `attachments/` に入ります。
 4. 「停止」で中断し、実行結果を確認してから「再開」します。別の会話が実行中なら終了を待ちます。
+
+QEMU の転送先はホストのループバックに限定し、LAN・インターネットへ公開しないでください。
 
 再起動後の会話は自動実行しません。中断した外部更新は CLI/API で結果を確認してから続けてください。
 資格情報や業務データを含む用途は VM を分け、ホストのホームや SSH agent は共有しないでください。
@@ -105,8 +108,7 @@ sudo systemctl start agent.service
 実モデルの検査は依頼内容・課金・道具の権限を確認してから実行します。
 
 ```sh
-AGENT_LIVE_TEST=1 AGENT_LIVE_PROMPT_FILE=/private/reviewed-prompt.txt \
-  AGENT_LIVE_PASSWORD_FILE=/private/ui-password npm run test:live
+AGENT_LIVE_TEST=1 AGENT_LIVE_PROMPT_FILE=/private/reviewed-prompt.txt npm run test:live
 ```
 
 権限・資格情報がない検査は blocked（終了77）です。実ホストの起動・sleep/resume・復元、ゲストの分離、実モデルの品質は別途確認してください。
