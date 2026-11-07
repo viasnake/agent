@@ -191,4 +191,9 @@ explicit opt-in, a reviewed prompt and private credential file. They never belon
 in default CI. Missing prerequisites are blocked (exit 77), not pass. Report real
 WHPX/KVM, guest UID/network/cgroup, live-service and model-quality acceptance
 separately. Nonprivileged same-UID fixtures do not establish isolation. Keep
-generated evidence in ignored test-results/ or CI artifacts.
+generated evidence in ignored test-results/.
+
+CI has one Linux test job: Node tests, browser E2E and Python unit tests.
+Build only as a test prerequisite; keep formatting, standalone type/syntax
+checks and evidence uploads out of CI. README contains only setup, use,
+maintenance and local test commands.

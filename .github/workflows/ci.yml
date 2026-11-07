@@ -1,4 +1,4 @@
-name: Verify
+name: Tests
 on:
   push:
     branches: [master]
@@ -10,7 +10,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  verify:
+  tests:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -19,34 +19,11 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      - name: Install test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y git python3 openssl
-      - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install test browser
-        run: npx playwright install --with-deps chromium
-      - name: Verify without credentials or paid inference
-        run: npm run verify
-      - name: Save synthetic UI evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: acceptance-evidence
-          path: test-results/
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Check dependency manifests remain unchanged
-        run: git diff --exit-code -- package.json package-lock.json
-  powershell-syntax:
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
-      - name: Parse native host scripts without changing host settings
-        shell: pwsh
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - name: Test
         run: |
-          Get-ChildItem vm/*.ps1 | ForEach-Object {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors.Count) { throw ($errors | Out-String) }
-          }
+          npm run build
+          npm test
+          npm run test:e2e
+          python3 -B -m unittest discover -s tests -p 'test_*.py'
