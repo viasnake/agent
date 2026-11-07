@@ -138,6 +138,37 @@ export async function createServer(
       .parse(request.body);
     return service.testModel(id);
   });
+  app.post("/api/settings/models/:id/oauth", async (request) => {
+    const { id } = identifier.parse(request.params);
+    z.object({}).strict().parse(request.body);
+    return service.modelAuth.begin(id, request.cookies.agent_session!);
+  });
+  app.get("/api/settings/model-login", async (request) =>
+    service.modelAuth.current(request.cookies.agent_session!),
+  );
+  app.get("/api/settings/model-login/:id", async (request) => {
+    const { id } = identifier.parse(request.params);
+    return service.modelAuth.status(id, request.cookies.agent_session!);
+  });
+  app.post("/api/settings/model-login/:id", async (request) => {
+    const { id } = identifier.parse(request.params);
+    const { url } = z
+      .object({ url: z.string().min(1).max(8192) })
+      .strict()
+      .parse(request.body);
+    return service.modelAuth.submit(id, request.cookies.agent_session!, url);
+  });
+  app.post("/api/settings/model-login/:id/cancel", async (request) => {
+    const { id } = identifier.parse(request.params);
+    z.object({}).strict().parse(request.body);
+    return service.modelAuth.cancel(id, request.cookies.agent_session!);
+  });
+  app.post("/api/settings/models/:id/disconnect", async (request) => {
+    const { id } = identifier.parse(request.params);
+    z.object({}).strict().parse(request.body);
+    await service.modelAuth.disconnect(id);
+    return service.management();
+  });
   app.post("/api/settings/mcp/:id/test", async (request) => {
     const { id } = identifier.parse(request.params);
     z.object({}).strict().parse(request.body);

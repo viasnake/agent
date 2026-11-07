@@ -2,12 +2,78 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
 import { fixture, call, answer, until } from "../support.js";
 import { createServer } from "../../src/server.js";
 import { mcpToolName } from "../../src/tools.js";
-test("Web management saves models, stdio MCP, limits and retains a usable mobile/light/dark conversation", async () => {
-  const f = await fixture(),
+async function assertDropdowns(page: Page) {
+  const controls = await page
+    .locator(".settings-page select")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const css = getComputedStyle(node),
+          bounds = node.getBoundingClientRect();
+        return {
+          label: node.getAttribute("aria-label"),
+          appearance: css.appearance,
+          width: bounds.width,
+          height: bounds.height,
+          border: parseFloat(css.borderTopWidth),
+          caret: css.backgroundImage,
+        };
+      }),
+    );
+  assert.ok(controls.length > 0);
+  for (const control of controls) {
+    assert.equal(
+      control.appearance,
+      "none",
+      `${control.label} must use the styled control`,
+    );
+    assert.ok(
+      control.width >= 200 && control.height >= 30 && control.border > 0,
+      `${control.label} must have usable dimensions and a border`,
+    );
+    assert.notEqual(
+      control.caret,
+      "none",
+      `${control.label} must show a dropdown caret`,
+    );
+  }
+}
+test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobile/light/dark conversations", async () => {
+  const f = await fixture([], {
+      modelOAuth: {
+        name: "Fixture OAuth",
+        async login(interaction) {
+          interaction.notify({
+            type: "auth_url",
+            url: "https://auth.openai.com/api/accounts/authorize?state=browser-fixture",
+          });
+          const callback = await interaction.prompt({
+            type: "manual_code",
+            message: "Callback",
+            signal: interaction.signal,
+          });
+          assert.equal(
+            new URL(callback).searchParams.get("state"),
+            "browser-fixture",
+          );
+          return {
+            type: "oauth",
+            access: "browser-access-secret",
+            refresh: "browser-refresh-secret",
+            expires: Date.now() + 3600000,
+          };
+        },
+        async refresh() {
+          throw new Error("Not expected");
+        },
+        async toAuth(credential) {
+          return { apiKey: credential.access };
+        },
+      },
+    }),
     app = await createServer(f.service, resolve("dist/web") + "/");
   await app.listen({ host: "127.0.0.1", port: 0 });
   const address = app.server.address();
@@ -46,8 +112,93 @@ test("Web management saves models, stdio MCP, limits and retains a usable mobile
       await page.getByLabel("API キー", { exact: true }).inputValue(),
       "",
     );
+    await page.getByLabel("認証方式", { exact: true }).selectOption("oauth");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Continue with ChatGPT", exact: true })
+      .click();
+    await page.getByRole("link", { name: "ChatGPT の認証を開く" }).waitFor();
+    await page.reload();
+    await page.getByRole("button", { name: "設定", exact: true }).click();
+    assert.match(
+      (await page
+        .getByRole("link", { name: "ChatGPT の認証を開く" })
+        .getAttribute("href")) ?? "",
+      /^https:\/\/auth.openai.com\//,
+    );
+    await page
+      .getByLabel("認証後の URL", { exact: false })
+      .fill(
+        "http://127.0.0.1:1455/auth/callback?code=browser-code&state=browser-fixture",
+      );
+    await page.getByRole("button", { name: "認証を完了", exact: true }).click();
+    await page.getByText("ChatGPT 認証済み", { exact: true }).waitFor();
+    assert.ok(!(await page.content()).includes("browser-access-secret"));
+    assert.ok(!(await page.content()).includes("browser-refresh-secret"));
+    await mkdir("test-results", { recursive: true });
+    await assertDropdowns(page);
+    await page.screenshot({
+      path: "test-results/model-oauth-light.png",
+      animations: "disabled",
+    });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+      true,
+    );
+    await assertDropdowns(page);
+    await page.screenshot({
+      path: "test-results/model-oauth-mobile-dark.png",
+      animations: "disabled",
+    });
+    await page
+      .getByRole("button", { name: "ChatGPT 認証を解除", exact: true })
+      .click();
+    await page.getByText("ChatGPT 未認証", { exact: true }).waitFor();
+    await page.getByLabel("認証方式", { exact: true }).selectOption("api_key");
+    await page
+      .getByLabel("API キー", { exact: true })
+      .fill("browser-replaced-key");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page
+      .getByText("保存しました。次の実行開始時に反映します。")
+      .waitFor();
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.getByRole("button", { name: "MCP", exact: true }).click();
     await page.getByRole("button", { name: "MCP を追加", exact: true }).click();
+    await page.getByLabel("接続方式", { exact: true }).selectOption("http");
+    await assertDropdowns(page);
+    assert.equal(
+      await page
+        .locator("details")
+        .filter({ has: page.getByText("詳細設定", { exact: true }) })
+        .getAttribute("open"),
+      null,
+    );
+    await page.screenshot({
+      path: "test-results/mcp-dropdown-light.png",
+      animations: "disabled",
+    });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await assertDropdowns(page);
+    assert.equal(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+      true,
+    );
+    await page.screenshot({
+      path: "test-results/mcp-dropdown-mobile-dark.png",
+      animations: "disabled",
+    });
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.getByLabel("接続方式", { exact: true }).selectOption("stdio");
     await page.getByLabel("名前", { exact: true }).fill("Fixture");
     await page.getByLabel("コマンド（絶対パス）").fill(process.execPath);
     await page

@@ -41,6 +41,9 @@ generated output or live provider responses.
 - src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
   official MCP client and bounded attachment/output transfers.
 - src/provider.ts: model dispatch limit and active-conversation binding.
+- src/model-auth.ts: browser-session adapter to Pi OpenAI OAuth; keep the SDK
+  callback loopback-only, with explicit full-URL submission for QEMU users.
+  OAuth state/PKCE/exchange/refresh belong to Pi, not a custom inference client.
 - src/settings.ts: atomic mode-0600 control-owned settings, private credentials
   and secret-free projections. Import config.yaml only when settings-v1.json is
   absent; preserve the source and old credential files. Web-managed fields have
@@ -96,7 +99,16 @@ Registry; isolate each connection failure and never replay an ambiguous tool
 mutation. Connection tests cannot run worker cleanup during an active tool.
 OAuth rotation uses atomic private writes; stale edits/callbacks must not restore
 revoked credentials. GET, tool results and errors must not disclose secrets.
-A model connection test requires an explicit paid-inference confirmation.
+A model connection test requires explicit inference/usage confirmation.
+OpenAI API-key and ChatGPT OAuth are separate explicit selections: never fall back
+between billing sources or to ambient credentials. Persist the installation UUID,
+access/refresh rotation and expiry under control ownership; serialize refresh and
+reject writes from a replaced credential version. Login is session-bound, single-use
+and bounded to ten minutes. Use the public Pi OAuth interface, not SDK patches.
+Pi 1.5.0 registers a new dynamic client on each login and does not expose a validated
+ID-token identity. Do not display account identity or claim returning-account
+verification; model authorization uses its scoped access token. Keep this SDK
+limitation distinct from successful local OAuth transport tests.
 Uninitialized output listings are empty and must not initialize work or MCP.
 
 Keep downloads within outputs/: reject absolute paths, traversal, symlinks,

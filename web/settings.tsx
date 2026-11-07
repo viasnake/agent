@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ModelLogin } from "../src/model-auth.js";
 import type { AgentService } from "../src/service.js";
 import type { SettingsInput } from "../src/settings.js";
 import { api } from "./api.js";
@@ -10,10 +11,11 @@ function editable(s: PublicSettings): SettingsInput {
     defaultModel: s.defaultModel,
     instructions: s.instructions,
     limits: s.limits,
-    models: s.models.map(({ id, provider, model }) => ({
+    models: s.models.map(({ id, provider, model, auth }) => ({
       id,
       provider,
       model,
+      auth,
     })),
     mcp: s.mcp.map(
       ({
@@ -43,6 +45,10 @@ function editable(s: PublicSettings): SettingsInput {
   };
 }
 export function Settings({ onClose }: { onClose: () => void }) {
+  const [login, setLogin] = useState<ModelLogin>();
+  const [callbackUrl, setCallbackUrl] = useState("");
+  const loginPending =
+    !!login && ["waiting", "exchanging"].includes(login.state);
   const [saved, setSaved] = useState<PublicSettings>();
   const [draft, setDraft] = useState<SettingsInput>();
   const [tab, setTab] = useState<Tab>(
@@ -74,10 +80,44 @@ export function Settings({ onClose }: { onClose: () => void }) {
     }
   }
   useEffect(() => {
-    void perform(async () =>
-      accept(await api<PublicSettings>("/api/settings")),
-    );
+    void perform(async () => {
+      accept(await api<PublicSettings>("/api/settings"));
+      setLogin(
+        (await api<ModelLogin | null>("/api/settings/model-login")) ??
+          undefined,
+      );
+    });
   }, []);
+  useEffect(() => {
+    if (!loginPending || !login) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const next = await api<ModelLogin>(
+          `/api/settings/model-login/${login!.id}`,
+        );
+        if (disposed) return;
+        setLogin(next);
+        if (next.state === "complete") {
+          accept(await api<PublicSettings>("/api/settings"));
+          setCallbackUrl("");
+        }
+        if (["waiting", "exchanging"].includes(next.state))
+          timer = setTimeout(() => void poll(), 1000);
+      } catch {
+        if (!disposed)
+          setError(
+            "認証状態を確認できません。認証を中止してやり直してください。",
+          );
+      }
+    }
+    timer = setTimeout(() => void poll(), 1000);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [login?.id, loginPending]);
   function change(update: (value: SettingsInput) => SettingsInput) {
     setDraft((value) => (value ? update(value) : value));
     setDirty(true);
@@ -125,7 +165,17 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <h1>設定</h1>
         <button
           className="btn-outline theme-secondary btn-sm ms-auto"
-          onClick={onClose}
+          onClick={() =>
+            void perform(async () => {
+              if (loginPending && login)
+                await api(
+                  `/api/settings/model-login/${login.id}/cancel`,
+                  "POST",
+                  {},
+                );
+              onClose();
+            })
+          }
           disabled={busy}
         >
           会話に戻る
@@ -165,10 +215,78 @@ export function Settings({ onClose }: { onClose: () => void }) {
             設定の反映待ち：次の実行開始時に適用
           </p>
         )}
+        {login && (
+          <section className="settings-card" aria-label="ChatGPT 認証">
+            <p role="status">{login.message}</p>
+            {loginPending && (
+              <>
+                {login.url && (
+                  <a
+                    className="btn-outline theme-primary"
+                    href={login.url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    ChatGPT の認証を開く
+                  </a>
+                )}
+                <label className="form-label">
+                  認証後の URL（localhost に接続できなかった場合）
+                  <input
+                    className="form-control"
+                    type="password"
+                    autoComplete="off"
+                    value={callbackUrl}
+                    onChange={(e) => setCallbackUrl(e.target.value)}
+                    placeholder="http://127.0.0.1:1455/auth/callback?..."
+                  />
+                </label>
+                <div className="settings-actions">
+                  <button
+                    className="btn-solid theme-primary"
+                    disabled={busy || !callbackUrl || login.state !== "waiting"}
+                    onClick={() =>
+                      void perform(async () => {
+                        setLogin(
+                          await api<ModelLogin>(
+                            `/api/settings/model-login/${login.id}`,
+                            "POST",
+                            { url: callbackUrl },
+                          ),
+                        );
+                        setCallbackUrl("");
+                      })
+                    }
+                  >
+                    認証を完了
+                  </button>
+                  <button
+                    className="btn-text theme-secondary"
+                    disabled={busy}
+                    onClick={() =>
+                      void perform(async () => {
+                        setLogin(
+                          await api<ModelLogin>(
+                            `/api/settings/model-login/${login.id}/cancel`,
+                            "POST",
+                            {},
+                          ),
+                        );
+                        setCallbackUrl("");
+                      })
+                    }
+                  >
+                    認証を中止
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        )}
         {!draft ? (
           <p>読み込み中…</p>
         ) : (
-          <fieldset disabled={busy} className="settings-fields">
+          <fieldset disabled={busy || loginPending} className="settings-fields">
             {tab === "models" && (
               <>
                 {draft.models.map((model, index) => {
@@ -186,11 +304,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       <label className="form-label">
                         プロバイダー
                         <select
-                          className="form-select"
+                          className="form-control"
+                          aria-label="プロバイダー"
                           value={model.provider}
                           disabled
                         >
-                          <option value="openai">OpenAI / API キー</option>
+                          <option value="openai">OpenAI</option>
                         </select>
                       </label>
                       <label className="form-label">
@@ -202,20 +321,41 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         />
                       </label>
                       <label className="form-label">
-                        API キー
-                        <input
+                        認証方式
+                        <select
                           className="form-control"
-                          type="password"
-                          autoComplete="new-password"
-                          value={model.key ?? ""}
-                          placeholder={
-                            current?.hasKey
-                              ? "登録済み（変更するときだけ入力）"
-                              : "未登録"
+                          aria-label="認証方式"
+                          value={model.auth ?? "api_key"}
+                          onChange={(e) =>
+                            update({
+                              auth: e.target.value as "api_key" | "oauth",
+                              key: undefined,
+                            })
                           }
-                          onChange={(e) => update({ key: e.target.value })}
-                        />
+                        >
+                          <option value="api_key">API キー</option>
+                          <option value="oauth">ChatGPT（OAuth）</option>
+                        </select>
                       </label>
+                      {model.auth !== "oauth" && (
+                        <>
+                          <label className="form-label">
+                            API キー
+                            <input
+                              className="form-control"
+                              type="password"
+                              autoComplete="new-password"
+                              value={model.key ?? ""}
+                              placeholder={
+                                current?.hasKey
+                                  ? "登録済み（変更するときだけ入力）"
+                                  : "未登録"
+                              }
+                              onChange={(e) => update({ key: e.target.value })}
+                            />
+                          </label>
+                        </>
+                      )}
                       <label className="settings-check">
                         <input
                           type="radio"
@@ -233,11 +373,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       <div className="settings-actions">
                         <button
                           className="btn-outline theme-secondary btn-sm"
-                          disabled={dirty || !current?.hasKey}
+                          disabled={
+                            dirty ||
+                            !(model.auth === "oauth"
+                              ? current?.authorized
+                              : current?.hasKey)
+                          }
                           onClick={() => {
                             if (
                               window.confirm(
-                                "少量の推論を実行します。API の利用料金が発生する場合があります。続けますか？",
+                                "少量の推論を実行します。選択した認証方式の利用枠または API 料金を消費します。続けますか？",
                               )
                             )
                               void perform(async () => {
@@ -252,14 +397,57 @@ export function Settings({ onClose }: { onClose: () => void }) {
                               });
                           }}
                         >
-                          有料接続テスト
+                          接続テスト（推論あり）
                         </button>
-                        <button
-                          className="btn-text theme-secondary btn-sm"
-                          onClick={() => update({ key: "" })}
-                        >
-                          API キーを削除
-                        </button>
+                        {model.auth === "oauth" ? (
+                          <>
+                            <button
+                              className="btn-outline theme-primary btn-sm"
+                              disabled={dirty}
+                              onClick={() =>
+                                void perform(async () => {
+                                  setCallbackUrl("");
+                                  setLogin(
+                                    await api<ModelLogin>(
+                                      `/api/settings/models/${model.id}/oauth`,
+                                      "POST",
+                                      {},
+                                    ),
+                                  );
+                                })
+                              }
+                            >
+                              Continue with ChatGPT
+                            </button>
+                            <button
+                              className="btn-text theme-secondary btn-sm"
+                              disabled={dirty || !current?.authorized}
+                              onClick={() =>
+                                void perform(async () => {
+                                  accept(
+                                    await api<PublicSettings>(
+                                      `/api/settings/models/${model.id}/disconnect`,
+                                      "POST",
+                                      {},
+                                    ),
+                                  );
+                                  setLogin(undefined);
+                                })
+                              }
+                            >
+                              ChatGPT 認証を解除
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              className="btn-text theme-secondary btn-sm"
+                              onClick={() => update({ key: "" })}
+                            >
+                              API キーを削除
+                            </button>
+                          </>
+                        )}
                         <button
                           className="btn-text theme-danger btn-sm"
                           onClick={() =>
@@ -333,7 +521,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       <label className="form-label">
                         接続方式
                         <select
-                          className="form-select"
+                          className="form-control"
+                          aria-label="接続方式"
                           value={server.transport}
                           onChange={(e) =>
                             update({
@@ -412,7 +601,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
                           <label className="form-label">
                             認証
                             <select
-                              className="form-select"
+                              className="form-control"
+                              aria-label="MCP 認証"
                               value={server.auth}
                               onChange={(e) =>
                                 update({
@@ -479,9 +669,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             </>
                           )}
                           <details>
-                            <summary>社内・VPN の接続許可</summary>
+                            <summary>詳細設定</summary>
                             <label className="form-label">
-                              許可するホスト名（1行に1つ）
+                              社内・VPN 接続を許可するホスト（1行に1つ）
                               <textarea
                                 className="form-control"
                                 value={server.privateHosts.join("\n")}
@@ -635,7 +825,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       <footer className="settings-footer">
         <button
           className="btn-solid theme-primary"
-          disabled={busy || !dirty}
+          disabled={busy || loginPending || !dirty}
           onClick={() => void save()}
         >
           {busy ? "処理中…" : "保存"}

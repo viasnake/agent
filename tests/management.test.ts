@@ -20,9 +20,14 @@ import {
   resolveRemote,
 } from "../src/remote-http.js";
 function input(service: Awaited<ReturnType<typeof fixture>>["service"]) {
-  const { schemaVersion: _, ...value } = service.settings.snapshot();
+  const {
+    schemaVersion: _,
+    hostId: __,
+    ...value
+  } = service.settings.snapshot();
   return settingsInput.parse({
     ...value,
+    models: value.models.map(({ oauth: _, authVersion: __, ...m }) => m),
     mcp: value.mcp.map(({ oauth: _, authVersion: __, ...s }) => s),
   });
 }

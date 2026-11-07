@@ -3,7 +3,11 @@ import { join } from "node:path";
 import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { createModels, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type { Provider } from "@earendil-works/pi-ai";
+import type {
+  Provider,
+  CredentialStore,
+  OAuthAuth,
+} from "@earendil-works/pi-ai";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
   Harness,
@@ -21,7 +25,8 @@ import type {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Config } from "./config.js";
-import { SettingsStore } from "./settings.js";
+import { ModelAuth } from "./model-auth.js";
+import { SettingsStore, modelCredential } from "./settings.js";
 import type { McpConfig } from "./settings.js";
 import { RemoteMcp } from "./mcp.js";
 import type { McpStatus, RemoteOptions } from "./mcp.js";
@@ -39,6 +44,7 @@ export type ServiceOptions = {
   modelId?: string;
   storage?: Storage;
   remote?: RemoteOptions;
+  modelOAuth?: OAuthAuth;
   modelTest?: (model: string, key: string) => Promise<void>;
 };
 type Active = { id: string; version: number; timer: NodeJS.Timeout };
@@ -48,8 +54,17 @@ export class AgentService {
   harness!: Harness;
   settings!: SettingsStore;
   remote!: RemoteMcp;
-  private credentials = new InMemoryCredentialStore();
-  private models = createModels({ credentials: this.credentials });
+  modelAuth!: ModelAuth;
+  private credentials: CredentialStore = new InMemoryCredentialStore();
+  private models = createModels({
+    credentials: {
+      read: (...args) => this.credentials.read(...args),
+      list: (...args) => this.credentials.list(...args),
+      modify: (...args) => this.credentials.modify(...args),
+      delete: (...args) => this.credentials.delete(...args),
+    },
+    authContext: { env: async () => undefined, fileExists: async () => false },
+  });
   private appliedRevision = -1;
   private appliedMcp: McpConfig[] = [];
   private mcpExtensions: ReturnType<typeof mcpTools>[] = [];
@@ -86,6 +101,7 @@ export class AgentService {
   }
   private async open(): Promise<void> {
     this.settings = await SettingsStore.open(this.config);
+    this.modelAuth = new ModelAuth(this.settings, this.options.modelOAuth);
     this.remote = new RemoteMcp(this.settings, this.options.remote);
     await this.applySettings();
     this.registry.install(agentTools(this));
@@ -161,8 +177,16 @@ export class AgentService {
       models: settings.models.map((m) => ({
         ...m,
         status:
-          this.modelStatuses.get(m.id) ??
-          (m.hasKey ? "未確認" : "API キー未登録"),
+          this.modelStatuses.get(
+            `${m.id}:${this.settings.snapshot().models.find((model) => model.id === m.id)?.authVersion ?? ""}`,
+          ) ??
+          (m.auth === "oauth"
+            ? m.authorized
+              ? "ChatGPT 認証済み"
+              : "ChatGPT 未認証"
+            : m.hasKey
+              ? "未確認"
+              : "API キー未登録"),
       })),
     };
     return this.sanitize(projection);
@@ -205,13 +229,12 @@ export class AgentService {
     this.modelId = model?.model ?? this.options.modelId ?? null;
     this.providerId = this.options.provider?.id ?? "openai";
     this.models.deleteProvider(this.providerId);
-    this.readyModel = !!this.options.provider || !!model?.key;
+    this.readyModel =
+      !!this.options.provider || !!(model && modelCredential(model));
+    this.credentials = model
+      ? this.settings.credentials(model)
+      : new InMemoryCredentialStore();
     if (this.readyModel) {
-      if (model?.key)
-        await this.credentials.modify("openai", async () => ({
-          type: "api_key",
-          key: model.key!,
-        }));
       this.models.setProvider(
         guardedProvider(
           this.options.provider ?? openaiProvider(),
@@ -363,17 +386,24 @@ export class AgentService {
   }
   async testModel(id: string) {
     const model = this.settings.snapshot().models.find((m) => m.id === id);
-    if (!model?.key) throw new AppError(400, "API キーを登録してください");
+    if (!model || !modelCredential(model))
+      throw new AppError(400, "モデルの認証情報を登録してください");
     try {
       if (this.options.modelTest)
-        await this.options.modelTest(model.model, model.key);
+        await this.options.modelTest(
+          model.model,
+          modelCredential(model)!.type === "oauth"
+            ? model.oauth!.access
+            : model.key!,
+        );
       else {
-        const credentials = new InMemoryCredentialStore();
-        await credentials.modify("openai", async () => ({
-          type: "api_key",
-          key: model.key!,
-        }));
-        const models = createModels({ credentials });
+        const models = createModels({
+          credentials: this.settings.credentials(model),
+          authContext: {
+            env: async () => undefined,
+            fileExists: async () => false,
+          },
+        });
         models.setProvider(openaiProvider());
         const selected = models.getModel("openai", model.model);
         if (!selected) throw new Error("Unknown model");
@@ -389,11 +419,14 @@ export class AgentService {
         if (result.stopReason === "error" || result.stopReason === "aborted")
           throw new Error("Model unavailable");
       }
-      this.modelStatuses.set(id, "接続確認済み");
+      this.modelStatuses.set(
+        `${id}:${model.authVersion ?? ""}`,
+        "接続確認済み",
+      );
     } catch {
       this.modelStatuses.set(
-        id,
-        "接続できません。モデル ID・API キー・利用権限を確認してください",
+        `${id}:${model.authVersion ?? ""}`,
+        "接続できません。モデル ID・認証情報・利用権限を確認してください",
       );
     }
     return this.management();
@@ -870,6 +903,7 @@ export class AgentService {
     if (this.closing) return;
     if (this.active && !this.fatal) await this.stop(this.active.id);
     this.closing = true;
+    await this.modelAuth.close();
     if (this.active) clearTimeout(this.active.timer);
     this.notify();
     await this.harness.close(ctx);

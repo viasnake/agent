@@ -9,6 +9,11 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
+import type {
+  Credential,
+  CredentialStore,
+  OAuthCredential,
+} from "@earendil-works/pi-ai";
 import type { Config } from "./config.js";
 import { privateFile } from "./config.js";
 import { DEFAULT_LIMITS } from "./state.js";
@@ -26,6 +31,7 @@ export const modelInput = z
     provider: z.literal("openai"),
     model: z.string().trim().min(1).max(200),
     key: secret.optional(),
+    auth: z.enum(["api_key", "oauth"]).optional(),
   })
   .strict();
 export const mcpInput = z
@@ -118,7 +124,20 @@ export type McpConfig = z.infer<typeof mcpInput> & {
     expiresAt?: number;
   };
 };
-export type Settings = Omit<SettingsInput, "mcp"> & {
+export type ModelConfig = z.infer<typeof modelInput> & {
+  authVersion?: string;
+  oauth?: OAuthCredential;
+};
+export function modelCredential(model: ModelConfig): Credential | undefined {
+  return model.auth === "oauth"
+    ? model.oauth
+    : model.key
+      ? { type: "api_key", key: model.key }
+      : undefined;
+}
+export type Settings = Omit<SettingsInput, "mcp" | "models"> & {
+  models: ModelConfig[];
+  hostId: string;
   schemaVersion: 1;
   mcp: McpConfig[];
 };
@@ -158,20 +177,28 @@ export class SettingsStore {
       const saved = JSON.parse(await readFile(store.path, "utf8")) as Settings;
       if (saved.schemaVersion !== 1)
         throw new Error("Unknown settings version; preserve data");
-      const { schemaVersion: _, ...savedInput } = saved;
+      const { schemaVersion: _, hostId: __, ...savedInput } = saved;
       const parsed = settingsInput.parse({
         ...savedInput,
+        models: saved.models.map(({ oauth: _, authVersion: __, ...s }) => s),
         mcp: saved.mcp.map(({ oauth: _, authVersion: __, ...s }) => s),
       });
       store.value = {
         ...parsed,
         schemaVersion: 1,
+        hostId: saved.hostId ? identifier.parse(saved.hostId) : randomUUID(),
+        models: parsed.models.map((s) => ({
+          ...s,
+          oauth: saved.models.find((v) => v.id === s.id)?.oauth,
+          authVersion: saved.models.find((v) => v.id === s.id)?.authVersion,
+        })),
         mcp: parsed.mcp.map((s) => ({
           ...s,
           oauth: saved.mcp.find((v) => v.id === s.id)?.oauth,
           authVersion: saved.mcp.find((v) => v.id === s.id)?.authVersion,
         })),
       };
+      if (!saved.hostId) await store.write(store.value);
     } else {
       let key = "";
       if (config.model)
@@ -183,6 +210,7 @@ export class SettingsStore {
       const modelId = config.model ? randomUUID() : null;
       store.value = {
         schemaVersion: 1,
+        hostId: randomUUID(),
         revision: 0,
         models: config.model
           ? [{ id: modelId!, provider: "openai", model: config.model.id, key }]
@@ -213,11 +241,15 @@ export class SettingsStore {
     return structuredClone(this.value);
   }
   public() {
-    const s = this.snapshot();
+    const { hostId: _, ...s } = this.snapshot();
     return {
       ...s,
       schemaVersion: undefined,
-      models: s.models.map(({ key, ...m }) => ({ ...m, hasKey: !!key })),
+      models: s.models.map(({ key, oauth, authVersion: _, ...m }) => ({
+        ...m,
+        hasKey: !!key,
+        authorized: !!oauth,
+      })),
       mcp: s.mcp.map(
         ({ env, bearer, clientSecret, oauth, authVersion: _, ...m }) => ({
           ...m,
@@ -232,7 +264,11 @@ export class SettingsStore {
   secrets(): string[] {
     return [
       ...this.retainedSecrets,
-      ...this.value.models.map((m) => m.key ?? ""),
+      ...this.value.models.flatMap((m) => [
+        m.key ?? "",
+        m.oauth?.access ?? "",
+        m.oauth?.refresh ?? "",
+      ]),
       ...this.value.mcp.flatMap((m) => [
         m.bearer ?? "",
         m.clientSecret ?? "",
@@ -256,11 +292,23 @@ export class SettingsStore {
       const next: Settings = {
         ...parsed,
         schemaVersion: 1,
+        hostId: this.value.hostId,
         revision: parsed.revision + 1,
-        models: parsed.models.map((m) => ({
-          ...m,
-          key: m.key ?? this.value.models.find((v) => v.id === m.id)?.key,
-        })),
+        models: parsed.models.map((m) => {
+          const old = this.value.models.find((v) => v.id === m.id);
+          const same = (old?.auth ?? "api_key") === (m.auth ?? "api_key");
+          const key =
+            m.auth === "oauth"
+              ? undefined
+              : (m.key ?? (same ? old?.key : undefined));
+          return {
+            ...m,
+            key,
+            oauth: same && m.auth === "oauth" ? old?.oauth : undefined,
+            authVersion:
+              old && same && key === old.key ? old.authVersion : randomUUID(),
+          };
+        }),
         mcp: parsed.mcp.map((m) => {
           const old = this.value.mcp.find((v) => v.id === m.id);
           const sameTarget =
@@ -291,6 +339,66 @@ export class SettingsStore {
       await this.write(next);
       this.value = next;
     });
+  }
+  async setModelOAuth(
+    id: string,
+    version: string | undefined,
+    credential?: OAuthCredential,
+  ): Promise<void> {
+    return this.exclusive(async () => {
+      const next = this.snapshot(),
+        model = next.models.find((m) => m.id === id);
+      if (!model || model.auth !== "oauth" || model.authVersion !== version)
+        throw new AppError(
+          409,
+          "モデル設定が変更されています。認証をやり直してください",
+        );
+      model.oauth = credential;
+      model.authVersion = randomUUID();
+      next.revision++;
+      await this.write(next);
+      this.value = next;
+    });
+  }
+  // Pi serializes refresh through this store. Persist rotated tokens before releasing
+  // the lock; a deleted/replaced login must never be restored by an older run.
+  credentials(model: ModelConfig): CredentialStore {
+    let snapshot = structuredClone(modelCredential(model));
+    const current = () => {
+      const saved = this.value.models.find((m) => m.id === model.id);
+      return saved?.authVersion === model.authVersion ? saved : undefined;
+    };
+    return {
+      read: async (provider) => {
+        if (provider !== "openai") return undefined;
+        const saved = current();
+        return structuredClone(saved ? modelCredential(saved) : snapshot);
+      },
+      list: async () =>
+        snapshot ? [{ providerId: "openai", type: snapshot.type }] : [],
+      delete: async () => {
+        throw new Error("Use model settings to disconnect");
+      },
+      modify: async (provider, fn, options) =>
+        this.exclusive(async () => {
+          options?.signal?.throwIfAborted();
+          if (provider !== "openai") throw new Error("Unknown model provider");
+          const saved = current();
+          if (!saved)
+            throw new AppError(409, "モデルの認証情報が変更されています");
+          const updated = await fn(structuredClone(modelCredential(saved)));
+          if (updated) {
+            if (updated.type !== "oauth" || saved.auth !== "oauth")
+              throw new Error("Unexpected credential update");
+            const next = this.snapshot();
+            next.models.find((m) => m.id === model.id)!.oauth = updated;
+            await this.write(next);
+            this.value = next;
+            snapshot = structuredClone(updated);
+          }
+          return updated ?? modelCredential(saved);
+        }),
+    };
   }
   async oauth(
     id: string,
