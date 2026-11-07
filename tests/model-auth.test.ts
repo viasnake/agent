@@ -22,6 +22,114 @@ function edit(f: Awaited<ReturnType<typeof fixture>>) {
   });
 }
 
+test("connection tests use the real provider model independently of the injected conversation model", async (t) => {
+  const f = await fixture([]);
+  const requests: {
+    url: string;
+    key: string | null;
+    body: Record<string, unknown>;
+  }[] = [];
+  let reject = false;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      requests.push({
+        url: request.url,
+        key: request.headers.get("authorization"),
+        body: (await request.json()) as Record<string, unknown>,
+      });
+      if (reject)
+        return Response.json(
+          {
+            error: { message: "fixture-denied", type: "authentication_error" },
+          },
+          { status: 401 },
+        );
+      const event = {
+        type: "response.completed",
+        response: {
+          id: "resp_fixture",
+          status: "completed",
+          output: [
+            {
+              id: "msg_fixture",
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "OK", annotations: [] }],
+            },
+          ],
+          usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 },
+        },
+      };
+      return new Response(
+        `event: response.completed\ndata: ${JSON.stringify(event)}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  );
+  try {
+    const expectedModel = openaiProvider().getModels()[0]!.id;
+    assert.notEqual(expectedModel, "faux-1");
+    for (const auth of ["oauth", "api_key"] as const) {
+      const settings = edit(f);
+      const id = randomUUID();
+      settings.models = [
+        {
+          id,
+          provider: "openai",
+          auth,
+          ...(auth === "api_key" ? { key: "sk-fixture-api-key" } : {}),
+        },
+      ];
+      settings.defaultModel = null;
+      await f.service.saveSettings(settings);
+      if (auth === "oauth") {
+        const model = f.service.settings.snapshot().models[0]!;
+        await f.service.settings.setModelOAuth(id, model.authVersion, {
+          type: "oauth",
+          access: "fixture-oauth-access",
+          refresh: "fixture-oauth-refresh",
+          expires: Date.now() + 3600000,
+          clientId: "oaiapp_fixture",
+          scopes: ["chatgpt.tokens.use.direct"],
+        });
+      }
+      const before = requests.length;
+      const result = await f.service.testModel(id);
+      assert.equal(result.models[0]!.status, "接続成功");
+      assert.equal(requests.length, before + 1);
+      const request = requests.at(-1)!;
+      assert.equal(request.url, "https://api.openai.com/v1/responses");
+      assert.equal(request.body.model, expectedModel);
+      assert.equal(
+        request.key,
+        auth === "oauth"
+          ? "Bearer fixture-oauth-access"
+          : "Bearer sk-fixture-api-key",
+      );
+      if (auth === "oauth")
+        assert.equal(request.body.max_output_tokens, undefined);
+      assert.ok(!JSON.stringify(result).includes("fixture-oauth"));
+      assert.ok(!JSON.stringify(result).includes("sk-fixture"));
+      reject = true;
+      const failed = await f.service.testModel(id);
+      assert.equal(failed.models[0]!.status, "接続失敗");
+      assert.equal(
+        requests.length,
+        before + 2,
+        "do not retry a failed connection test",
+      );
+      reject = false;
+    }
+  } finally {
+    await f.service.close();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test("OpenAI SDK OAuth: browser ownership, PKCE, refresh, restart, disconnect and stale login protection", async () => {
   let exchanges = 0,
     refreshes = 0,

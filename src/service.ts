@@ -456,9 +456,13 @@ export class AgentService {
     if (!model || !modelCredential(model))
       throw new AppError(400, "モデルの認証情報を登録してください");
     try {
+      // Connection tests use the configured provider, never an injected conversation model.
+      const provider = modelProvider(model);
+      const modelId = model.model ?? provider.getModels()[0]?.id;
+      if (!modelId) throw new Error("No model available");
       if (this.options.modelTest)
         await this.options.modelTest(
-          this.selectedModel(model)!,
+          modelId,
           modelCredential(model)!.type === "oauth"
             ? model.oauth!.access
             : (model.key ?? ""),
@@ -471,13 +475,8 @@ export class AgentService {
             fileExists: async () => false,
           },
         });
-        models.setProvider(
-          modelProvider({ ...model, model: this.selectedModel(model)! }),
-        );
-        const selected = models.getModel(
-          model.provider,
-          this.selectedModel(model)!,
-        );
+        models.setProvider(provider);
+        const selected = models.getModel(model.provider, modelId);
         if (!selected) throw new Error("Unknown model");
         const result = await models.completeSimple(
           selected,
