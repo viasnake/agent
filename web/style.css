@@ -665,8 +665,8 @@ button {
 .settings-fields {
   border: 0;
   padding: 0;
-  margin: 0 auto;
-  max-width: 48rem;
+  margin: 0;
+  width: 100%;
   min-width: 0;
 }
 .settings-card {
