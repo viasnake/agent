@@ -1,9 +1,7 @@
 :root {
-  --chat-ink: #1e293b;
-  --chat-muted: #64748b;
-  --chat-line: #e2e8f0;
-  --chat-blue: #2563eb;
-  --chat-sidebar: #f7f8fa;
+  /* Use Bootstrap's palette with readable primary and secondary button text. */
+  --bs-primary-bg: var(--bs-blue-600);
+  --bs-secondary-fg: var(--bs-fg-2);
 }
 html,
 body,
@@ -12,7 +10,7 @@ body,
 }
 body {
   margin: 0;
-  color: var(--chat-ink);
+  color: var(--bs-fg-body);
   font-size: 14px;
 }
 button,
@@ -24,7 +22,7 @@ textarea {
 button:focus-visible,
 a:focus-visible,
 summary:focus-visible {
-  outline: 2px solid var(--chat-blue);
+  outline: 2px solid var(--bs-primary-fg);
   outline-offset: 3px;
 }
 button svg,
@@ -39,12 +37,12 @@ button {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: var(--chat-sidebar);
+  background: var(--bs-bg-1);
 }
 .login-card {
   width: min(100%, 360px);
-  background: white;
-  box-shadow: 0 8px 32px #0f172a06;
+  background: var(--bs-bg-body);
+  box-shadow: var(--bs-box-shadow-sm);
 }
 .brand {
   display: flex;
@@ -60,8 +58,8 @@ button {
   width: 32px;
   height: 32px;
   border-radius: 10px;
-  background: var(--chat-blue);
-  color: white;
+  background: var(--bs-primary-bg);
+  color: var(--bs-primary-contrast);
 }
 .app-shell {
   display: flex;
@@ -74,28 +72,27 @@ button {
   flex: 0 0 248px;
   min-width: 0;
   padding: 24px 14px 12px;
-  background: var(--chat-sidebar);
-  border-right: 1px solid var(--chat-line);
+  background: var(--bs-bg-1);
+  border-right: 1px solid var(--bs-border-muted);
 }
 .sidebar .brand {
   padding: 0 10px;
   margin-bottom: 28px;
 }
 .new-conversation {
+  --bs-btn-bg: var(--bs-bg-body);
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   width: 100%;
-  background: white;
-  border-color: var(--chat-line);
   border-radius: 10px;
 }
 .sidebar-label {
   margin: 28px 12px 10px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--chat-muted);
+  color: var(--bs-fg-2);
 }
 #conversations {
   flex: 1;
@@ -112,7 +109,7 @@ button {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #475569;
+  color: var(--bs-fg-1);
   text-align: left;
 }
 .conversation-item > span:last-child {
@@ -121,11 +118,11 @@ button {
   white-space: nowrap;
 }
 .conversation-item:hover {
-  background: #e9edf3;
+  background: var(--bs-bg-3);
 }
 .conversation-item.selected {
-  color: #1d4ed8;
-  background: #e8efff;
+  color: var(--bs-primary-fg-emphasis);
+  background: var(--bs-primary-bg-subtle);
   font-weight: 550;
 }
 .status-dot {
@@ -134,14 +131,14 @@ button {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #cbd5e1;
+  background: var(--bs-border-emphasized);
 }
 .status-dot.running,
 .status-dot.connected {
-  background: #16a34a;
+  background: var(--bs-success-fg);
 }
 .status-dot.interrupted {
-  background: #d97706;
+  background: var(--bs-warning-fg);
 }
 .sidebar-footer {
   display: flex;
@@ -150,7 +147,7 @@ button {
   gap: 8px;
   padding: 12px 8px 0;
   margin-top: 12px;
-  border-top: 1px solid var(--chat-line);
+  border-top: 1px solid var(--bs-border-muted);
 }
 #connection {
   display: flex;
@@ -162,7 +159,7 @@ button {
   flex-direction: column;
   min-width: 0;
   flex: 1;
-  background: white;
+  background: var(--bs-bg-body);
 }
 .conversation-header {
   display: flex;
@@ -171,7 +168,7 @@ button {
   flex-shrink: 0;
   min-height: 72px;
   padding: 16px 32px;
-  border-bottom: 1px solid var(--chat-line);
+  border-bottom: 1px solid var(--bs-border-muted);
 }
 .conversation-header h1 {
   min-width: 0;
@@ -228,10 +225,10 @@ button {
   place-items: center;
   width: 56px;
   height: 56px;
-  border: 1px solid var(--chat-line);
+  border: 1px solid var(--bs-border-muted);
   border-radius: 18px;
-  color: var(--chat-blue);
-  background: #f8faff;
+  color: var(--bs-primary-fg);
+  background: var(--bs-primary-bg-subtle);
 }
 .empty-icon svg {
   width: 28px;
@@ -254,7 +251,7 @@ button {
   margin-bottom: 8px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--chat-muted);
+  color: var(--bs-fg-2);
 }
 .agent-avatar {
   display: grid;
@@ -262,8 +259,8 @@ button {
   width: 22px;
   height: 22px;
   border-radius: 7px;
-  background: #edf3ff;
-  color: var(--chat-blue);
+  background: var(--bs-primary-bg-subtle);
+  color: var(--bs-primary-fg);
 }
 .agent-avatar svg {
   width: 15px;
@@ -282,7 +279,7 @@ button {
   max-width: 100%;
   padding: 12px 18px;
   border-radius: 16px 16px 4px 16px;
-  background: #f1f5f9;
+  background: var(--bs-bg-2);
 }
 .user-text {
   white-space: pre-wrap;
@@ -296,7 +293,6 @@ button {
 .message-actions button {
   padding: 2px 4px;
   font-size: 11px;
-  color: var(--chat-muted);
 }
 .markdown > :last-child {
   margin-bottom: 0;
@@ -323,13 +319,13 @@ button {
   margin-bottom: 14px;
 }
 .markdown a {
-  color: var(--chat-blue);
+  color: var(--bs-primary-fg);
   text-underline-offset: 3px;
 }
 .markdown code {
   padding: 2px 5px;
   border-radius: 4px;
-  background: #f1f5f9;
+  background: var(--bs-bg-2);
   font-size: 0.88em;
   color: inherit;
 }
@@ -337,9 +333,9 @@ button {
   max-width: 100%;
   overflow: auto;
   padding: 16px;
-  border: 1px solid var(--chat-line);
+  border: 1px solid var(--bs-border-muted);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--bs-bg-1);
   font-size: 12px;
   line-height: 1.7;
 }
@@ -348,9 +344,9 @@ button {
   background: none;
 }
 .markdown blockquote {
-  border-left: 3px solid #cbd5e1;
+  border-left: 3px solid var(--bs-border-emphasized);
   padding-left: 16px;
-  color: var(--chat-muted);
+  color: var(--bs-fg-2);
 }
 .markdown table {
   display: block;
@@ -362,11 +358,11 @@ button {
 .markdown th,
 .markdown td {
   padding: 8px 12px;
-  border: 1px solid var(--chat-line);
+  border: 1px solid var(--bs-border-muted);
 }
 .tool-card {
   margin: 8px 0;
-  border: 1px solid var(--chat-line);
+  border: 1px solid var(--bs-border-muted);
   border-radius: 9px;
   font-size: 12px;
 }
@@ -376,7 +372,7 @@ button {
   gap: 8px;
   padding: 9px 12px;
   cursor: pointer;
-  color: #475569;
+  color: var(--bs-fg-1);
   list-style: none;
 }
 .tool-card summary::after {
@@ -392,19 +388,19 @@ button {
 }
 .tool-state {
   margin-left: auto;
-  color: var(--chat-muted);
+  color: var(--bs-fg-2);
   font-size: 11px;
 }
 .tool-error {
-  border-color: #fca5a5;
+  border-color: var(--bs-danger-border);
 }
 .tool-error .tool-state {
-  color: #b91c1c;
+  color: var(--bs-danger-fg);
 }
 .tool-card pre {
   margin: 0;
   padding: 12px;
-  border-top: 1px solid var(--chat-line);
+  border-top: 1px solid var(--bs-border-muted);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 11px;
@@ -415,14 +411,14 @@ button {
   align-items: center;
   gap: 8px;
   margin: 12px 0;
-  color: var(--chat-muted);
+  color: var(--bs-fg-2);
   font-size: 12px;
 }
 .running-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--chat-blue);
+  background: var(--bs-primary-fg);
   animation: pulse 1.4s ease-in-out infinite;
 }
 @keyframes pulse {
@@ -436,18 +432,18 @@ button {
   width: min(100%, 820px);
   margin: 0 auto;
   padding: 12px 32px max(12px, env(safe-area-inset-bottom));
-  background: white;
+  background: var(--bs-bg-body);
 }
 .composer {
   overflow: hidden;
-  border-color: #d1d9e5;
-  border-radius: 16px !important;
-  background: white;
-  box-shadow: 0 3px 14px #0f172a05;
+  border: 1px solid var(--bs-border-body);
+  border-radius: 16px;
+  background: var(--bs-bg-body);
+  box-shadow: var(--bs-box-shadow-sm);
 }
 .composer:focus-within {
-  border-color: #93b4f7;
-  box-shadow: 0 0 0 3px #2563eb0a;
+  border-color: var(--bs-primary-border);
+  box-shadow: 0 0 0 3px var(--bs-primary-focus-ring);
 }
 .composer-input {
   display: block;
@@ -463,7 +459,7 @@ button {
   color: inherit;
 }
 .composer-input::placeholder {
-  color: #94a3b8;
+  color: var(--bs-fg-2);
 }
 .composer-toolbar {
   display: flex;
@@ -482,9 +478,10 @@ button {
   margin-top: 8px;
   text-align: right;
   font-size: 10px;
-  color: #94a3b8;
+  color: var(--bs-fg-2);
 }
 .scroll-bottom {
+  --bs-btn-bg: var(--bs-bg-body);
   position: absolute;
   bottom: calc(100% + 8px);
   left: calc(50% - 18px);
@@ -492,8 +489,7 @@ button {
   height: 36px;
   padding: 7px;
   border-radius: 50%;
-  background: white;
-  box-shadow: 0 2px 8px #0f172a0d;
+  box-shadow: var(--bs-box-shadow-sm);
 }
 .scroll-bottom:disabled {
   visibility: hidden;
@@ -510,7 +506,7 @@ button {
   gap: 6px;
   max-width: 100%;
   padding-left: 8px;
-  border: 1px solid var(--chat-line);
+  border: 1px solid var(--bs-border-muted);
   border-radius: 8px;
   font-size: 11px;
 }
@@ -526,15 +522,15 @@ button {
 .output-files {
   flex-shrink: 0;
   padding: 10px 32px;
-  border-bottom: 1px solid var(--chat-line);
-  background: #fcfdff;
+  border-bottom: 1px solid var(--bs-border-muted);
+  background: var(--bs-bg-1);
 }
 .output-label {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 11px;
-  color: var(--chat-muted);
+  color: var(--bs-fg-2);
 }
 .output-label > svg {
   width: 14px;
@@ -559,16 +555,16 @@ button {
   gap: 8px;
   max-width: 100%;
   padding: 7px 10px;
-  border: 1px solid var(--chat-line);
+  border: 1px solid var(--bs-border-muted);
   border-radius: 8px;
-  color: var(--chat-ink);
+  color: var(--bs-fg-body);
   text-decoration: none;
   font-size: 12px;
-  background: white;
+  background: var(--bs-bg-body);
 }
 .output-file:hover {
-  border-color: #93b4f7;
-  color: var(--chat-blue);
+  border-color: var(--bs-primary-border);
+  color: var(--bs-primary-fg);
 }
 .output-file span {
   overflow: hidden;
@@ -578,11 +574,11 @@ button {
 .output-file svg {
   width: 14px;
   height: 14px;
-  color: var(--chat-blue);
+  color: var(--bs-primary-fg);
 }
 .output-file small {
   white-space: nowrap;
-  color: var(--chat-muted);
+  color: var(--bs-fg-2);
   font-size: 10px;
 }
 .mobile-only,
@@ -611,7 +607,7 @@ button {
     z-index: 19;
     inset: 0;
     border: 0;
-    background: #0f172a55;
+    background: rgb(0 0 0 / 40%);
   }
   .conversation-header {
     gap: 8px;

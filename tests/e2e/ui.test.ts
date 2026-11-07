@@ -4,10 +4,66 @@ import { mkdtemp, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer as portProbe } from "node:net";
-import { chromium } from "playwright";
+import { chromium, type Locator } from "playwright";
 import { fixture, answer, call, until } from "../support.js";
 import { createServer } from "../../src/server.js";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
+// Rasterize computed CSS colors to sRGB, including Bootstrap's light-dark/OKLCH
+// values and transparent surfaces. Check actual contrast, not token names.
+async function assertReadable(locator: Locator, pseudo?: string) {
+  const results = await locator.evaluateAll((nodes, pseudo) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true })!;
+    function paint(color: string) {
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+    }
+    function luminance() {
+      const channels = Array.from(context.getImageData(0, 0, 1, 1).data)
+        .slice(0, 3)
+        .map((value) => {
+          const channel = value / 255;
+          return channel <= 0.04045
+            ? channel / 12.92
+            : ((channel + 0.055) / 1.055) ** 2.4;
+        });
+      return (
+        channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722
+      );
+    }
+    return nodes.map((node) => {
+      const ancestors: Element[] = [];
+      for (
+        let parent: Element | null = node;
+        parent;
+        parent = parent.parentElement
+      ) {
+        ancestors.unshift(parent);
+      }
+      paint("white");
+      for (const ancestor of ancestors)
+        paint(getComputedStyle(ancestor).backgroundColor);
+      const background = luminance();
+      paint(getComputedStyle(node, pseudo).color);
+      const foreground = luminance();
+      return {
+        element: node.id || node.className || node.tagName,
+        contrast:
+          (Math.max(background, foreground) + 0.05) /
+          (Math.min(background, foreground) + 0.05),
+      };
+    });
+  }, pseudo);
+  assert.ok(results.length > 0, "Contrast check must inspect actual elements");
+  for (const result of results) {
+    assert.ok(
+      result.contrast >= 4.5,
+      `${result.element}: contrast ${result.contrast.toFixed(2)} must be at least 4.5:1`,
+    );
+  }
+}
+
 test("real browser conversation: no category, attachments, response-loss retry, reconnect, CSV download and continuation without a new job", async () => {
   const f = await fixture([
     call("bash", {
@@ -39,6 +95,8 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     }),
     context = await browser.newContext({
       acceptDownloads: true,
+      colorScheme: "light",
+      reducedMotion: "reduce",
       viewport: { width: 1440, height: 1000 },
     });
   const page = await context.newPage();
@@ -65,6 +123,14 @@ test("real browser conversation: no category, attachments, response-loss retry, 
           (input) => parseFloat(getComputedStyle(input).paddingLeft) > 0,
         ),
     );
+    await mkdir("test-results", { recursive: true });
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await assertReadable(
+        page.locator(".login-card label, #password, .login-card button"),
+      );
+      await page.screenshot({ path: `test-results/login-${colorScheme}.png` });
+    }
     await page.locator("#password").fill(password);
     await page.getByRole("button", { name: "ログイン", exact: true }).click();
     await page.locator("#app").waitFor({ state: "visible" });
@@ -94,6 +160,10 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       "CSV を整形して CSV を返してください",
       "A lost response restores the composer draft",
     );
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await assertReadable(page.locator("#error"));
+    }
     await page.getByRole("button", { name: "送る", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
     const conversations = await f.service.list();
@@ -129,6 +199,42 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await tool.locator("summary").click();
     assert.ok(await tool.locator("pre").first().isVisible());
     await tool.locator("summary").click();
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await assertReadable(
+        page.locator(
+          ".conversation-item.selected, #state, #connection, .user-bubble, .markdown, .markdown pre, .markdown th, .markdown td, .tool-card summary, .tool-state, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
+        ),
+      );
+      await assertReadable(page.locator("#message"), "::placeholder");
+      const create = page.getByRole("button", {
+        name: "新しい会話",
+        exact: true,
+      });
+      await assertReadable(create);
+      await create.hover();
+      await assertReadable(create);
+      await page.mouse.down();
+      try {
+        await assertReadable(create);
+      } finally {
+        await page.mouse.up();
+      }
+      // A click creates an empty view; return to the preserved conversation.
+      await page.locator("#conversations button").first().click();
+      await page.getByRole("link", { name: /clean.csv/ }).waitFor();
+      await page.locator("#message").fill("配色の確認");
+      await assertReadable(page.locator("#send"));
+      await page.locator("#send").hover();
+      await assertReadable(page.locator("#send"));
+      await page.locator("#message").fill("");
+      assert.equal(await page.locator("#send").isDisabled(), true);
+      await page.mouse.move(0, 0);
+      await page.screenshot({
+        path: `test-results/conversation-${colorScheme}.png`,
+      });
+    }
+    await page.emulateMedia({ colorScheme: "light" });
     await page.reload();
     await page.locator("#app").waitFor({ state: "visible" });
     await page.locator("#conversations button").first().click();
@@ -190,10 +296,14 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       fullPage: true,
     });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({
-      path: "test-results/conversation-mobile.png",
-      fullPage: true,
-    });
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await assertReadable(page.locator("#state, #message"));
+      await page.screenshot({
+        path: `test-results/conversation-mobile-${colorScheme}.png`,
+        fullPage: true,
+      });
+    }
     assert.ok(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,

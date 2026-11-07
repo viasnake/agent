@@ -215,7 +215,7 @@ function Chat({
             </ThreadPrimitive.ScrollToBottom>
             <ComposerPrimitive.Root
               id="message-form"
-              className="composer border rounded"
+              className="composer"
               onSubmit={(event) => {
                 event.preventDefault();
                 runtime.thread.composer.send();
