@@ -566,6 +566,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             引数
                             <textarea
                               className="form-control"
+                              rows={5}
                               placeholder={
                                 "-y\n@modelcontextprotocol/server-filesystem\n/workspace"
                               }
