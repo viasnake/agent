@@ -1,47 +1,43 @@
 # Agent
 
-手元の Linux VM に仕事を預け、ブラウザーで判断と成果物を確認する個人用 AI ワーカーです。
-公開リポジトリの修正とテスト、patch の納品、出典付き調査、Markdown・日本語 PDF の制作を行います。
-ブラウザーを閉じても、VM が動いていれば作業は続きます。
+Web から依頼し、VM 内の Pi Durable に作業してもらう個人用 Agent です。
+会話ごとに作業ディレクトリを持ち、ファイル・Shell・設定した MCP を使って結果を返します。
+CSV が必要なら CSV、文章が必要なら Markdown など、依頼に合ったファイルを受け取れます。
+応答の終了は成果の正しさを保証する判定ではありません。必要な検査は依頼に含めてください。
 
-仕事は1件ずつ実行します。確認待ちの仕事も実行枠を保持します。
-完了には実ファイル、現在の版に対する検証、自己レビューが必要です。
-未達条件や結果不明の操作があれば、部分成果を残して停止します。
-
-## 動作環境
-
-ホストは Windows x86-64 + QEMU/WHPX、ゲストは Ubuntu Server 26.04 x86-64 を想定しています。
-Linux/KVM 用の補助スクリプトもあります。macOS/arm64 は対象外です。
-初期構成は4 vCPU、8 GiB RAM、OS 32 GiB、データ64 GiBの sparse qcow2 です。
-実機受入には、後述のゲスト試験とホスト起動確認が必要です。
-
-ホストには手動の初期準備・起動スクリプトだけを置きます。
-ホスト常駐サービス、自動 VM 起動、共有フォルダー、Proxmox は使いません。
-VM 内のサービスは systemd で起動します。
-
-旧版の TUI、CLI、OAuth ログイン、Firecracker、保存形式との互換性・自動移行はありません。
-既存の保存領域をこのアプリのデータディスクとして流用しないでください。
+ホストは QEMU を手動で起動し、ブラウザーを開くだけです。ホスト常駐サービスや VM Manager は使いません。
+VM 内の Agent は systemd で起動します。ブラウザーを閉じても実行は続きます。
 
 ## VM を準備する
 
-Windows には QEMU と、管理者が明示的に有効にした Windows Hypervisor Platform が必要です。
-指定する SSH 公開鍵を用意してください。秘密鍵や API key を seed に入れることはありません。
-初期準備は公式 Ubuntu image を取得し、[固定した SHA-256](vm/assets.json) を照合します。
-QEMU の実際のバージョンも記録し、起動時に一致を確認します。
+Windows x86-64 + QEMU/WHPX、Ubuntu Server 26.04 x86-64 を想定しています。
+Linux/KVM 用の補助スクリプトもあります。macOS/arm64 は対象外です。
+既定は4 vCPU、8 GiB RAM、OS 32 GiB・データ64 GiBの sparse qcow2 です。
 
-PowerShell でリポジトリのディレクトリから実行します。
+Windows で QEMU と Windows Hypervisor Platform を用意し、SSH 公開鍵を指定します。
+リポジトリのディレクトリから PowerShell で実行してください。
 
 ```powershell
 .\vm\init.ps1 -VmHome C:\AgentVM -SshPublicKey C:\Keys\agent.pub
 .\vm\start.ps1 -VmHome C:\AgentVM
 ```
 
-`init` は新しいディレクトリだけを受け付けます。途中で失敗しても既存ファイルを消しません。
-Windows 標準 IMAPI2FS で NoCloud ISO を作成し、WSL/Docker を必要としません。
-WHPX が使えない場合やポート使用中には起動を止め、別ポートや TCG に切り替えません。
+Linux ホストでは QEMU/KVM、cloud-localds、Python 3、curl、flock を用意します。
 
-初回起動はパッケージ取得と空データディスク全域の検査に時間がかかります。
-別のターミナルで接続し、初期設定の終了を確認します。
+```sh
+bash vm/init.sh /absolute/path/agent-vm /absolute/path/key.pub
+bash vm/start.sh /absolute/path/agent-vm
+```
+
+`init` は新しいディレクトリだけを受け付け、公式 image の固定ハッシュを照合します。
+Windows の seed 作成は標準 IMAPI2FS を使い、WSL/Docker を必要としません。
+起動時は記録した QEMU のバージョン・ハッシュとディスクを確認し、二重起動を拒否します。
+加速器や固定ポートを利用できなければ停止します。TCG や別ポートへの自動切替はありません。
+転送はホストの `127.0.0.1:8080` と `127.0.0.1:2222` だけです。
+
+## ゲストに配備する
+
+別のターミナルから接続します。初回はパッケージ取得と空ディスクの検査に時間がかかります。
 
 ```sh
 ssh -p 2222 -i /path/to/private-key agent-admin@127.0.0.1
@@ -49,21 +45,7 @@ sudo cloud-init status --wait
 findmnt /srv/agent-data
 ```
 
-Linux ホストでは QEMU/KVM、`cloud-localds`、Python 3、curl、flock を用意して実行します。
-
-```sh
-bash vm/init.sh /absolute/path/agent-vm /absolute/path/ssh-key.pub
-bash vm/start.sh /absolute/path/agent-vm
-```
-
-ホスト側の転送は `127.0.0.1:8080` と `127.0.0.1:2222` だけです。
-ゲストの API は転送から到達できる `0.0.0.0:8080` で待ち受けます。
-VM を LAN に公開する設定は含めていません。
-
-## ゲストにインストールする
-
-以下は VM 内の `agent-admin` で実行します。
-Node.js **26.13.0** を使います。取得元とハッシュは [vm/assets.json](vm/assets.json) にあります。
+以下はゲストの `agent-admin` で実行します。Node.js と image の取得元・ハッシュは [vm/assets.json](vm/assets.json) に固定しています。
 
 ```sh
 mkdir -p ~/agent-build && cd ~/agent-build
@@ -76,31 +58,16 @@ git clone https://github.com/viasnake/agent.git source
 cd source
 npm ci --ignore-scripts --no-audit --no-fund
 npm run build
-PLAYWRIGHT_BROWSERS_PATH="$PWD/browsers" npx playwright install chromium
-```
-
-`build` は依存を導入・更新しません。ブラウザーの取得もインストール時だけです。
-ソース、依存、VM 設定を確認してから、管理者専用の場所へ配備スクリプトをコピーします。
-
-```sh
+npm prune --omit=dev --ignore-scripts --no-audit --no-fund
+# Review the source and VM configuration before administrator deployment.
 sudo install -d -m 0700 /root/agent-setup
 sudo install -m 0700 vm/guest-setup.sh /root/agent-setup/install
-sudo /root/agent-setup/install "$PWD" "$HOME/agent-build/node-v26.13.0-linux-x64" "$PWD/browsers"
+sudo /root/agent-setup/install "$PWD" "$HOME/agent-build/node-v26.13.0-linux-x64"
 ```
 
-`/opt/agent`、`/opt/agent-node`、`/opt/agent-browsers`、`/etc/agent` が既にある場合は上書きせず停止します。
-更新はサービスを止め、管理者が既存の配備を退避・確認してから行います。
-データディスクは再インストール時にも削除しません。
-
-配備は制御用 `agent-control` と作業用 `agent-work` を分離し、固定 sudo launcher、送信制限、
-Chromium の user namespace 用 AppArmor 設定、ゲスト systemd unit を登録します。
-ゲストの DNS は QEMU の `10.0.2.3` に固定し、拒否対象の loopback stub を使いません。
-AppArmor 設定は固定したブラウザーのパスに限って namespace を許可します。
-[Ubuntu の namespace 制限](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces) と
-Chromium sandbox が同時に成立することは実ゲストで確認してください。
-
-管理者 SSH から初回の認証情報を読み、ホストのブラウザーで開きます。
-認証情報はログへ出力されません。
+既存の `/opt/agent`・`/opt/agent-node`・`/etc/agent` は上書きしません。
+更新時はサービスを停止し、管理者が既存配備を退避・確認してから再配備してください。
+モデル資格情報や利用者の保存領域を配備スクリプトが削除することはありません。
 
 ```sh
 sudo cat /srv/agent-data/control/secrets/ui-password
@@ -108,17 +75,14 @@ sudo systemctl status agent.service
 # Host browser: http://127.0.0.1:8080
 ```
 
-モデル未設定でもログイン、履歴の閲覧、共通指示の編集は使えます。
-仕事の実行には次の設定が必要です。
+UI 認証情報は管理者 SSH で読みます。ログには出しません。
+モデル未設定でもログイン、会話の作成・履歴閲覧ができます。
 
-## モデルと GitHub を設定する
+## モデル・道具を設定する
 
-`/etc/agent/config.yaml` を管理者が編集します。[設定例](examples/config.yaml) を参照してください。
-最初の provider は Pi の OpenAI API-key 接続です。OAuth は提供しません。
-利用料金と外部送信の許可を確認してから、利用者が選んだ model ID を指定してください。
-
-秘密値は画面や YAML に直接書かず、制御用の private file に登録します。
-次の操作は値を画面や shell 履歴へ出さずに入力します。
+[examples/config.yaml](examples/config.yaml) を参照し、管理者が `/etc/agent/config.yaml` を編集します。
+モデル接続は Pi の OpenAI API-key 接続を使います。利用者が課金・外部送信を許可した model ID を指定してください。
+秘密値は YAML や UI に直接入れず、制御用の private file に置きます。
 
 ```sh
 sudo -u agent-control sh -c 'umask 077; cat > /srv/agent-data/control/secrets/model-key'
@@ -135,121 +99,104 @@ model:
   disclosureApproved: true
 ```
 
-仕事を確認して「再開」を選びます。既存のモデルを明示的に切り替える場合は「設定中のモデルで再開」を選びます。
-切替・再開でも既存仕事の残上限や期限をリセットしません。
-モデルの認証に失敗した場合も履歴は残り、確認待ちになります。
-PDF の全ページ画像確認には、画像入力に対応するモデルが必要です。
+標準の `read`・`write`・`edit`・`bash` は Pi Durable の実装をそのまま作業 UID で実行します。
+CLI やライブラリは必要なものだけゲストへ用意してください。Git は Git、GitHub は gh などを使えます。
+GitHub、ブラウザー、PDF を特別扱いする専用パイプラインはありません。
 
-GitHub への書き込みは任意です。資格情報なしでも公開 HTTPS リポジトリの修正と patch 納品が使えます。
-設定する場合は対象リポジトリを限定した token を同じ方法で `control/secrets/github-token` に登録し、
-設定例の `github` を有効にします。仕事作成時の許可に加え、送信前に UI で対象と全ファイル内容を確認します。
-専用の新しい `codex/job-<ID>` ブランチと下書き PR を API で作成します。
-既存ブランチの更新、削除変更、バイナリの GitHub 納品は扱いません。これらは patch で取得できます。
-worker に token を渡したり、worker の Git 設定・hook を制御 UID で実行したりはしません。
+MCP は **stdio のみ**対応します。公式 TypeScript SDK で設定済みサーバーのツールを列挙・呼び出します。
+各呼び出しで接続し、終了時に閉じます。サーバー内メモリーの継続は保証しません。
+コマンドは作業 UID で起動し、HOME は `/srv/agent-data/work/home` です。
 
-## 仕事を依頼する
-
-「新規」から目的と完成の条件を入力します。添付は任意です。
-コード仕事では公開 Git URL を指定するか、小さなファイルを添付して依頼できます。
-添付は `attachments/` に置かれ、ZIP の自動展開は行いません。
-コードは VM の仕事専用 `project/` で扱い、ホストのリポジトリを直接変更しません。
-
-調査では資料 URL を依頼に含めてください。取得した本文、URL、題名、取得日時と引用を保存し、
-Markdown と日本語 PDF を納品します。PDF は文字とページを機械検査し、各ページの画像をモデルへ渡して確認します。
-機械検査やモデルの自己レビューは、文章の正確さや人間による品質受入を保証しません。
-
-追加指示は「受理」と「反映」を区別して表示します。
-一時停止は新しい呼び出しを止め、子処理を回収します。OS の実行位置を保存するものではありません。
-再起動後は状態と残上限を復元し、実行中だった仕事を確認待ちにします。
-途中の Shell や外部変更の結果が不明なら、自動で再実行しません。結果と根拠を照合画面で記録してください。
-照合後も再開は明示操作です。終了した仕事の続きは新しい仕事として作成します。
-
-既定はモデル呼び出し60回、開始から1時間、修正提案3回、1コマンド300秒です。
-上限は仕事ごとに保存し、再起動や再開では復活しません。予算待ちでは利用者が明示的に回数・期限を追加できます。
-費用は provider が報告した分だけを扱い、未確定の呼び出しを0円とみなしません。
-添付は1件20 MiB・仕事合計50 MiB、成果物は1件50 MiB・仕事合計200 MiB、コマンドログは10 MiBまでです。
-仕事は1000件、未整理の添付は合計1 GiBまで保存します。履歴の自動削除は行いません。
-
-## 検証する
-
-通常の検証は資格情報や有料推論を使いません。Linux では次を準備してください。
-VM の初期設定には含まれています。
-
-```sh
-sudo apt-get update
-sudo apt-get install -y git python3 fonts-noto-cjk poppler-utils
-npm ci --ignore-scripts --no-audit --no-fund
-npx playwright install --with-deps chromium
-npm run verify
+```yaml
+mcp:
+  - name: local-tools
+    command: /absolute/path/to/server
+    args: []
 ```
 
-`verify` は形式、型、ビルド、実 Pi Durable／SQLite／ファイル／HTTP の試験と Chromium E2E を実行します。
-外部 provider と GitHub 応答は fixture です。実際のプロセス強制終了を含む復旧試験も実行します。
-生成した画面、PDF、ページ画像は ignored の `test-results/` に置きます。
+接続・資格情報は利用者が明示的に用意します。MCP 未設定でもファイルと Shell は使えます。
+認証済み CLI・MCP を作業側へ渡すことは、その資格情報の権限を Agent に委譲することです。
+自由な Shell に渡した権限をプロンプトや UI 承認だけで完全に制御する仕組みはありません。
+ホストのホーム、SSH agent、資格情報を自動共有しません。
 
-専用のテスト VM で、制御サービスを明示的に止めてから実 UID・通信・cgroup を検証します。
-通常の検証に、このゲスト試験を通過したという意味はありません。
+## 会話を使う
 
-```sh
-sudo systemctl stop agent.service
-sudo env AGENT_GUEST_TEST=1 PATH=/opt/agent-node/bin:/usr/bin:/bin npm run test:guest
-sudo systemctl start agent.service
-```
+「新規」から依頼文を送り、必要ならファイルを添付します。分類や固定の納品形式はありません。
+会話一覧から選べば、応答終了後も同じ会話に追記して続きを実行できます。
+実行中の追加指示は Pi の inbox で受け付け、次の境界で反映します。
+別の会話が実行中なら busy を返し、実行待ちキューには入れません。
 
-実モデルの試験は、接続・課金の許可、仕事 JSON、private な UI 認証ファイルを指定して実施します。
-`externalAllowed: false` の仕事だけを受け付けます。
+会話の作業ディレクトリは `work/conversations/<ID>/`、添付はその `attachments/` に保存します。
+`outputs/` 内の通常ファイルは自動で一覧表示・ダウンロードできます。登録ツールは不要です。
+取得対象は現在のファイルです。不変版や成果物の独自レジストリーは持ちません。
 
-```sh
-AGENT_LIVE_TEST=1 AGENT_LIVE_JOB=examples/job-code.json \
-  AGENT_LIVE_PASSWORD_FILE=/private/ui-password npm run test:live
-```
+「停止」は推論を止め、子プロセスの終了を確認して中断状態にします。
+実行型 MCP と Shell の子プロセスは呼び出し終了時にも回収します。常駐させたい処理は管理者が別途用意してください。
+再開は OS の実行位置の復元ではありません。履歴と実際の状態を CLI/API で確認しながら続けます。
+中断された外部更新が完了したか不明なら、利用者へ通常の会話で確認します。
+サービス再起動後も会話とファイルは残り、実行中だった会話は中断状態になります。自動再送はしません。
 
-調査の試験には `examples/job-research.json` を指定します。各依頼の内容を読み、個別に実行してください。
+送信・明示再開で新たに開始する実行の上限はモデル60回・1時間、1ツール300秒です。
+1コマンドの出力は10 MiB、ファイル転送は1件20 MiBまでです。
+一覧は outputs/ 内の200ファイル・走査2000項目・深さ10まで、履歴は40項目ずつ取得します。
+会話は1000件、入力の重複防止記録は10000件まで保存し、自動削除しません。
 
-ゲストや資格情報が不足すると `blocked`、終了コード77を返します。
-Windows/WHPX の init→start→ログイン、二重起動、sleep/resume、バックアップ復元は実機で別途確認します。
-PowerShell の構文確認、Linux の試験成功、faux provider の成功は、それらの代用にはなりません。
+## 保存・バックアップと境界
 
-## 停止・バックアップ・復元
+現形式は `control/conversations-v1.sqlite` と `work/conversations/` を使います。
+以前の `state.sqlite`・`work/jobs/` などは読み込み・削除・自動変換しません。
+旧 TUI・Job・Firecracker の保存形式に互換性はありません。設定例は schemaVersion 2 です。
 
-ゲストを正常終了し、QEMU の終了を待ってから VM ディレクトリ全体をコピーします。
-オンラインの SQLite 本体だけをコピーする手順ではありません。
-ディスクには会話と秘密情報を含むため、ホストのディスク暗号化とバックアップ先の保護が必要です。
+正常終了し、QEMU の終了を待ってから VM ディレクトリ全体を保護された場所へコピーします。
+ディスクには会話、仕事のファイル、明示設定した資格情報が含まれます。
 
 ```sh
 ssh -p 2222 -i /path/to/private-key agent-admin@127.0.0.1 sudo shutdown -h now
 ```
 
-復元先は未使用のディレクトリにしてください。**復元後の最初の起動には必ず recovery hold を指定します。**
-これは QEMU の fw_cfg からゲストへ渡され、外部結果の照合・人間確認前の実行を止めます。
+復元先は未使用のディレクトリにし、復元後は履歴と外部サービスの現在状態を確認してから明示的に続けてください。
+外部操作の exactly-once、停電時の完全な永続化、任意プロセスの完全復元は保証しません。
 
-```powershell
-.\vm\start.ps1 -VmHome C:\AgentVM-Restored -RecoveryHold
-```
+制御 UID は DB・モデル key・UI 認証を保持し、作業 UID が任意コードを実行します。
+データ mount・UUID、固定 launcher、UID、送信制限を確認できなければ実行を拒否します。
+作業側のネットワークは指定 DNS・公開 HTTP/HTTPS・preview 用 loopback 3000–3999 に限定し、
+private・metadata・host gateway・IPv6 は OS 側で拒否します。
+会社・VPN の公開 IP も保護する場合は、管理者が `/etc/agent/protected-cidrs.nft` に指定してください。
+会社へのアクセス・業務データの送信許可は設定から推測しません。
+
+同じ作業 UID の会話間に強い隔離はありません。実行中のディスク quota や完全な DLP もありません。
+用途や信頼範囲が異なる場合は VM を分けてください。HTTP はホスト loopback 向けです。
+
+## 開発・検証
+
+Node.js 26.13.0、Git、Python 3、Chromium のシステムライブラリを用意します。
 
 ```sh
-bash vm/start.sh /absolute/path/agent-vm-restored --recovery-hold
+npm ci --ignore-scripts --no-audit --no-fund
+npx playwright install --with-deps chromium
+npm run verify
 ```
 
-画面で復旧前後の外部操作を確認し、根拠を記録してから再開します。
-その後の正常起動では hold オプションを外せます。ディスクの差し替えを常に自動検知するものではありません。
-SQLite WAL/NORMAL と操作記録だけで、停電を含めた外部操作の exactly-once は保証しません。
+`verify` は形式・型・ビルド・Python単体試験・Pi/SQLite/ファイル/Shell/MCP/HTTP試験・実ブラウザーE2Eを実行します。
+通常試験は faux provider とローカル MCP サーバーを使い、資格情報・有料推論を使いません。
+生成画面は ignored の `test-results/` に保存します。
 
-OS だけを再構築する場合は新しい VM ディレクトリを準備し、起動前に新規の空 `data.qcow2` を退避します。
-停止済みバックアップのデータディスクを、未使用になった `data.qcow2` の場所へコピーしてください。
-既存ファイルを上書きしないでください。初期構築は serial・filesystem・label を確認し、既存データを再フォーマットしません。
-新しい OS にサービスを配備する前に `recoveryHold: true` を設定例へ指定し、復旧確認後に解除します。
+専用の配備済みテストゲストで、サービスを明示的に停止して実 UID・通信・cgroup を確認します。
 
-## 実行境界と制約
+```sh
+sudo systemctl stop agent.service
+cd /opt/agent
+sudo env AGENT_GUEST_TEST=1 PATH=/opt/agent-node/bin:/usr/bin:/bin npm run test:guest
+sudo systemctl start agent.service
+```
 
-制御側は DB・モデル key・UI 認証・GitHub token を保持し、作業側は Shell・全ファイル操作・ブラウザー・PDF を実行します。
-データ mount と UUID、固定 launcher、作業 UID、送信制限を確認できなければ実行を止めます。
-`agent-work` は公開 HTTP/HTTPS、指定 DNS、preview の loopback 3000–3999 のみ利用できます。
-private/metadata/host gateway と IPv6 を OS 側で拒否します。
-会社・VPN の公開 IP も保護する場合は、管理者が `/etc/agent/protected-cidrs.nft` に追加してください。
-会社へのアクセスやデータの外部送信許可は、この設定から推測しません。
+実モデルの検査は、依頼内容・課金・利用する道具の権限を確認してから実行します。
 
-インターネット通信を許可するため、worker が読めるデータの外送を完全に防ぐ DLP ではありません。
-同じ作業 UID の仕事同士に強い相互隔離はありません。個人用と業務用は別 VM・データセットに分けてください。
-実行中の disk quota はありません。容量不足や子プロセス回収の不確定時には停止し、管理者の確認が必要です。
-HTTP はホスト loopback 向けです。LAN 公開、SSO、一般 MCP 管理、常設マルチ Agent、Office 文書、自己更新は提供しません。
+```sh
+AGENT_LIVE_TEST=1 AGENT_LIVE_PROMPT_FILE=/private/reviewed-prompt.txt \
+  AGENT_LIVE_PASSWORD_FILE=/private/ui-password npm run test:live
+```
+
+必要な権限や資格情報がない場合は blocked、終了コード77です。
+WHPX/KVM の実起動・sleep/resume・バックアップ復元、実ゲストの分離、モデルの品質は別途受入が必要です。
+通常試験や PowerShell 構文確認の成功を、それらの受入成功とは扱いません。
