@@ -5,6 +5,7 @@ export type Message = {
   toolCallId: string | null;
   toolCalls: { id: string; name: string; argsText: string }[];
   isError: boolean;
+  images?: { url: string }[];
 };
 export type Entry = { id: number; messages: Message[] };
 export type Conversation = {
@@ -122,7 +123,14 @@ export function fileSize(size: number) {
 
 export type ModelOptions = {
   catalog: string[];
-  models: { id: string; name: string; model?: string; available: boolean }[];
+  catalogs?: Record<string, string[]>;
+  models: {
+    id: string;
+    name: string;
+    model?: string;
+    provider?: string;
+    available: boolean;
+  }[];
   initialModel: string | null;
 };
 
@@ -131,7 +139,8 @@ export function modelChoices(options: ModelOptions) {
     [
       ...new Set([
         ...(connection.model ? [connection.model] : []),
-        ...options.catalog,
+        ...(options.catalogs?.[connection.provider ?? "openai"] ??
+          options.catalog),
       ]),
     ].map((model) => ({
       id: JSON.stringify([connection.id, model]),

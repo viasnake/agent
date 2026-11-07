@@ -13,6 +13,7 @@ export const requestSchema = z
       "list",
       "download",
       "upload",
+      "read_attachment",
       "cleanup",
     ]),
     args: z.record(z.string(), z.unknown()),

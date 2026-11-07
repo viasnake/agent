@@ -477,8 +477,12 @@ function App() {
         : text;
       const key = `message-${id}`;
       await api(`/api/conversations/${id}/messages`, "POST", {
-        requestId: await requestId(key, { text: content }),
+        requestId: await requestId(key, {
+          text: content,
+          ...(paths.length ? { attachments: paths } : {}),
+        }),
         text: content,
+        ...(paths.length ? { attachments: paths } : {}),
       });
       forget(key);
       forget("create");

@@ -55,6 +55,8 @@ export function threadMessages(
     } else {
       if (message.content.trim())
         content.push({ type: "text", text: message.content });
+      for (const image of message.images ?? [])
+        content.push({ type: "image", image: image.url });
       for (const call of message.toolCalls) {
         const result = results.get(call.id);
         content.push({
@@ -182,6 +184,14 @@ export function UserMessage() {
         <MessagePrimitive.Parts
           components={{
             Text: ({ text }) => <span className="user-text">{text}</span>,
+            Image: ({ image }) => (
+              <img
+                src={image}
+                alt="添付画像"
+                className="img-fluid rounded"
+                loading="lazy"
+              />
+            ),
           }}
         />
       </div>

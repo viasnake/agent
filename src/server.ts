@@ -27,6 +27,10 @@ function inputError(error: z.ZodError): string {
     provider: "プロバイダー",
     key: "API キー",
     auth: "認証方式",
+    project: "プロジェクト ID",
+    location: "ロケーション",
+    region: "リージョン",
+    profile: "AWS プロファイル",
     transport: "接続方式",
     command: "コマンド",
     args: "引数",
@@ -327,12 +331,42 @@ export async function createServer(
   app.post("/api/conversations/:id/messages", async (request, reply) => {
     const { id } = identifier.parse(request.params),
       body = z
-        .object({ requestId, text: z.string().min(1).max(64000) })
+        .object({
+          requestId,
+          text: z.string().min(1).max(64000),
+          attachments: z.array(z.string().max(240)).max(20).default([]),
+        })
         .strict()
         .parse(request.body);
     return reply
       .code(202)
-      .send(await service.send(id, body.requestId, body.text));
+      .send(
+        await service.send(
+          id,
+          body.requestId,
+          body.text,
+          false,
+          body.attachments,
+        ),
+      );
+  });
+  app.get("/api/conversations/:id/images", async (request, reply) => {
+    const { id } = identifier.parse(request.params);
+    const { entry, message, block } = z
+      .object({
+        entry: z.coerce.number().int().nonnegative(),
+        message: z.coerce.number().int().min(0).max(1000),
+        block: z.coerce.number().int().min(0).max(1000),
+      })
+      .strict()
+      .parse(request.query);
+    const image = await service.image(id, entry, message, block);
+    return reply
+      .header("Content-Type", image.mimeType)
+      .header("Cache-Control", "private, no-store")
+      .header("Content-Security-Policy", "sandbox; default-src 'none'")
+      .header("X-Content-Type-Options", "nosniff")
+      .send(image.bytes);
   });
   app.post("/api/conversations/:id/resume", async (request, reply) => {
     const { id } = identifier.parse(request.params),

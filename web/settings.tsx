@@ -14,13 +14,31 @@ function editable(s: PublicSettings): SettingsInput {
     defaultModel: s.defaultModel,
     instructions: s.instructions,
     limits: s.limits,
-    models: s.models.map(({ id, provider, model, auth, name }) => ({
-      id,
-      provider,
-      name,
-      model,
-      auth,
-    })),
+    models: s.models.map(
+      ({
+        id,
+        provider,
+        model,
+        auth,
+        name,
+        project,
+        location,
+        region,
+        profile,
+        images,
+      }) => ({
+        id,
+        provider,
+        name,
+        model,
+        auth,
+        project,
+        location,
+        region,
+        profile,
+        images,
+      }),
+    ),
     mcp: s.mcp.map(
       ({
         id,
@@ -338,7 +356,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                       <summary>
                         <span>
                           {model.name ||
-                            (model.auth === "oauth" ? "ChatGPT" : "OpenAI API")}
+                            (model.auth === "oauth"
+                              ? "ChatGPT"
+                              : model.provider === "openai"
+                                ? "OpenAI API"
+                                : model.provider)}
                         </span>
                         <small>
                           {current?.status === "未確認" ? "" : current?.status}
@@ -351,9 +373,40 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             className="form-control"
                             aria-label="プロバイダー"
                             value={model.provider}
-                            disabled
+                            onChange={(e) => {
+                              const provider = e.target
+                                .value as typeof model.provider;
+                              update({
+                                provider,
+                                model: undefined,
+                                key: "",
+                                auth:
+                                  provider === "google-vertex"
+                                    ? "adc"
+                                    : provider === "amazon-bedrock"
+                                      ? "aws"
+                                      : "api_key",
+                                project: undefined,
+                                location:
+                                  provider === "google-vertex"
+                                    ? "global"
+                                    : undefined,
+                                region:
+                                  provider === "amazon-bedrock"
+                                    ? "us-east-1"
+                                    : undefined,
+                                profile: undefined,
+                                images: undefined,
+                              });
+                            }}
                           >
                             <option value="openai">OpenAI</option>
+                            <option value="anthropic">Anthropic</option>
+                            <option value="google">Gemini</option>
+                            <option value="google-vertex">Vertex AI</option>
+                            <option value="amazon-bedrock">
+                              Amazon Bedrock
+                            </option>
                           </select>
                         </label>
                         <label className="form-label">
@@ -362,12 +415,72 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             className="form-control"
                             aria-label="接続名"
                             placeholder={
-                              model.auth === "oauth" ? "ChatGPT" : "OpenAI API"
+                              model.auth === "oauth"
+                                ? "ChatGPT"
+                                : model.provider === "openai"
+                                  ? "OpenAI API"
+                                  : model.provider
                             }
                             value={model.name ?? ""}
                             onChange={(e) => update({ name: e.target.value })}
                           />
                         </label>
+                        {model.provider === "google-vertex" && (
+                          <>
+                            <label className="form-label">
+                              プロジェクト ID
+                              <input
+                                className="form-control"
+                                aria-label="プロジェクト ID"
+                                value={model.project ?? ""}
+                                onChange={(e) =>
+                                  update({ project: e.target.value })
+                                }
+                              />
+                            </label>
+                            <label className="form-label">
+                              ロケーション
+                              <input
+                                className="form-control"
+                                aria-label="ロケーション"
+                                value={model.location ?? "global"}
+                                onChange={(e) =>
+                                  update({ location: e.target.value })
+                                }
+                              />
+                            </label>
+                          </>
+                        )}
+                        {model.provider === "amazon-bedrock" && (
+                          <>
+                            <label className="form-label">
+                              リージョン
+                              <input
+                                className="form-control"
+                                aria-label="リージョン"
+                                value={model.region ?? ""}
+                                onChange={(e) =>
+                                  update({ region: e.target.value })
+                                }
+                              />
+                            </label>
+                            {model.auth === "aws" && (
+                              <label className="form-label">
+                                AWS プロファイル
+                                <input
+                                  className="form-control"
+                                  aria-label="AWS プロファイル"
+                                  value={model.profile ?? ""}
+                                  onChange={(e) =>
+                                    update({
+                                      profile: e.target.value || undefined,
+                                    })
+                                  }
+                                />
+                              </label>
+                            )}
+                          </>
+                        )}
                         <label className="form-label">
                           認証方式
                           <select
@@ -376,16 +489,28 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             value={model.auth ?? "api_key"}
                             onChange={(e) =>
                               update({
-                                auth: e.target.value as "api_key" | "oauth",
-                                key: undefined,
+                                auth: e.target.value as typeof model.auth,
+                                key: "",
                               })
                             }
                           >
-                            <option value="api_key">API キー</option>
-                            <option value="oauth">ChatGPT（OAuth）</option>
+                            {model.provider !== "google-vertex" && (
+                              <option value="api_key">API キー</option>
+                            )}
+                            {model.provider === "openai" && (
+                              <option value="oauth">ChatGPT（OAuth）</option>
+                            )}
+                            {model.provider === "google-vertex" && (
+                              <option value="adc">ADC</option>
+                            )}
+                            {model.provider === "amazon-bedrock" && (
+                              <option value="aws">AWS 認証情報</option>
+                            )}
                           </select>
                         </label>
-                        {model.auth !== "oauth" && (
+                        {!["oauth", "adc", "aws"].includes(
+                          model.auth ?? "api_key",
+                        ) && (
                           <>
                             <label className="form-label">
                               API キー
@@ -415,9 +540,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
                             className="btn-outline theme-secondary btn-sm"
                             disabled={
                               dirty ||
-                              !(model.auth === "oauth"
-                                ? current?.authorized
-                                : current?.hasKey)
+                              !(
+                                model.auth === "adc" ||
+                                model.auth === "aws" ||
+                                (model.auth === "oauth"
+                                  ? current?.authorized
+                                  : current?.hasKey)
+                              )
                             }
                             onClick={() => {
                               if (

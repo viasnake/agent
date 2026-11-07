@@ -28,14 +28,76 @@ const identifier = z.string().uuid();
 export const modelInput = z
   .object({
     id: identifier,
-    provider: z.literal("openai"),
+    provider: z.enum([
+      "openai",
+      "anthropic",
+      "google",
+      "google-vertex",
+      "amazon-bedrock",
+    ]),
+    images: z.boolean().optional(),
     // Legacy model choices remain readable; new entries only configure credentials.
     model: z.string().trim().min(1).max(200).optional(),
     name: z.string().trim().max(100).optional(),
     key: secret.optional(),
-    auth: z.enum(["api_key", "oauth"]).optional(),
+    auth: z.enum(["api_key", "oauth", "adc", "aws"]).optional(),
+    project: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/)
+      .optional(),
+    location: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{0,62}$/)
+      .optional(),
+    region: z
+      .string()
+      .regex(/^[a-z]{2}(?:-[a-z]+)+-\d+$/)
+      .optional(),
+    profile: z.string().trim().min(1).max(128).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((model, ctx) => {
+    const validAuth =
+      model.provider === "google-vertex"
+        ? model.auth === "adc"
+        : model.provider === "amazon-bedrock"
+          ? ["aws", "api_key"].includes(model.auth ?? "api_key")
+          : model.provider === "openai"
+            ? ["oauth", "api_key"].includes(model.auth ?? "api_key")
+            : !model.auth || model.auth === "api_key";
+    if (!validAuth)
+      ctx.addIssue({
+        code: "custom",
+        message: "Authentication does not match the provider",
+        path: ["auth"],
+      });
+    if (
+      model.provider === "google-vertex" &&
+      (!model.project || !model.location)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Vertex AI requires project and location",
+        path: [model.project ? "location" : "project"],
+      });
+    if (model.provider === "amazon-bedrock" && !model.region)
+      ctx.addIssue({
+        code: "custom",
+        message: "Bedrock requires region",
+        path: ["region"],
+      });
+    for (const field of ["project", "location", "region", "profile"] as const) {
+      const provider = ["project", "location"].includes(field)
+        ? "google-vertex"
+        : "amazon-bedrock";
+      if (model[field] !== undefined && model.provider !== provider)
+        ctx.addIssue({
+          code: "custom",
+          message: `${field} does not match the provider`,
+          path: [field],
+        });
+    }
+  });
 export const mcpInput = z
   .object({
     id: identifier,
@@ -146,6 +208,22 @@ export type ModelConfig = z.infer<typeof modelInput> & {
   oauth?: OAuthCredential;
 };
 export function modelCredential(model: ModelConfig): Credential | undefined {
+  if (model.auth === "adc")
+    return {
+      type: "api_key",
+      env: {
+        GOOGLE_CLOUD_PROJECT: model.project!,
+        GOOGLE_CLOUD_LOCATION: model.location!,
+      },
+    };
+  if (model.auth === "aws")
+    return {
+      type: "api_key",
+      env: {
+        AWS_REGION: model.region!,
+        ...(model.profile ? { AWS_PROFILE: model.profile } : {}),
+      },
+    };
   return model.auth === "oauth"
     ? model.oauth
     : model.key
@@ -313,11 +391,15 @@ export class SettingsStore {
         revision: parsed.revision + 1,
         models: parsed.models.map((m) => {
           const old = this.value.models.find((v) => v.id === m.id);
-          const same = (old?.auth ?? "api_key") === (m.auth ?? "api_key");
-          const key =
-            m.auth === "oauth"
-              ? undefined
-              : (m.key ?? (same ? old?.key : undefined));
+          const same =
+            old?.provider === m.provider &&
+            (old?.auth ?? "api_key") === (m.auth ?? "api_key") &&
+            (["project", "location", "region", "profile"] as const).every(
+              (key) => old?.[key] === m[key],
+            );
+          const key = ["oauth", "adc", "aws"].includes(m.auth ?? "api_key")
+            ? undefined
+            : (m.key ?? (same ? old?.key : undefined));
           return {
             ...m,
             key,
@@ -400,19 +482,20 @@ export class SettingsStore {
     };
     return {
       read: async (provider) => {
-        if (provider !== "openai") return undefined;
+        if (provider !== model.provider) return undefined;
         const saved = current();
         return structuredClone(saved ? modelCredential(saved) : snapshot);
       },
       list: async () =>
-        snapshot ? [{ providerId: "openai", type: snapshot.type }] : [],
+        snapshot ? [{ providerId: model.provider, type: snapshot.type }] : [],
       delete: async () => {
         throw new Error("Use model settings to disconnect");
       },
       modify: async (provider, fn, options) =>
         this.exclusive(async () => {
           options?.signal?.throwIfAborted();
-          if (provider !== "openai") throw new Error("Unknown model provider");
+          if (provider !== model.provider)
+            throw new Error("Unknown model provider");
           const saved = current();
           if (!saved)
             throw new AppError(409, "モデルの認証情報が変更されています");

@@ -41,6 +41,11 @@ generated output or live provider responses.
 - src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
   official MCP client and bounded attachment/output transfers.
 - src/provider.ts: model dispatch limit and active-conversation binding.
+- src/model-providers.ts and src/bedrock.ts: native model catalogs and provider
+  connections. Bind Vertex project/location and Bedrock region/profile explicitly;
+  catalog/settings reads must not probe credentials or call inference. Bedrock's
+  AWS client uses one attempt, with complete stream/tool/usage validation.
+- src/images.ts: bounded static-image decoding without resizing or recompression.
 - src/model-auth.ts: browser-session adapter to Pi OpenAI OAuth; keep the SDK
   callback loopback-only, with explicit full-URL submission for QEMU users.
   OAuth state/PKCE/exchange/refresh belong to Pi, not a custom inference client.
@@ -134,7 +139,15 @@ Uninitialized output listings are empty and must not initialize work or MCP.
 Keep downloads within outputs/: reject absolute paths, traversal, symlinks,
 nonregular files, hardlinks, oversized files and path replacement during reads.
 Uploads go explicitly into attachments/. Files are mutable workspace files,
-not immutable artifacts. There is no UI password or login screen. Establish a
+not immutable artifacts. Image inputs are read through the worker's bounded
+attachment reader and saved as original bytes in Pi's user input
+transaction. Workspace edits do not change admitted history. Project only scoped,
+authenticated local image URLs to the browser; never send image payloads in SSE.
+Reject images for text-only models, including when replaying existing history.
+Vertex ADC and AWS credential chains are explicit control-side authentication
+choices; never pass their files or environment to the worker.
+
+There is no UI password or login screen. Establish a
 CSRF session automatically for local browsers. Keep socket-peer, loopback Host,
 Origin, Fetch Metadata and CSRF checks; never trust forwarded headers. QEMU
 forwarding stays bound to host loopback. The guest accepts host-forwarded peers

@@ -418,6 +418,10 @@ export class Worker {
     if (op === "tool") return this.standardTool(id, args, signal);
     if (op === "list") return this.list(id);
     const name = safeRelative(z.string().parse(args.path));
+    if (op === "read_attachment") {
+      if (!name.startsWith("attachments/")) throw new Error("Attachments only");
+      return { data: (await this.bytes(id, name)).toString("base64") };
+    }
     if (op === "download") {
       if (!name.startsWith("outputs/"))
         throw new Error("Only outputs are downloadable");

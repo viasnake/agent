@@ -7,8 +7,17 @@ import type {
   Provider,
   CredentialStore,
   OAuthAuth,
+  ImageContent,
+  UserMessage,
 } from "@earendil-works/pi-ai";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { modelCatalogs, modelProvider } from "./model-providers.js";
+import {
+  imageMime,
+  validateImage,
+  maxMessageImages,
+  maxMessageImageBytes,
+} from "./images.js";
 import {
   Harness,
   createRegistry,
@@ -22,6 +31,7 @@ import type {
   Cursor,
   Storage,
   Registry,
+  EntryId,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Config } from "./config.js";
@@ -185,9 +195,11 @@ export class AgentService {
             ? m.authorized
               ? "ChatGPT 認証済み"
               : "ChatGPT 未認証"
-            : m.hasKey
-              ? "未確認"
-              : "API キー未登録"),
+            : m.auth === "adc" || m.auth === "aws"
+              ? "外部認証・未確認"
+              : m.hasKey
+                ? "未確認"
+                : "API キー未登録"),
       })),
     };
     return this.sanitize(projection);
@@ -221,9 +233,17 @@ export class AgentService {
       catalog: openaiProvider()
         .getModels()
         .map((m) => m.id),
+      catalogs: modelCatalogs(),
       models: s.models.map((m) => ({
         id: m.id,
-        name: m.name || (m.auth === "oauth" ? "ChatGPT" : "OpenAI API"),
+        name:
+          m.name ||
+          (m.auth === "oauth"
+            ? "ChatGPT"
+            : m.provider === "openai"
+              ? "OpenAI API"
+              : m.provider),
+        provider: m.provider,
         model: m.model,
         available: !!modelCredential(m),
       })),
@@ -235,7 +255,7 @@ export class AgentService {
       requested &&
       requested !== config?.model &&
       !this.options.provider?.getModels().some((m) => m.id === requested) &&
-      !openaiProvider()
+      !(config ? modelProvider(config) : openaiProvider())
         .getModels()
         .some((m) => m.id === requested)
     )
@@ -244,7 +264,7 @@ export class AgentService {
       requested ??
       config?.model ??
       this.options.modelId ??
-      openaiProvider().getModels()[0]?.id ??
+      (config ? modelProvider(config) : openaiProvider()).getModels()[0]?.id ??
       null
     );
   }
@@ -273,8 +293,8 @@ export class AgentService {
     this.config.instructions = s.instructions;
     Object.assign(this.config.limits, s.limits);
     this.modelId = selectedModel;
-    this.providerId = this.options.provider?.id ?? "openai";
     this.models.deleteProvider(this.providerId);
+    this.providerId = this.options.provider?.id ?? model?.provider ?? "openai";
     this.readyModel =
       !!this.options.provider || !!(model && modelCredential(model));
     this.credentials = model
@@ -283,7 +303,8 @@ export class AgentService {
     if (this.readyModel) {
       this.models.setProvider(
         guardedProvider(
-          this.options.provider ?? openaiProvider(),
+          this.options.provider ??
+            modelProvider({ ...model!, model: this.modelId! }),
           (session, model) => this.reserve(session, model),
         ),
       );
@@ -440,7 +461,7 @@ export class AgentService {
           this.selectedModel(model)!,
           modelCredential(model)!.type === "oauth"
             ? model.oauth!.access
-            : model.key!,
+            : (model.key ?? ""),
         );
       else {
         const models = createModels({
@@ -450,8 +471,13 @@ export class AgentService {
             fileExists: async () => false,
           },
         });
-        models.setProvider(openaiProvider());
-        const selected = models.getModel("openai", this.selectedModel(model)!);
+        models.setProvider(
+          modelProvider({ ...model, model: this.selectedModel(model)! }),
+        );
+        const selected = models.getModel(
+          model.provider,
+          this.selectedModel(model)!,
+        );
         if (!selected) throw new Error("Unknown model");
         const result = await models.completeSimple(
           selected,
@@ -642,11 +668,19 @@ export class AgentService {
     requestId: string,
     text: string,
     resume = false,
+    attachments: string[] = [],
   ): Promise<{ id: string }> {
+    if (resume && attachments.length)
+      throw new AppError(400, "画像は新しい入力に添付してください");
     return this.exclusive(async () => {
       this.assertHealthy();
       const conversation = await this.conversation(id);
-      const digest = hash({ id, text, resume });
+      const digest = hash({
+        id,
+        text,
+        resume,
+        ...(attachments.length ? { attachments } : {}),
+      });
       const previous = (await this.harness.snapshot(ConversationsDoc, ctx))!
         .receipts[requestId];
       if (previous) {
@@ -673,6 +707,39 @@ export class AgentService {
         await this.workspace(id);
         await this.prepareMcp(id);
       }
+      const images: ImageContent[] = [];
+      let imageBytes = 0;
+      for (const path of attachments) {
+        if (!safeRelative(path).startsWith("attachments/"))
+          throw new AppError(400, "添付ファイルを指定してください");
+        const mimeType = imageMime(path);
+        if (!mimeType) continue;
+        if (images.length >= maxMessageImages)
+          throw new AppError(413, "画像は1回に8枚までです");
+        const result = await this.runner.call(id, "read_attachment", { path });
+        const bytes = Buffer.from(result.data ?? "", "base64");
+        imageBytes += bytes.length;
+        if (imageBytes > maxMessageImageBytes)
+          throw new AppError(413, "画像の合計は20 MBまでです");
+        await validateImage(bytes, mimeType);
+        images.push({
+          type: "image",
+          mimeType,
+          data: bytes.toString("base64"),
+        });
+      }
+      if (
+        images.length &&
+        !this.models
+          .getModel(this.providerId, this.modelId)
+          ?.input.includes("image")
+      )
+        throw new AppError(400, "画像入力に対応するモデルを選択してください");
+      const input: UserMessage["content"] = resume
+        ? `${interrupted}\n\n状態を確認して、前の依頼を続けてください。`
+        : images.length
+          ? [{ type: "text", text: this.redact(text) }, ...images]
+          : this.redact(text);
       const pi = await this.pi(conversation);
       if (starting)
         await pi.configure(
@@ -701,9 +768,7 @@ export class AgentService {
             throw new AppError(413, "入力の保存上限に達しました");
           await pi.submit(tx, {
             type: "input",
-            content: resume
-              ? `${interrupted}\n\n状態を確認して、前の依頼を続けてください。`
-              : this.redact(text),
+            content: input,
             whenBusy: "steer",
             requestId,
           });
@@ -929,6 +994,26 @@ export class AgentService {
       return { path };
     });
   }
+  async image(
+    id: string,
+    entryId: number,
+    messageIndex: number,
+    blockIndex: number,
+  ) {
+    const pi = await this.pi(await this.conversation(id));
+    const entries = await pi.entries(
+      { minEntryId: entryId as EntryId, maxEntryId: entryId as EntryId },
+      1,
+      undefined,
+      ctx,
+    );
+    const content = entries.items[0]?.model?.[messageIndex]?.content;
+    const block = Array.isArray(content) ? content[blockIndex] : undefined;
+    if (block?.type !== "image") throw new AppError(404, "画像がありません");
+    const bytes = Buffer.from(block.data, "base64");
+    const { mimeType } = await validateImage(bytes, block.mimeType);
+    return { bytes, mimeType };
+  }
   async view(id: string, cursor?: Cursor) {
     const conversation = await this.conversation(id),
       pi = await this.pi(conversation),
@@ -936,7 +1021,7 @@ export class AgentService {
     const transcript = entries.items.map((entry) => ({
       id: entry.id,
       messages: (entry.model ?? [])
-        .map((message) => ({
+        .map((message, messageIndex) => ({
           role: message.role,
           isError: message.role === "toolResult" ? message.isError : false,
           toolName: message.role === "toolResult" ? message.toolName : null,
@@ -953,6 +1038,18 @@ export class AgentService {
                     ),
                   }))
               : [],
+          images:
+            typeof message.content === "string"
+              ? []
+              : message.content.flatMap((block, blockIndex) =>
+                  block.type === "image"
+                    ? [
+                        {
+                          url: `/api/conversations/${id}/images?entry=${entry.id}&message=${messageIndex}&block=${blockIndex}`,
+                        },
+                      ]
+                    : [],
+                ),
           content:
             typeof message.content === "string"
               ? message.content

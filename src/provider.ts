@@ -60,23 +60,43 @@ export function guardedProvider(
     ...provider,
     stream: (model, context, options) =>
       guarded(
-        () =>
-          provider.stream(
+        () => {
+          if (
+            !model.input.includes("image") &&
+            context.messages.some(
+              (message) =>
+                Array.isArray(message.content) &&
+                message.content.some((block) => block.type === "image"),
+            )
+          )
+            throw new Error("Image input is not supported");
+          return provider.stream(
             model,
             context,
             Object.assign({}, options, { maxRetries: 0, maxTokens: 8192 }),
-          ),
+          );
+        },
         options?.sessionId,
         model.id,
       ),
     streamSimple: (model, context, options) =>
       guarded(
-        () =>
-          provider.streamSimple(
+        () => {
+          if (
+            !model.input.includes("image") &&
+            context.messages.some(
+              (message) =>
+                Array.isArray(message.content) &&
+                message.content.some((block) => block.type === "image"),
+            )
+          )
+            throw new Error("Image input is not supported");
+          return provider.streamSimple(
             model,
             context,
             Object.assign({}, options, { maxRetries: 0, maxTokens: 8192 }),
-          ),
+          );
+        },
         options?.sessionId,
         model.id,
       ),
