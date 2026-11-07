@@ -30,11 +30,23 @@ test("connection tests use the real provider model independently of the injected
     body: Record<string, unknown>;
   }[] = [];
   let reject = false;
+  let catalogStatus = 200;
+  let catalog = [{ slug: "gpt-6.1-sol", visibility: "list" }];
+  let streamFailure = "";
   t.mock.method(
     globalThis,
     "fetch",
     async (input: string | URL | Request, init?: RequestInit) => {
       const request = new Request(input, init);
+      if (request.url === "https://api.openai.com/v1/models") {
+        assert.equal(request.method, "GET");
+        assert.equal(
+          request.headers.get("authorization"),
+          "Bearer fixture-oauth-access",
+        );
+        assert.equal(request.redirect, "error");
+        return Response.json({ models: catalog }, { status: catalogStatus });
+      }
       requests.push({
         url: request.url,
         key: request.headers.get("authorization"),
@@ -43,9 +55,17 @@ test("connection tests use the real provider model independently of the injected
       if (reject)
         return Response.json(
           {
-            error: { message: "fixture-denied", type: "authentication_error" },
+            error: {
+              message: "fixture-oauth-access sk-fixture-api-key",
+              type: "authentication_error",
+            },
           },
           { status: 401 },
+        );
+      if (streamFailure)
+        return new Response(
+          `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { code: streamFailure, message: "fixture-oauth-access" } } })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
         );
       const event = {
         type: "response.completed",
@@ -103,7 +123,10 @@ test("connection tests use the real provider model independently of the injected
       assert.equal(requests.length, before + 1);
       const request = requests.at(-1)!;
       assert.equal(request.url, "https://api.openai.com/v1/responses");
-      assert.equal(request.body.model, expectedModel);
+      assert.equal(
+        request.body.model,
+        auth === "oauth" ? "gpt-6.1-sol" : expectedModel,
+      );
       assert.equal(
         request.key,
         auth === "oauth"
@@ -116,13 +139,43 @@ test("connection tests use the real provider model independently of the injected
       assert.ok(!JSON.stringify(result).includes("sk-fixture"));
       reject = true;
       const failed = await f.service.testModel(id);
-      assert.equal(failed.models[0]!.status, "接続失敗");
+      assert.equal(failed.models[0]!.status, "接続失敗（HTTP 401）");
+      assert.ok(!JSON.stringify(failed).includes("fixture-oauth"));
+      assert.ok(!JSON.stringify(failed).includes("sk-fixture"));
       assert.equal(
         requests.length,
         before + 2,
         "do not retry a failed connection test",
       );
       reject = false;
+      if (auth === "oauth") {
+        const dispatched = requests.length;
+        catalogStatus = 403;
+        assert.equal(
+          (await f.service.testModel(id)).models[0]!.status,
+          "接続失敗（HTTP 403）",
+        );
+        catalogStatus = 200;
+        catalog = [
+          { slug: "gpt-6.1-sol", visibility: "hidden" },
+          { slug: "unknown-fixture-model", visibility: "list" },
+        ];
+        assert.equal(
+          (await f.service.testModel(id)).models[0]!.status,
+          "利用できるモデルがありません",
+        );
+        assert.equal(
+          requests.length,
+          dispatched,
+          "do not infer after an invalid model catalog",
+        );
+        catalog = [{ slug: "gpt-6.1-sol", visibility: "list" }];
+        streamFailure = "subscription_sharing_usage_limit_exceeded";
+        const limited = await f.service.testModel(id);
+        assert.equal(limited.models[0]!.status, "利用上限");
+        assert.ok(!JSON.stringify(limited).includes("fixture-oauth"));
+        streamFailure = "";
+      }
     }
   } finally {
     await f.service.close();

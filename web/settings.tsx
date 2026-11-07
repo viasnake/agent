@@ -561,13 +561,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
                                     { confirmPaid: true },
                                   );
                                   accept(result);
-                                  const failed =
+                                  const status =
                                     result.models.find((m) => m.id === model.id)
-                                      ?.status !== "接続成功";
-                                  notify(
-                                    failed ? "接続失敗" : "接続成功",
-                                    failed,
-                                  );
+                                      ?.status ?? "接続失敗";
+                                  const failed = status !== "接続成功";
+                                  notify(status, failed);
                                 });
                             }}
                           >

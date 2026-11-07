@@ -11,7 +11,12 @@ import type {
   UserMessage,
 } from "@earendil-works/pi-ai";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { modelCatalogs, modelProvider } from "./model-providers.js";
+import {
+  chatgptTestModel,
+  modelCatalogs,
+  modelProvider,
+  modelTestFailure,
+} from "./model-providers.js";
 import {
   imageMime,
   validateImage,
@@ -458,7 +463,7 @@ export class AgentService {
     try {
       // Connection tests use the configured provider, never an injected conversation model.
       const provider = modelProvider(model);
-      const modelId = model.model ?? provider.getModels()[0]?.id;
+      let modelId = model.model ?? provider.getModels()[0]?.id;
       if (!modelId) throw new Error("No model available");
       if (this.options.modelTest)
         await this.options.modelTest(
@@ -476,6 +481,9 @@ export class AgentService {
           },
         });
         models.setProvider(provider);
+        const signal = AbortSignal.timeout(30000);
+        if (model.provider === "openai" && model.auth === "oauth")
+          modelId = await chatgptTestModel(models, signal, model.model);
         const selected = models.getModel(model.provider, modelId);
         if (!selected) throw new Error("Unknown model");
         const result = await models.completeSimple(
@@ -485,14 +493,18 @@ export class AgentService {
               { role: "user", content: "Reply OK.", timestamp: Date.now() },
             ],
           },
-          { maxTokens: 32, signal: AbortSignal.timeout(30000), maxRetries: 0 },
+          { maxTokens: 32, signal, maxRetries: 0 },
         );
         if (result.stopReason === "error" || result.stopReason === "aborted")
-          throw new Error("Model unavailable");
+          throw new Error(result.errorMessage ?? "Model unavailable");
+        if (result.stopReason !== "stop") throw new AppError(502, "応答未完了");
       }
       this.modelStatuses.set(`${id}:${model.authVersion ?? ""}`, "接続成功");
-    } catch {
-      this.modelStatuses.set(`${id}:${model.authVersion ?? ""}`, "接続失敗");
+    } catch (error) {
+      this.modelStatuses.set(
+        `${id}:${model.authVersion ?? ""}`,
+        modelTestFailure(error),
+      );
     }
     return this.management();
   }

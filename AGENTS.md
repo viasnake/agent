@@ -125,6 +125,10 @@ pause dismissal on keyboard focus and keep essential connection state visible.
 Starting ChatGPT authorization saves edited settings first; deleting a connection
 removes its stored credentials while retaining conversations and their selections.
 A model connection test requires explicit inference/usage confirmation.
+ChatGPT tests fetch the account's visible model list and intersect it with Pi's
+catalog before inference; never assume the bundled catalog's first model is granted.
+Keep model-list fetches bounded and redirect-free. Show short classified test errors,
+never raw upstream messages or credential-bearing response bodies.
 OpenAI API-key and ChatGPT OAuth are separate explicit selections: never fall back
 between billing sources or to ambient credentials. Persist the installation UUID,
 access/refresh rotation and expiry under control ownership; serialize refresh and
