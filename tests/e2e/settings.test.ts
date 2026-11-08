@@ -6,6 +6,22 @@ import { chromium, type Page } from "playwright";
 import { fixture, call, answer, until } from "../support.js";
 import { createServer } from "../../src/server.js";
 import { mcpToolName } from "../../src/tools.js";
+async function saveSettings(page: Page) {
+  // A previous success toast is not evidence that this save has completed.
+  const dismiss = page.getByRole("button", { name: "通知を閉じる" });
+  if (await dismiss.isVisible()) await dismiss.click();
+  const response = page.waitForResponse(
+    (response) =>
+      response.request().method() === "PUT" &&
+      new URL(response.url()).pathname === "/api/settings",
+  );
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  assert.equal((await response).status(), 200);
+  await page
+    .locator(".notification")
+    .filter({ hasText: "保存しました。" })
+    .waitFor();
+}
 async function assertDropdowns(page: Page) {
   const controls = await page
     .locator(".settings-page select")
@@ -108,17 +124,13 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page
       .getByLabel("API キー", { exact: true })
       .fill("browser-dummy-key");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .locator(".notification")
-      .filter({ hasText: "保存しました。" })
-      .waitFor();
+    await saveSettings(page);
     assert.equal(
       await page.getByLabel("API キー", { exact: true }).inputValue(),
       "••••••••",
     );
     await page.getByLabel("API キー", { exact: true }).fill("");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await saveSettings(page);
     await page.getByText("API キー未登録", { exact: true }).waitFor();
     assert.equal(f.service.management().models.length, 1);
     assert.equal(f.service.management().models[0]!.hasKey, false);
@@ -205,11 +217,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page
       .getByLabel("API キー", { exact: true })
       .fill("browser-replaced-key");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .locator(".notification")
-      .filter({ hasText: "保存しました。" })
-      .waitFor();
+    await saveSettings(page);
     assert.equal(f.service.management().models[0]!.model, undefined);
     await page.locator(".settings-disclosure > summary").first().click();
     assert.equal(
@@ -260,11 +268,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page
       .getByLabel("環境変数の値 1", { exact: true })
       .fill("browser-stdio-secret");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .locator(".notification")
-      .filter({ hasText: "保存しました。" })
-      .waitFor();
+    await saveSettings(page);
     assert.match(
       await page.locator(".settings-disclosure > summary").last().innerText(),
       /Fixture/,
@@ -280,11 +284,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page
       .getByLabel("環境変数の値 2", { exact: true })
       .fill("extra-value");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .locator(".notification")
-      .filter({ hasText: "保存しました。" })
-      .waitFor();
+    await saveSettings(page);
     assert.equal(
       f.service.settings.snapshot().mcp[0]!.env!.FIXTURE_KEY,
       "browser-stdio-secret",
@@ -292,11 +292,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page
       .getByRole("button", { name: "環境変数 2 を削除", exact: true })
       .click();
-    await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .locator(".notification")
-      .filter({ hasText: "保存しました。" })
-      .waitFor();
+    await saveSettings(page);
     assert.equal(f.service.settings.snapshot().mcp[0]!.env!.EXTRA, undefined);
     await page.getByRole("button", { name: "テスト", exact: true }).click();
     await page.getByText("接続済み", { exact: true }).first().waitFor();
@@ -312,11 +308,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .getByLabel("共通指示", { exact: true })
       .fill("Keep replies short.");
     await page.getByLabel("モデル呼び出し上限").fill("5");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
-    await page
-      .locator(".notification")
-      .filter({ hasText: "保存しました。" })
-      .waitFor();
+    await saveSettings(page);
     await mkdir("test-results", { recursive: true });
     await page.screenshot({ path: "test-results/settings-light.png" });
     await page.emulateMedia({ colorScheme: "dark" });
