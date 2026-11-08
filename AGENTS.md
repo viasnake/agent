@@ -1,211 +1,217 @@
 # Repository guidance
 
-## Scope and documentation
+## Product and scope
 
-This repository is a local terminal agent for coding, research, and writing.
-Use Japanese for user-facing communication and README usage instructions; use
-English for code, comments, commits, and this file.
+This is a single-user, web-accessible Pi Durable application on prepared Ubuntu
+Server 26.04 with systemd. The application has a thin TypeScript HTTP service,
+Pi Durable 1.5.0, SQLite and separate control/work users. Machine provisioning,
+virtualization, disks, OS initialization and host networking belong outside this
+repository. Agent does not depend on or invoke a VM manager, including Devbox.
+The unit of use is a conversation and its working directory. An answered
+conversation accepts more input. At most one conversation executes; other
+execution requests receive busy, without a host FIFO or scheduler.
 
-Keep documentation to `README.md` for usage and `AGENTS.md` for development.
-Keep executable configuration examples in `examples/`. Do not add a `docs/`
-tree, design records, roadmaps, progress reports, or historical test results.
-Explain non-obvious implementation constraints beside the code; use commits
-and pull requests for change history. Update usage instructions when a command,
-installation step, or user-visible limitation changes.
+Do not add a host daemon, VM manager, automatic host startup, Proxmox,
+Firecracker, distributed workers, workflow engine or plugin management system.
+Do not add job classifications, service-specific connectors or ledgers, fixed
+output formats, artifact registration/versioning, or validation/completion gates.
+A response ending is not proof that its contents are correct. Use ordinary
+CLI/API/scripts and configured MCP tools for new kinds of work.
 
-Inspect the worktree before editing and preserve unrelated changes. Use
-short-lived `codex/<type>/<description>` branches and Conventional Commits.
-Use `.github/pull_request_template.md` for pull requests. Keep changes and
-validation scoped to their purpose; do not commit generated output, credentials,
-machine-local state, or live provider responses.
+## Work and delivery
 
-## Setup and verification
+Inspect the worktree and preserve unrelated changes, user data and Git history.
+Never delete or automatically convert legacy databases or work directories.
+The current database is control/conversations-v1.sqlite; work is under
+work/conversations/. The previous state.sqlite and work/jobs/ remain untouched.
 
-Use Node.js 24 and npm for CI parity. Linux verification also requires Git,
-Python 3, Bubblewrap, and tmux. On Ubuntu, install the test prerequisites with
-`sudo apt-get install bubblewrap tmux python3` after updating the package index.
+Use Japanese for UI and README, English for code, comments and commits. Keep
+maintained prose in README.md and AGENTS.md; executable examples in examples/.
+Do not add a docs tree, design records, roadmaps or historical/progress reports.
+Use short-lived codex/type/description branches, Conventional Commits and
+.github/pull_request_template.md. Update the existing unmerged PR when working
+on it. No direct master push, shared-history rewriting, merge or release without
+explicit authorization. Do not commit credentials, machine state, dependencies,
+generated output or live provider responses.
+
+## Implementation boundaries
+
+- src/service.ts and src/state.ts: conversation metadata in a Pi Document,
+  atomic input admission, one-active-conversation gate and interruption handling.
+- src/tools.ts: relay unmodified Pi read/write/edit/bash definitions to the work
+  UID; expose tools enumerated by configured MCP servers.
+- src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
+  official MCP client and bounded attachment/output transfers.
+- src/provider.ts: model dispatch limit and active-conversation binding.
+- src/model-providers.ts and src/bedrock.ts: native model catalogs and provider
+  connections. Bind Vertex project/location and Bedrock region/profile explicitly;
+  Vertex/Bedrock catalog reads must not probe external credential chains or call inference. Bedrock's
+  AWS client uses one attempt, with complete stream/tool/usage validation.
+- src/images.ts: bounded static-image decoding without resizing or recompression.
+- src/model-auth.ts: browser-session adapter to Pi OpenAI OAuth; keep the SDK
+  callback loopback-only, with explicit full-URL submission for forwarded connections.
+  OAuth state/PKCE/exchange/refresh belong to Pi, not a custom inference client.
+- src/settings.ts: atomic mode-0600 control-owned settings, private credentials
+  and secret-free projections. Import config.yaml only when settings-v1.json is
+  absent; preserve the source and old credential files. Web-managed fields have
+  one source of truth thereafter. Server/disk settings remain in config.yaml.
+- src/mcp.ts and src/remote-http.ts: official Streamable HTTP/OAuth client and
+  bounded HTTP(S) fetch with DNS address pinning. No custom MCP protocol.
+- src/server.ts and web/: local browser sessions, conversation projections and SSE.
+  Pi remains the only conversation/execution owner; the React UI adapts the
+  existing API without client-side tool execution or cloud persistence. Bundle
+  browser dependencies locally with esbuild. Use Bootstrap 6 components and
+  semantic color variables for controls and custom surfaces, including hover,
+  focus and disabled states. Verify both light and dark system preferences.
+  Keep Markdown HTML and remote images disabled; allow only safe external links
+  and scoped output downloads. Keep UI copy to labels, status and actionable
+  errors; avoid explanatory prose. Keep interruption and history-load failures in
+  the conversation transcript, with a local retry for failed loads. Reselecting
+  a conversation preserves its draft and subscription; ignore stale navigation
+  requests and never let an initial HTTP load overwrite a newer SSE snapshot.
+- install/: application installation/update, dedicated users, approved storage,
+  systemd units, the fixed work-user launcher and application egress rules.
+  Never format, mount, partition or create storage here. Record the actual users
+  and persistent mount in root-owned /etc/agent/installation.json. Refuse missing
+  or changed mounts, shared identities, unsafe ownership and unexpected existing
+  installations. Updates require a stopped service and preserve configuration,
+  credentials and work files; keep the previous application/runtime as backups.
+  Use Ubuntu's resolver configuration without modifying it; allow only its DNS
+  addresses on TCP/UDP 53. Apply nftables atomically and fail closed on errors.
+
+Inspect installed SDK exports/declarations before changing integration code.
+Use public Pi APIs. Keep inputs and their metadata in the same transaction;
+transaction drafts must not escape commits. Pi owns its tasks, inbox, history
+and tool replay policy. Do not implement a second workflow model or directly edit
+SDK tables. Execution tools remain replay-unsafe. Reopen never resumes inference
+or commands without explicit user input; preserve unapplied input when aborting.
+A failed storage session must stop and reopen, not continue accepting input.
+
+## Safety
+
+Keep the DB, model credentials and service installation separate from arbitrary
+work code. No project code or executable MCP server runs as agent-control.
+The fixed root-owned sudo launcher permits only agent-work, no arguments and
+no SETENV. Apply NoNewPrivileges after the UID switch. Build a clean work
+environment; never inherit control credentials, host homes or SSH agents.
+Never silently fall back when mount/UUID, UID, firewall or cleanup is unavailable.
+Retain systemd control-group cleanup and bounded tool duration/output.
+
+Explicitly configured work-side CLI/MCP credentials delegate their authority to
+the agent. Do not claim prompt restrictions or UI approval completely constrain
+a freely callable authenticated shell. Do not infer credentials, billing,
+company access or disclosure permission. stdio MCP uses the work UID and only
+explicitly supplied environment values. Remote MCP and OAuth credentials stay
+on the control side; never pass them to the worker. Use the official MCP SDK
+for transport, discovery, PKCE, registration and refresh. Keep login state
+single-use, expiring and bound to a callback cookie and exact configured Host.
+Only the OAuth callback cookie may use SameSite=Lax; API sessions stay Strict.
+Allow unauthenticated HTTP only to the exact registered origin; credentials and
+OAuth require HTTPS. Reject redirects, resolve every connection and pin the checked address.
+Reject loopback, link-local, metadata and special addresses even with a grant.
+Registering an MCP URL grants that exact host access to private/company networks;
+discovered internal hosts do not inherit this permission. Preserve existing grants
+without exposing a separate host-list editor. Consult /etc/agent/protected-cidrs.nft;
+missing network policy fails closed.
+
+Store the selected credential configuration ID and actual model ID in each conversation
+through Pi Documents. Settings entries manage provider credentials independently
+of model choice; keep legacy per-entry model values readable without rewriting data.
+Only idle/interrupted conversations can change it; never silently replace a deleted
+selection with another model. Keep legacy defaultModel only as the initial selection.
+Expose connection-specific chat models in the conversation UI. For OpenAI API-key
+and ChatGPT OAuth, intersect the account's model metadata with Pi's supported chat
+catalog; never append hidden, unsupported or legacy selections to that result.
+Model-list reads may fetch bounded OpenAI metadata and use Pi credential refresh,
+but never inference. Cache briefly per credential version, isolate failures and
+never fall back to the full catalog on failure. Other providers retain Pi catalogs;
+do not probe their external credential chains during catalog reads. Listing must
+not change a conversation's stored model selection.
+Apply settings at the next idle execution admission. Do not mutate a running
+provider, tools or budgets. Install/uninstall server extensions using the Pi
+Registry; isolate each connection failure and never replay an ambiguous tool
+mutation. Connection tests cannot run worker cleanup during an active tool.
+OAuth rotation uses atomic private writes; stale edits/callbacks must not restore
+revoked credentials. GET, tool results and errors must not disclose secrets.
+Use short UI labels (Test, stdio, arguments) and named MCP cards with enabled first.
+Environment variables use name/value rows; unchanged secret values stay server-side.
+A blank edited key deletes that credential, not its model or conversation.
+Keep credential-delegation rules in this guidance, not helper prose in forms.
+Use a searchable model picker in the conversation composer;
+persist selections server-side and retain keyboard navigation and focus restoration.
+Model and MCP settings use collapsible sections. Do not show application branding.
+Transient results use one dismissible bottom-right notification with timed dismissal;
+pause dismissal on keyboard focus and keep essential connection state visible.
+Starting ChatGPT authorization saves edited settings first; deleting a connection
+removes its stored credentials while retaining conversations and their selections.
+A model connection test requires explicit inference/usage confirmation.
+ChatGPT tests fetch the account's visible model list and intersect it with Pi's
+catalog before inference; never assume the bundled catalog's first model is granted.
+Keep model-list fetches bounded and redirect-free. Show short classified test errors,
+never raw upstream messages or credential-bearing response bodies.
+OpenAI API-key and ChatGPT OAuth are separate explicit selections: never fall back
+between billing sources or to ambient credentials. Persist the installation UUID,
+access/refresh rotation and expiry under control ownership; serialize refresh and
+reject writes from a replaced credential version. Login is session-bound, single-use
+and bounded to ten minutes. Use the public Pi OAuth interface, not SDK patches.
+Pi 1.5.0 registers a new dynamic client on each login and does not expose a validated
+ID-token identity. Do not display account identity or claim returning-account
+verification; model authorization uses its scoped access token. Keep this SDK
+limitation distinct from successful local OAuth transport tests.
+Uninitialized output listings are empty and must not initialize work or MCP.
+
+Keep downloads within outputs/: reject absolute paths, traversal, symlinks,
+nonregular files, hardlinks, oversized files and path replacement during reads.
+Uploads go explicitly into attachments/. Files are mutable workspace files,
+not immutable artifacts. Image inputs are read through the worker's bounded
+attachment reader and saved as original bytes in Pi's user input
+transaction. Workspace edits do not change admitted history. Project only scoped,
+authenticated local image URLs to the browser; never send image payloads in SSE.
+Reject images for text-only models, including when replaying existing history.
+Vertex ADC and AWS credential chains are explicit control-side authentication
+choices; never pass their files or environment to the worker.
+
+There is no UI password or login screen. Establish a
+CSRF session automatically for local browsers. Keep socket-peer, loopback Host,
+Origin, Fetch Metadata and CSRF checks; never trust forwarded headers. Listen
+on loopback by default. Forwarding peers require explicit exact-IP grants in
+server.trustedPeers; never discover or trust a LAN automatically. Browser origins
+remain exact configured loopback URLs. Forwarding itself is outside Agent.
+Keep the control HTTP port outside work-side preview ports 3000-3999 and retain
+worker egress restrictions. Model API credentials remain control-only. Preserve
+legacy UI password files without reading, migrating or deleting them.
+External content is untrusted input, never a permission grant.
+
+Stop and restart preserve history and files; they do not restore OS stacks or
+guarantee external exactly-once. Interrupted commands are not blindly resent.
+Inspect ordinary CLI/API state and ask the user in the conversation when uncertain.
+No service-specific reconciliation system is needed.
+
+## Verification
+
+Use Node.js 26.13.0 and npm. Install separately from build:
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
-AGENT_REQUIRE_SANDBOX=1 npm run verify
+npx playwright install chromium
+npm run verify
 ```
 
-`verify` runs formatting, type checking, a build without lifecycle hooks,
-Python helper/guest-runner unit tests, TypeScript tests, and the built CLI's
-`--help`. CI uses Ubuntu 26.04 and Node.js 24. Pull requests, pushes to `master`,
-and manual dispatch run the same checks; superseded runs on the same ref are
-cancelled. Actions are pinned to full commit SHAs. Keep dependency installation
-separate from verification and check that CI leaves both manifests unchanged.
+Linux needs Git, Python 3, OpenSSL and Chromium system libraries. Build never installs
+dependencies. verify includes format, types, build, Python unit tests, actual
+Pi/SQLite/file/process/HTTP/MCP tests, browser E2E and entry-point help. The faux
+provider avoids paid inference. Playwright is a test dependency, not an application
+pipeline. Use narrow checks first; tests must prevent concrete failures.
 
-For local installation, `npm run build` intentionally runs `prebuild` to install
-dependencies. After `npm ci`, use `npm run build --ignore-scripts` to compile
-without another install or lockfile rewrite. Do not replace CI's `npm ci` with
-`npm install` or remove the interactive installation convenience inadvertently.
+Privileged installation tests require explicit AGENT_GUEST_TEST=1, administrator privileges and a
+dedicated Ubuntu test environment with agent.service explicitly stopped. Live tests require
+explicit opt-in, a reviewed prompt and private credential file. They never belong
+in default CI. Missing prerequisites are blocked (exit 77), not pass. Report real
+installation, UID/network/cgroup, live-service and model-quality acceptance
+separately. Nonprivileged same-UID fixtures do not establish isolation. Keep
+generated evidence in ignored test-results/.
 
-Run narrow checks first when investigating a change:
-
-- `npm run check`: TypeScript validation, including tests.
-- `npm run format:check`: Prettier validation. `npm run format` rewrites files;
-  prefer formatting only changed files to avoid unrelated edits.
-- `npm run test:firecracker`: Python unit tests; no KVM or privileged setup.
-- `npm test`: compile to `.test-dist` and run the Node test suite.
-- After compilation, `node --test --experimental-test-isolation=none --test-concurrency=1 .test-dist/tests/<name>.test.js`
-  runs a selected TypeScript test file.
-- `git diff --check`: whitespace validation before delivery.
-
-The Node tests run sequentially because provider fixtures replace global
-`fetch`. Do not parallelize these fixtures without isolating their state.
-Tests use synthetic provider responses, temporary application homes, local
-servers, and PTY/tmux sessions. They must not use real credentials or paid
-inference. `AGENT_REQUIRE_SANDBOX=1` makes unavailable Bubblewrap isolation a
-failure; without it, relevant integration tests may skip. Non-Linux execution
-uses the disabled sandbox backend and does not establish Linux isolation.
-Restricted environments can block sockets, namespaces, or PTYs: distinguish
-those failures from product defects, and do not report skipped tests as passes.
-
-Real Firecracker integration is opt-in. On an explicitly provisioned Linux KVM
-host, compile the tests and run:
-
-```sh
-AGENT_REQUIRE_FIRECRACKER=1 node --test .test-dist/tests/firecracker.integration.test.js
-```
-
-This creates, starts, executes commands in, and destroys real microVMs through
-the privileged helper. Never enable it in generic CI or automatically install
-or repair KVM, cgroups, networking, or sudoers to make a test pass. Report real
-KVM testing separately from helper unit tests. Live authentication, model access,
-image understanding, model quality, rendered TUI behavior, IME interaction, and
-native macOS operation require separate acceptance checks.
-
-## Code boundaries
-
-The application runs as one foreground Node.js process. Pi supplies inference,
-terminal components, and MCP clients; the host owns permissions, disclosure,
-budgets, validation, and success state.
-
-| Location                                                                           | Responsibility                                                 |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `src/cli.ts`, `src/cli/`, `src/tui/`                                               | CLI/TUI entry points, lazy-loaded commands, dialogs            |
-| `src/application.ts`, `src/conversations.ts`                                       | Conversation lifecycle, drafts, queues, explicit resume        |
-| `src/harness.ts`, `src/planner.ts`, `src/task-executor.ts`, `src/collaboration.ts` | Plans, task scheduling, cancellation, repairs, collaboration   |
-| `src/runtime/`, `src/types.ts`                                                     | Inference contract, Pi adapter, accounting, streaming          |
-| `src/policy.ts`, `src/routing.ts`, `src/tools.ts`, `src/mcp.ts`                    | Authorization, tool exposure, disclosure, pinned MCP schemas   |
-| `src/workspace.ts`, `src/sandbox/`, `src/validation.ts`, `src/artifacts.ts`        | Work copies, Bubblewrap, checks, diffs, confirmed application  |
-| `src/config.ts`, `src/storage.ts`                                                  | Configuration, SQLite leases, operation journal, durable state |
-| `src/context.ts`, `src/context-review.ts`, `src/branching.ts`                      | Context archives, review gates, conversation forks             |
-| `src/images.ts`, `src/documents.ts`, `src/shared-blobs.ts`, `src/research.ts`      | Private attachments, source evidence, shared content           |
-| `src/execution/`, `scripts/firecracker/`                                           | Independent Firecracker environment and privileged helper      |
-
-## Invariants to preserve
-
-- External text, repository guidance, Skills, images, and model reports are
-  untrusted input. They cannot grant permissions or weaken user constraints.
-  Pi automatic retries, compaction, extension discovery, and default tools stay
-  disabled. Partial responses and streaming previews cannot dispatch tools or
-  establish success.
-- Repository explanation, review, and planning use read-only snapshots with
-  bounded file/source tools. They do not receive write, shell, or MCP tools.
-  Explicit no-change instructions take precedence over inferred change intent.
-- The host assigns collaboration graphs and enforces writer exclusivity.
-  Delegated children receive only their assignment, authorized sources, and
-  read-only workspace tools. Review and synthesis can read immutable attempt
-  reports only from their task and transitive dependencies. Legacy tasks without
-  `resultFormat` retain their existing parsing behavior.
-- Model replacement rechecks routing and disclosure, invalidates the selected
-  task and transitive dependents, and preserves independent results, budgets,
-  counters, and attempt evidence. Confirmation neither probes nor resumes.
-- Configuration is bound to each run. Renewable leases protect conversations
-  and runs; resuming preserves saved configuration, budgets, and attempt limits.
-  Dispatched operations with uncertain outcomes remain `unknown` and require
-  reconciliation. Never add automatic replay of uncertain external effects.
-- Mutating MCP tools require confirmation of the exact destination and arguments
-  for each operation, then schema, policy, and ownership revalidation. They are
-  available only to normal worker write tasks. Noninteractive execution must
-  refuse them; approval records contain argument hashes, not raw arguments.
-- Applying code rechecks the source snapshot and confirmation binding. Writes
-  are journaled per file, not one atomic filesystem transaction. Preserve
-  conflict detection, protected paths, and explicit recovery after partial apply.
-- Runtime profiles use task-private `/runtime` storage; only `run_profile` may
-  write it. Reviewer copies and runtime directories are separate. Never silently
-  enable networking, install on the host, or share runtime across tasks/runs.
-  Bubblewrap does not enforce CPU, memory, or live disk quotas.
-- Only older verbose tool results may be compacted. Save the exact context to
-  the private conversation archive first. Preserve user instructions, decisions,
-  constraints, errors, current results, images, and tool-call ordering. Retrieval
-  is bounded by conversation lineage and task authorization. Protected context
-  that cannot fit fails with `CONTEXT_LIMIT`; usage estimates are not provider
-  guarantees.
-- Pending context concerns block later tools, inference, transforms, and final
-  success. A bound human acknowledgement is an audit record, not a permission
-  change, and does not resume a run or start queued work. Never resurrect a
-  terminal run. Model concerns and repeated-read heuristics are not semantic proof.
-- Attachments and image derivatives are immutable private snapshots. Verify hashes
-  and metadata before reuse; persist references rather than payloads in ordinary
-  events. Native provider histories and context archives may contain payloads and
-  must remain private. Source-family exclusion must cover related selections,
-  PDF images, forks, and subsequent context access without claiming retroactive
-  deletion of sent or generated text. Image capability and disclosure must hold
-  for every eligible role and fallback; never silently resize, OCR, or drop input.
-- Search snippets are discovery records, not fetched evidence. Web access must
-  enforce allowed hosts, disclosure, public destinations, and redirect limits.
-  Citation syntax and stored checks do not prove a document's semantic quality.
-- History deletion removes metadata transactionally before physical cleanup.
-  Retain referenced data and uncertain objects; retry pending jobs only by explicit
-  selection. Shared blobs require database-reference and persistent-pin checks.
-  Backups are private archives, not runnable application homes; readers must
-  verify hashes and never replay saved operations or import credentials.
-
-## Inference adapter contract
-
-`Runtime` and `RuntimeRequest` in `src/types.ts` define application-owned types;
-`runRuntime` in `src/runtime/contract.ts` enforces the boundary. Adapters are
-trusted in-process code, not sandboxed plugins. Pi remains the production adapter;
-a replacement also needs transport tests, not just a compatible declaration.
-
-Declare contract version `1`, `messages-v1`, tool/image capabilities, and a
-versioned native-session format when persisting sessions. Honor the authorized
-model alias and its connection/profile; do not select another endpoint or model.
-Before every inference dispatch, await `transformContext` on the complete JSON
-context and use its result, then reserve usage via `beforeRequest`. Settle each
-reservation once with nonnegative reported usage or `null` for unknown values.
-Leave interrupted/uncertain requests unresolved; never invent zero usage.
-
-Use only supplied tools and schemas, await tool completion, and propagate aborts.
-Preserve exact verified image bytes, IDs, and order. Return final text only after
-a complete response and drained work; `close` releases resources. Failures use
-`AgentError` host codes. Do not swallow boundary failures, privately retry, warm
-caches, or report success after cancellation. The guard rejects missing or duplicate
-accounting, pending tools/requests, empty results, and late callbacks.
-
-`messages-v1` has ordered `messages` with `system`, `user`, `assistant`, `tool`,
-or `toolResult` roles. Preserve text/image blocks, call IDs, error flags, and opaque
-metadata. Translate other native formats at the adapter boundary; reject unknown
-roles. Register native session files only inside the supplied task session directory.
-An incompatible saved format fails before reading or invoking the adapter; never
-implicitly convert or discard it. Pi alone accepts legacy untagged Pi JSONL and
-tags new sessions `pi-jsonl-v1`. Model replacement clears both native-session
-fields while preserving host evidence. Keep saved-record additions optional where
-legacy records remain supported. Cover changes with runtime-contract, runtime,
-context, images, application, collaboration, and model-change tests as applicable.
-
-## Firecracker boundary
-
-Firecracker is an independent `ExecutionEnvironment`, not an
-`execution.backend` option. Do not route only shell commands into a VM while
-file tools still operate on a host workspace. The TUI, file tools, stdio MCP,
-conversation association, PTY, and validation have not moved into this environment.
-
-The agent stays unprivileged. Only the fixed administrator-installed helper may
-manage jailer, namespaces, cgroups, and disks. Reject arbitrary caller paths,
-binaries, UIDs, images, and jailer flags. Verify root ownership and asset digests,
-authorize the environment owner, and drop the VMM to its separate pool UID.
-Do not expose host credentials, the original repository, NIC/TAP, or a guest-initiated
-host service. Use bounded, authenticated vsock messages and verify readiness;
-unknown execution outcomes must fail closed without backend fallback.
-
-Keep per-environment and allocation locks, fixed disk inodes linked into the jail,
-authenticated guest sync before stopping, and cgroup cleanup. Do not mount or
-extract guest-modified disks on the host. Resource limits include VMM overhead
-in addition to guest RAM. Asset versions/checksums live in
-`scripts/firecracker/assets.sha256`; setup and use are in the README. Treat the
-pinned kernel/rootfs as compatibility fixtures, not hardened production images.
+CI has one Linux test job: Node tests, browser E2E and Python unit tests.
+Build only as a test prerequisite; keep formatting, standalone type/syntax
+checks and evidence uploads out of CI. README contains only setup, use,
+maintenance and local test commands.

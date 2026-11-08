@@ -1,0 +1,11 @@
+[Unit]
+Description=Personal agent work-user egress policy
+Before=agent.service
+After=network-pre.target
+RequiresMountsFor=@DATA_ROOT@
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/agent-preflight
+ExecStop=/usr/bin/rm -f /run/agent-egress.ready

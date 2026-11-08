@@ -1,4 +1,4 @@
-name: Verify
+name: Tests
 on:
   push:
     branches: [master]
@@ -10,22 +10,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  verify:
+  tests:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 26
+          node-version-file: .node-version
           cache: npm
-      - name: Install test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux python3
-      - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Verify formatting, types, build, tests, and CLI startup
-        run: npm run verify
-        env:
-          AGENT_REQUIRE_SANDBOX: "1"
-      - name: Check dependency manifests remain unchanged
-        run: git diff --exit-code -- package.json package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - name: Test
+        run: |
+          npm run build
+          npm test
+          npm run test:e2e
+          python3 -B -m unittest discover -s tests -p 'test_*.py'

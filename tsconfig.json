@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2023",
+    "jsx": "react-jsx",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
@@ -9,9 +10,10 @@
     "noUnusedParameters": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
+    "rootDir": ".",
     "outDir": "dist",
-    "sourceMap": true
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "web/**/*.ts", "web/**/*.tsx", "tests/**/*.ts"]
 }

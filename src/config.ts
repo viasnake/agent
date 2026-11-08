@@ -1,413 +1,114 @@
+import { readFile, realpath, stat } from "node:fs/promises";
+import { resolve } from "node:path";
+import { isIP } from "node:net";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readInstallation } from "./installation.js";
 import { z } from "zod";
-import { parse, stringify } from "yaml";
-import { defaultBackend, defaultHome } from "./platform.js";
-import { join, resolve } from "node:path";
-import { lstat, readFile, realpath } from "node:fs/promises";
-import { AgentError } from "./types.js";
-import {
-  canonical,
-  sha256,
-  privateDirectory,
-  atomicWrite,
-  within,
-} from "./util.js";
+import { parse } from "yaml";
+import { DEFAULT_LIMITS } from "./state.js";
 
-const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
-const envRef = z.string().regex(/^[A-Z][A-Z0-9_]*$/);
-const dataClass = z.enum(["public", "private", "restricted"]);
-const connection = z.strictObject({
-  type: z.enum([
-    "chatgpt",
-    "gemini",
-    "sarashina",
-    "compatible",
-    "local",
-    "clef",
+const limitShape = Object.fromEntries(
+  Object.entries(DEFAULT_LIMITS).map(([key, value]) => [
+    key,
+    z.number().int().positive().max(value).default(value),
   ]),
-  enabled: z.boolean().default(false),
-  account: z.string().min(1),
-  billing: z.enum(["subscription", "api", "beta", "local"]),
-  allowedData: z.array(dataClass).default(["public"]),
-  secretEnv: envRef.optional(),
-  endpoint: z.url().optional(),
-  accountEnv: envRef.optional(),
-  requestsPerMinute: z.number().int().positive().max(10000).default(60),
-  maxRequestUsd: z.number().nonnegative().max(1000).default(0),
-});
-const model = z.strictObject({
-  connection: name,
-  id: z.string().min(1).max(200),
-  roles: z.array(z.enum(["lead", "worker", "reviewer"])).min(1),
-  kinds: z.array(z.enum(["coding", "research", "writing", "chat"])).min(1),
-  tools: z.boolean().default(false),
-  images: z.boolean().optional(),
-  reasoning: z.boolean().optional(),
-  thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high"]).optional(),
-  contextWindow: z.number().int().min(2048).max(2_000_000).default(32000),
-  maxOutputTokens: z.number().int().min(256).max(128000).default(4096),
-  priority: z.number().int().default(0),
-});
-const mcp = z.strictObject({
-  transport: z.enum(["stdio", "http"]),
-  command: z.string().optional(),
-  args: z.array(z.string()).default([]),
-  commandSha256: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .optional(),
-  url: z.url().optional(),
-  allowedOrigins: z.array(z.url()).default([]),
-  env: z.record(envRef, envRef).default({}),
-  bearerEnv: envRef.optional(),
-  oauth: z.boolean().default(false),
-  allowedData: z.array(dataClass).default(["public"]),
-  local: z.boolean().default(false),
-  tools: z.record(
-    z.string().min(1),
-    z.strictObject({
-      schemaSha256: z.string().regex(/^[a-f0-9]{64}$/),
-      readOnly: z.boolean(),
-      effect: z.enum(["change", "publish", "delete", "dangerous"]).optional(),
-    }),
-  ),
-});
-export const configSchema = z.strictObject({
-  schemaVersion: z.literal(1),
-  retentionDays: z.number().int().min(1).max(3650).default(30),
-  connections: z.record(name, connection).default({}),
-  models: z.record(name, model).default({}),
-  defaults: z
-    .strictObject({
-      dataClass,
-      mode: z.enum(["single", "assisted", "reviewed"]).default("single"),
-    })
-    .default({ dataClass: "private", mode: "single" }),
-  limits: z
-    .strictObject({
-      maxRequests: z.number().int().min(1).max(1000).default(60),
-      maxApiUsd: z.number().nonnegative().max(10000).default(0),
-      maxSeconds: z.number().int().min(5).max(86400).default(1800),
-      maxAgents: z.number().int().min(1).max(3).default(3),
-      maxTasks: z.number().int().min(1).max(20).default(8),
-      maxRepairs: z.number().int().min(0).max(2).default(2),
-      maxInputBytes: z.number().int().min(1000).max(4_000_000).default(120000),
-      maxFileBytes: z
+);
+export const mcpServerSchema = z
+  .object({
+    name: z.string().min(1).max(100),
+    command: z.string().startsWith("/"),
+    args: z.array(z.string()).max(100).default([]),
+  })
+  .strict();
+const schema = z
+  .object({
+    schemaVersion: z.literal(2),
+    dataRoot: z
+      .string()
+      .regex(/^\/[a-zA-Z0-9_./-]+$/)
+      .refine((path) => resolve(path) === path && path !== "/"),
+    server: z.object({
+      host: z
+        .string()
+        .refine((value) => isIP(value) !== 0)
+        .default("127.0.0.1"),
+      trustedPeers: z
+        .array(z.string().refine((value) => isIP(value) !== 0))
+        .max(16)
+        .default([]),
+      // Work-side preview servers may use loopback ports 3000-3999.
+      port: z
         .number()
         .int()
-        .min(1000)
-        .max(10_000_000)
-        .default(1_000_000),
-      maxWorkspaceBytes: z
-        .number()
-        .int()
-        .min(1000)
-        .max(1_000_000_000)
-        .default(100_000_000),
-      requestTimeoutSeconds: z.number().int().min(1).max(1800).default(180),
-    })
-    .prefault({}),
-  execution: z
-    .strictObject({
-      backend: z.enum(["bubblewrap", "disabled"]).default(defaultBackend),
-      runtimePaths: z.array(z.string().startsWith("/")).default([]),
-      commandTimeoutSeconds: z.number().int().min(1).max(3600).default(120),
-      maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(64000),
-      profiles: z
-        .record(
-          name,
-          z.strictObject({
-            description: z.string().min(1).max(500),
-            command: z.string().min(1).max(8000),
-          }),
+        .min(1)
+        .max(65535)
+        .refine(
+          (port) => port < 3000 || port > 3999,
+          "Web port overlaps work-side preview ports",
         )
-        .optional(),
-    })
-    .prefault({}),
-  checks: z
-    .record(
-      name,
-      z.strictObject({
-        command: z.string().min(1).max(8000),
-        protectedPaths: z.array(z.string().min(1)).default([]),
-      }),
-    )
-    .default({}),
-  routing: z
-    .strictObject({
-      mode: z.enum(["rules", "shadow", "assisted"]).default("rules"),
-      classifier: name.optional(),
-    })
-    .prefault({}),
-  web: z
-    .strictObject({
-      allowedHosts: z.array(z.string().regex(/^[a-zA-Z0-9.-]+$/)).default([]),
-      allowedData: z.array(dataClass).default(["public"]),
-      search: z
-        .strictObject({
-          endpoint: z.url(),
-          queryParam: z
-            .string()
-            .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
-            .default("q"),
-        })
-        .optional(),
-    })
-    .prefault({}),
-  mcp: z.record(name, mcp).default({}),
-});
-export type Config = z.infer<typeof configSchema>;
-export type Connection = Config["connections"][string];
-export type ModelConfig = Config["models"][string];
-export interface Paths {
-  home: string;
-  config: string;
-  database: string;
-  runs: string;
-  checkpoints: string;
-  auth: string;
-  attachments: string;
-}
-export function paths(home?: string): Paths {
-  const root = resolve(home ?? process.env.AGENT_HOME ?? defaultHome());
-  return {
-    home: root,
-    config: join(root, "config.yaml"),
-    database: join(root, "state.sqlite"),
-    runs: join(root, "runs"),
-    checkpoints: join(root, "checkpoints"),
-    auth: join(root, "auth"),
-    attachments: join(root, "attachments"),
-  };
-}
-export function validateConfig(input: unknown): Config {
-  const parsed = configSchema.safeParse(input);
-  if (!parsed.success)
-    throw new AgentError(
-      "CONFIG",
-      parsed.error.issues
-        .map((i) => `${i.path.join(".")}: ${i.message}`)
-        .join("\n"),
+        .default(8080),
+      origins: z.array(z.string().url()).min(1),
+    }),
+    model: z
+      .object({
+        provider: z.literal("openai"),
+        id: z.string().min(1),
+        keyFile: z.string().startsWith("/"),
+        disclosureApproved: z.literal(true),
+      })
+      .nullable()
+      .default(null),
+    mcp: z.array(mcpServerSchema).max(10).default([]),
+    instructions: z.string().max(16000).default(""),
+    limits: z.object(limitShape).default(DEFAULT_LIMITS),
+  })
+  .strict();
+export type Config = z.infer<typeof schema> & { limits: typeof DEFAULT_LIMITS };
+export function isLocalOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    return (
+      url.origin === origin &&
+      ["http:", "https:"].includes(url.protocol) &&
+      ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) &&
+      !url.username &&
+      !url.password
     );
-  const config = parsed.data;
-  for (const [key, conn] of Object.entries(config.connections)) {
-    if (conn.type === "local" && conn.billing !== "local")
-      throw new AgentError(
-        "CONFIG",
-        `${key}: local connections require local billing`,
-      );
-    if (conn.type !== "local" && conn.billing === "local")
-      throw new AgentError(
-        "CONFIG",
-        `${key}: cloud connections cannot use local billing`,
-      );
-    if (conn.type === "chatgpt" && conn.billing !== "subscription")
-      throw new AgentError(
-        "CONFIG",
-        `${key}: ChatGPT requires subscription billing`,
-      );
-    if (
-      ["gemini", "compatible", "clef"].includes(conn.type) &&
-      conn.billing !== "api"
-    )
-      throw new AgentError(
-        "CONFIG",
-        `${key}: this provider requires explicit API billing authorization`,
-      );
-    if (conn.type === "sarashina" && !["api", "beta"].includes(conn.billing))
-      throw new AgentError(
-        "CONFIG",
-        `${key}: Sarashina requires beta or API billing`,
-      );
-    if (
-      conn.type === "sarashina" &&
-      conn.allowedData.some((c) => c !== "public")
-    )
-      throw new AgentError("CONFIG", `${key}: Sarashina beta is public-only`);
-    if (conn.type !== "local" && conn.allowedData.includes("restricted"))
-      throw new AgentError(
-        "CONFIG",
-        `${key}: restricted data requires a local connection`,
-      );
-    if (["compatible", "local"].includes(conn.type) && !conn.endpoint)
-      throw new AgentError("CONFIG", `${key}: endpoint required`);
-    if (conn.endpoint) {
-      if (["chatgpt", "gemini", "clef"].includes(conn.type))
-        throw new AgentError(
-          "CONFIG",
-          `${key}: this native provider uses its fixed official endpoint`,
-        );
-      const url = new URL(conn.endpoint);
-      if (url.username || url.password || url.search || url.hash)
-        throw new AgentError(
-          "CONFIG",
-          `${key}: endpoint must not contain credentials, query, or fragment`,
-        );
-      if (conn.type === "local") {
-        if (!["127.0.0.1", "[::1]"].includes(url.hostname))
-          throw new AgentError(
-            "CONFIG",
-            `${key}: local endpoint must use a loopback IP literal`,
-          );
-        if (!["http:", "https:"].includes(url.protocol))
-          throw new AgentError("CONFIG", `${key}: invalid local protocol`);
-      } else if (url.protocol !== "https:")
-        throw new AgentError(
-          "CONFIG",
-          `${key}: remote endpoints require HTTPS`,
-        );
-    }
+  } catch {
+    return false;
   }
-  for (const [key, value] of Object.entries(config.models)) {
-    const conn = config.connections[value.connection];
-    if (!conn)
-      throw new AgentError(
-        "CONFIG",
-        `${key}: unknown connection ${value.connection}`,
-      );
-    if (conn.type === "clef")
-      throw new AgentError(
-        "CONFIG",
-        `${key}: classifier cannot be used as an agent`,
-      );
-    if (value.thinkingLevel && value.thinkingLevel !== "off") {
-      if (
-        value.reasoning === false ||
-        (!["chatgpt", "gemini"].includes(conn.type) && value.reasoning !== true)
-      )
-        throw new AgentError(
-          "CONFIG",
-          `${key}: reasoning capability must be enabled before selecting a thinking level`,
-        );
-    }
-    if (conn.type === "sarashina" && value.maxOutputTokens > 8000)
-      throw new AgentError(
-        "CONFIG",
-        `${key}: Sarashina output limit is 8000 tokens`,
-      );
-  }
-  if (config.web.search) {
-    const endpoint = new URL(config.web.search.endpoint);
-    if (
-      endpoint.protocol !== "https:" ||
-      endpoint.username ||
-      endpoint.password ||
-      endpoint.hash ||
-      (endpoint.port && endpoint.port !== "443") ||
-      !config.web.allowedHosts.includes(endpoint.hostname)
-    )
-      throw new AgentError(
-        "CONFIG",
-        "web.search.endpoint must be HTTPS on an allowed host without credentials, query or fragment",
-      );
-    if (endpoint.search)
-      throw new AgentError(
-        "CONFIG",
-        "web.search.endpoint must not contain a query; configure queryParam instead",
-      );
-  }
+}
+export async function loadConfig(path: string): Promise<Config> {
+  const config = schema.parse(parse(await readFile(path, "utf8")));
+  if (!config.server.origins.every(isLocalOrigin))
+    throw new Error("Only loopback browser origins are supported");
+  return config as Config;
+}
+export async function privateFile(path: string): Promise<string> {
+  const info = await stat(path);
   if (
-    config.routing.mode !== "rules" &&
-    (!config.routing.classifier ||
-      config.connections[config.routing.classifier]?.type !== "clef")
+    !info.isFile() ||
+    info.uid !== process.getuid?.() ||
+    (info.mode & 0o077) !== 0 ||
+    info.size > 16384 ||
+    (await realpath(path)) !== resolve(path)
   )
-    throw new AgentError(
-      "CONFIG",
-      "Routing classifier must reference a Clef connection",
-    );
-  for (const [key, server] of Object.entries(config.mcp)) {
-    for (const permission of Object.values(server.tools)) {
-      if (permission.readOnly && permission.effect)
-        throw new AgentError(
-          "CONFIG",
-          `${key}: remove the mutation effect before declaring a tool read-only`,
-        );
-      if (!permission.readOnly && server.url && new URL(server.url).search)
-        throw new AgentError(
-          "CONFIG",
-          `${key}: mutation endpoints must not contain a URL query; use OAuth or bearerEnv for credentials`,
-        );
-    }
-    if (
-      server.transport === "stdio" &&
-      (!server.command?.startsWith("/") || !server.commandSha256)
-    )
-      throw new AgentError(
-        "CONFIG",
-        `${key}: stdio requires an absolute command and its SHA-256`,
-      );
-    if (server.transport === "stdio" && config.execution.backend === "disabled")
-      throw new AgentError(
-        "CONFIG",
-        `${key}: stdio MCP requires an enabled sandbox backend`,
-      );
-    if (server.transport === "http" && !server.url)
-      throw new AgentError("CONFIG", `${key}: HTTP URL required`);
-    if (server.local && server.transport !== "stdio")
-      throw new AgentError(
-        "CONFIG",
-        `${key}: local MCP must run in the network-isolated stdio sandbox`,
-      );
-    if (server.url) {
-      const url = new URL(server.url);
-      if (url.username || url.password || url.hash)
-        throw new AgentError(
-          "CONFIG",
-          `${key}: MCP URL must not contain credentials or a fragment`,
-        );
-      if (!server.allowedOrigins.includes(url.origin))
-        throw new AgentError(
-          "CONFIG",
-          `${key}: MCP URL origin must be listed in allowedOrigins`,
-        );
-    }
-    if (server.oauth && server.bearerEnv)
-      throw new AgentError(
-        "CONFIG",
-        `${key}: choose OAuth or bearerEnv, not both`,
-      );
-  }
-  return config;
+    throw new Error("Secret file must be private, owned, and regular");
+  return (await readFile(path, "utf8")).trim();
 }
-export async function loadConfig(p: Paths): Promise<Config> {
-  const stat = await lstat(p.config).catch(() => {
-    throw new AgentError("NOT_INITIALIZED", "Run agent init first");
-  });
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.mode & 0o022)
-    throw new AgentError(
-      "CONFIG",
-      "Configuration must be a regular file without group/other write access",
-    );
-  return validateConfig(
-    parse(await readFile(p.config, "utf8"), { maxAliasCount: 0 }),
-  );
-}
-export const configHash = (config: Config) => sha256(canonical(config));
-export async function initialize(p: Paths, template?: unknown): Promise<void> {
-  await privateDirectory(p.home);
-  for (const path of [p.runs, p.auth, p.attachments])
-    await privateDirectory(path);
+export async function checkDataRoot(config: Config): Promise<void> {
+  const installation = await readInstallation();
   if (
-    await lstat(p.config).then(
-      () => true,
-      () => false,
-    )
+    config.dataRoot !== installation.dataRoot ||
+    process.getuid?.() !== installation.controlUid
   )
-    throw new AgentError("EXISTS", "Configuration already exists");
-  await atomicWrite(
-    p.config,
-    "# Trusted user configuration; never put API keys or tokens here.\n" +
-      stringify(validateConfig(template ?? { schemaVersion: 1 })),
-  );
-}
-export async function ensureOutsideWorkspace(
-  p: Paths,
-  workspace: string,
-): Promise<void> {
-  const home = await realpath(p.home);
-  const source = await realpath(workspace);
-  if (within(source, home) || within(home, source))
-    throw new AgentError(
-      "CONFIG",
-      "Agent storage and source workspace must be separate trees",
+    throw new Error(
+      "Configuration does not match the installed data root or control identity",
     );
+  await promisify(execFile)(
+    "/usr/bin/python3",
+    ["/opt/agent/install/system.py", "check"],
+    { timeout: 15000 },
+  );
 }

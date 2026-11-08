@@ -1,0 +1,2 @@
+# Replace this reserved placeholder with administrator-approved VPN/company public ranges as needed.
+define protected_cidrs = { 192.0.2.0/24 }
