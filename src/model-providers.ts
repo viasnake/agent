@@ -17,12 +17,11 @@ const catalogs = {
   "amazon-bedrock": amazonBedrockProvider,
 };
 
-// This metadata request belongs to an explicit connection test, not settings reads.
-// Pi still owns credential refresh and every inference request.
-export async function chatgptTestModel(
+// Read account metadata without inference. Pi owns credential refresh and dispatch.
+export async function openaiAccountModels(
   models: Models,
   signal: AbortSignal,
-  requested?: string,
+  authType: "oauth" | "api_key",
 ) {
   const auth = await models.getAuth("openai", { signal });
   if (!auth?.auth.apiKey) throw new AppError(401, "認証が必要です");
@@ -52,6 +51,7 @@ export async function chatgptTestModel(
     await reader.cancel();
     reader.releaseLock();
   }
+  const payload: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   const catalog = z
     .object({
       models: z
@@ -63,17 +63,37 @@ export async function chatgptTestModel(
         )
         .max(10000),
     })
-    .safeParse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-  if (!catalog.success) throw new AppError(502, "モデル一覧を取得できません");
-  const available = catalog.data.models.filter(
-    (model) =>
-      model.visibility === "list" && models.getModel("openai", model.slug),
-  );
+    .safeParse(payload);
+  const apiCatalog = z
+    .object({
+      data: z.array(z.object({ id: z.string().min(1).max(200) })).max(10000),
+    })
+    .safeParse(payload);
+  const ids =
+    authType === "oauth"
+      ? catalog.success
+        ? catalog.data.models
+            .filter((model) => model.visibility === "list")
+            .map((model) => model.slug)
+        : undefined
+      : apiCatalog.success
+        ? apiCatalog.data.data.map((model) => model.id)
+        : undefined;
+  if (!ids) throw new AppError(502, "モデル一覧を取得できません");
+  return [...new Set(ids)].filter((id) => models.getModel("openai", id));
+}
+
+export async function chatgptTestModel(
+  models: Models,
+  signal: AbortSignal,
+  requested?: string,
+) {
+  const available = await openaiAccountModels(models, signal, "oauth");
   const selected = requested
-    ? available.find((model) => model.slug === requested)
+    ? available.find((model) => model === requested)
     : available[0];
   if (!selected) throw new AppError(400, "利用できるモデルがありません");
-  return selected.slug;
+  return selected;
 }
 
 export function modelTestFailure(error: unknown): string {

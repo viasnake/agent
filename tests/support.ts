@@ -19,6 +19,7 @@ import { Worker } from "../src/execution/worker.js";
 import { AgentService } from "../src/service.js";
 import type { ServiceOptions } from "../src/service.js";
 import { DEFAULT_LIMITS } from "../src/state.js";
+import { modelProvider } from "../src/model-providers.js";
 
 // Test-only injection exercises actual Pi tools and files; it does not prove the production UID boundary.
 export class TestRunner implements Runner {
@@ -82,6 +83,10 @@ export async function fixture(
   faux.setResponses(responses);
   const runner = options.runner ?? new TestRunner(join(root, "work"));
   const service = await AgentService.open(config, {
+    modelCatalog: async (model) =>
+      modelProvider(model)
+        .getModels()
+        .map((entry) => entry.id),
     ...options,
     runner,
     provider: options.noModel ? undefined : (options.provider ?? faux.provider),

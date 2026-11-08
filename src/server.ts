@@ -187,7 +187,7 @@ export async function createServer(
     }
     return { csrf: sessions.get(token)!.csrf };
   });
-  app.get("/api/model-options", async () => service.modelOptions());
+  app.get("/api/model-options", async () => service.conversationModelOptions());
   app.get("/api/settings", async () => service.management());
   app.put("/api/settings", async (request) =>
     service.saveSettings(request.body),

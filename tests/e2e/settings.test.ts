@@ -43,6 +43,7 @@ async function assertDropdowns(page: Page) {
 }
 test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobile/light/dark conversations", async () => {
   const f = await fixture([], {
+      modelCatalog: async () => ["gpt-4.1", "gpt-4.1-mini"],
       modelOAuth: {
         name: "Fixture OAuth",
         async login(interaction) {
@@ -339,6 +340,14 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .getByRole("button", { name: "会話のモデル", exact: true })
       .click();
     const search = page.getByRole("searchbox", { name: "モデルを検索" });
+    await page
+      .getByRole("button", { name: "gpt-4.1-mini", exact: true })
+      .waitFor();
+    assert.equal(
+      await page.locator(".model-option").count(),
+      2,
+      "only this connection's published models appear",
+    );
     await search.fill("no-matching-model");
     await page.getByText("一致するモデルがありません").waitFor();
     await search.fill("gpt-4.1");

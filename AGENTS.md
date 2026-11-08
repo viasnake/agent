@@ -45,7 +45,7 @@ generated output or live provider responses.
 - src/provider.ts: model dispatch limit and active-conversation binding.
 - src/model-providers.ts and src/bedrock.ts: native model catalogs and provider
   connections. Bind Vertex project/location and Bedrock region/profile explicitly;
-  catalog/settings reads must not probe credentials or call inference. Bedrock's
+  Vertex/Bedrock catalog reads must not probe external credential chains or call inference. Bedrock's
   AWS client uses one attempt, with complete stream/tool/usage validation.
 - src/images.ts: bounded static-image decoding without resizing or recompression.
 - src/model-auth.ts: browser-session adapter to Pi OpenAI OAuth; keep the SDK
@@ -119,7 +119,14 @@ through Pi Documents. Settings entries manage provider credentials independently
 of model choice; keep legacy per-entry model values readable without rewriting data.
 Only idle/interrupted conversations can change it; never silently replace a deleted
 selection with another model. Keep legacy defaultModel only as the initial selection.
-Expose the Pi model catalog under each configured connection in the conversation UI.
+Expose connection-specific chat models in the conversation UI. For OpenAI API-key
+and ChatGPT OAuth, intersect the account's model metadata with Pi's supported chat
+catalog; never append hidden, unsupported or legacy selections to that result.
+Model-list reads may fetch bounded OpenAI metadata and use Pi credential refresh,
+but never inference. Cache briefly per credential version, isolate failures and
+never fall back to the full catalog on failure. Other providers retain Pi catalogs;
+do not probe their external credential chains during catalog reads. Listing must
+not change a conversation's stored model selection.
 Apply settings at the next idle execution admission. Do not mutate a running
 provider, tools or budgets. Install/uninstall server extensions using the Pi
 Registry; isolate each connection failure and never replay an ambiguous tool

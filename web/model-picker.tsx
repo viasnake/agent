@@ -155,7 +155,7 @@ export function ModelPicker({
                 <p className="model-empty">
                   {models.length
                     ? "一致するモデルがありません"
-                    : "接続が登録されていません"}
+                    : "選択できるモデルがありません"}
                 </p>
               )}
             </div>

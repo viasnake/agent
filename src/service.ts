@@ -13,6 +13,7 @@ import type {
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
   chatgptTestModel,
+  openaiAccountModels,
   modelCatalogs,
   modelProvider,
   modelTestFailure,
@@ -61,6 +62,7 @@ export type ServiceOptions = {
   remote?: RemoteOptions;
   modelOAuth?: OAuthAuth;
   modelTest?: (model: string, key: string) => Promise<void>;
+  modelCatalog?: (model: ModelConfig, signal: AbortSignal) => Promise<string[]>;
 };
 type Active = { id: string; version: number; timer: NodeJS.Timeout };
 const interrupted =
@@ -86,6 +88,10 @@ export class AgentService {
   private mcpExtensions: ReturnType<typeof mcpTools>[] = [];
   private mcpStatuses = new Map<string, McpStatus>();
   private modelStatuses = new Map<string, string>();
+  private accountCatalogs = new Map<
+    string,
+    { expires: number; result: Promise<{ catalog: string[]; error?: string }> }
+  >();
   readonly runner: Runner;
   readonly notifications = new Set<() => void>();
   private registry: Registry = createRegistry();
@@ -217,6 +223,7 @@ export class AgentService {
     );
     this.mcpStatuses.clear();
     this.modelStatuses.clear();
+    this.accountCatalogs.clear();
     this.notify();
     return this.management();
   }
@@ -254,6 +261,67 @@ export class AgentService {
       })),
       initialModel: s.defaultModel ?? s.models[0]?.id ?? null,
     });
+  }
+  async conversationModelOptions() {
+    const snapshot = this.settings.snapshot();
+    const options = this.modelOptions();
+    const currentKeys = new Set(
+      snapshot.models.map((model) => `${model.id}:${model.authVersion ?? ""}`),
+    );
+    for (const [key, entry] of this.accountCatalogs)
+      if (!currentKeys.has(key) || entry.expires <= Date.now())
+        this.accountCatalogs.delete(key);
+    const models = await Promise.all(
+      options.models.map(async (connection) => {
+        const config = snapshot.models.find(
+          (model) => model.id === connection.id,
+        )!;
+        if (!connection.available) return { ...connection, catalog: [] };
+        if (config.provider !== "openai")
+          return {
+            ...connection,
+            catalog: modelProvider(config)
+              .getModels()
+              .map((model) => model.id),
+          };
+        const key = `${config.id}:${config.authVersion ?? ""}`;
+        let entry = this.accountCatalogs.get(key);
+        if (!entry || entry.expires <= Date.now()) {
+          const result = (async () => {
+            try {
+              const signal = AbortSignal.timeout(10000);
+              if (this.options.modelCatalog)
+                return {
+                  catalog: await this.options.modelCatalog(config, signal),
+                };
+              const models = createModels({
+                credentials: this.settings.credentials(config),
+                authContext: {
+                  env: async () => undefined,
+                  fileExists: async () => false,
+                },
+              });
+              models.setProvider(modelProvider(config));
+              return {
+                catalog: await openaiAccountModels(
+                  models,
+                  signal,
+                  config.auth === "oauth" ? "oauth" : "api_key",
+                ),
+              };
+            } catch (error) {
+              return { catalog: [], error: modelTestFailure(error) };
+            }
+          })();
+          entry = { expires: Date.now() + 60000, result };
+          this.accountCatalogs.set(key, entry);
+        }
+        return { ...connection, ...(await entry.result) };
+      }),
+    );
+    if (this.settings.snapshot().revision !== snapshot.revision)
+      throw new AppError(409, "接続が変更されました。再読み込みしてください");
+    return this.sanitize({ ...options, models });
   }
   private selectedModel(config: ModelConfig | undefined, requested?: string) {
     if (

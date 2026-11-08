@@ -385,6 +385,14 @@ function App() {
       .then((options) => {
         if (!active) return;
         setModelOptions(options);
+        const failures = options.models.filter((model) => model.error);
+        if (failures.length)
+          notify(
+            failures
+              .map((model) => `${model.name}: ${model.error}`)
+              .join(" / "),
+            true,
+          );
         const available = modelChoices(options);
         setDraftModel((old) =>
           available.some((m) => m.id === old)
@@ -399,7 +407,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, [ready, settingsOpen, notice]);
+  }, [ready, settingsOpen, notice, notify]);
   async function changeModel(choiceId: string) {
     const choice = choices.find((m) => m.id === choiceId);
     if (!choice) return;
@@ -772,8 +780,7 @@ function App() {
                         view.conversation.model ??
                           modelOptions.models.find(
                             (m) => m.id === view.conversation.modelConfigId,
-                          )?.model ??
-                          modelOptions.catalog[0],
+                          )?.model,
                       ])
                     : draftModel
                 }

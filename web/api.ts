@@ -130,25 +130,31 @@ export type ModelOptions = {
     model?: string;
     provider?: string;
     available: boolean;
+    catalog?: string[];
+    error?: string;
   }[];
   initialModel: string | null;
 };
 
 export function modelChoices(options: ModelOptions) {
-  return options.models.flatMap((connection) =>
-    [
-      ...new Set([
-        ...(connection.model ? [connection.model] : []),
-        ...(options.catalogs?.[connection.provider ?? "openai"] ??
-          options.catalog),
-      ]),
-    ].map((model) => ({
-      id: JSON.stringify([connection.id, model]),
-      name: model,
-      group: connection.name,
-      connectionId: connection.id,
-      model,
-      available: connection.available,
-    })),
-  );
+  return options.models
+    .filter((connection) => connection.available)
+    .flatMap((connection) =>
+      [
+        ...new Set(
+          connection.catalog ?? [
+            ...(connection.model ? [connection.model] : []),
+            ...(options.catalogs?.[connection.provider ?? "openai"] ??
+              options.catalog),
+          ],
+        ),
+      ].map((model) => ({
+        id: JSON.stringify([connection.id, model]),
+        name: model,
+        group: connection.name,
+        connectionId: connection.id,
+        model,
+        available: connection.available,
+      })),
+    );
 }
