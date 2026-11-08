@@ -3,6 +3,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
+import { readInstallation } from "../installation.js";
 import { AppError } from "../security.js";
 import { PROTOCOL_BYTES, replySchema } from "./protocol.js";
 import type { Runner, WorkerRequest, WorkerResult } from "./protocol.js";
@@ -33,13 +34,14 @@ export class WorkerClient implements Runner {
         "作業プロセスの状態確認が必要です。サービスを再起動してください",
       );
     if (this.child) return;
+    const installation = await readInstallation();
     await trusted("/usr/local/libexec/agent-work");
     await trusted("/opt/agent-node/bin/node");
     await trusted("/opt/agent/dist/src/execution/worker-main.js");
     await trusted("/run/agent-egress.ready");
     if (
       (await readFile("/run/agent-egress.ready", "utf8")).trim() !==
-      "agent-work-egress-v1"
+      `agent-work-egress-v2:${installation.workUid}`
     )
       throw new Error("Worker egress policy is unavailable");
     this.child = spawn(
@@ -82,7 +84,10 @@ export class WorkerClient implements Runner {
     this.child.on("error", () => this.fail());
     this.child.on("exit", () => this.fail());
     const health = await this.call(randomUUID(), "health", {});
-    if (health.uid !== 981 || health.uid === process.getuid?.()) {
+    if (
+      health.uid !== installation.workUid ||
+      health.uid === process.getuid?.()
+    ) {
       this.fail();
       throw new Error("Worker identity is not separated");
     }

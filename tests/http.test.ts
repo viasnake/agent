@@ -16,13 +16,17 @@ test("local endpoint configuration rejects public origins and work preview ports
       path,
       JSON.stringify({
         schemaVersion: 2,
-        dataRoot: "/srv/agent-data",
+        dataRoot: "/mnt/persistent/agent",
         server: { origins: [origin], port },
       }),
     );
     return loadConfig(path);
   }
   try {
+    const standalone = await config("http://localhost:8080");
+    assert.equal(standalone.dataRoot, "/mnt/persistent/agent");
+    assert.equal(standalone.server.host, "127.0.0.1");
+    assert.deepEqual(standalone.server.trustedPeers, []);
     for (const origin of [
       "http://localhost:8080",
       "http://127.0.0.1:8080",
@@ -98,7 +102,6 @@ test("local automatic session, Host/Origin/CSRF, idempotent requests, attachment
       method: "GET",
       url: "/api/session",
       headers,
-      remoteAddress: "10.0.2.2",
     });
     assert.equal(session.statusCode, 200);
     headers.cookie = session.headers["set-cookie"]!.toString().split(";")[0]!;
@@ -229,6 +232,70 @@ test("local automatic session, Host/Origin/CSRF, idempotent requests, attachment
       400,
     );
     assert.equal((await f.service.list()).length, 1);
+  } finally {
+    await app.close();
+    await f.service.close();
+  }
+});
+
+test("forwarding peers require explicit grants and do not bypass browser protections", async () => {
+  const f = await fixture();
+  f.config.server.trustedPeers = ["192.168.64.1"];
+  const app = await createServer(f.service);
+  try {
+    const headers = { host: "127.0.0.1:8080", origin: "http://127.0.0.1:8080" };
+    assert.equal(
+      (
+        await app.inject({
+          url: "/api/session",
+          headers,
+          remoteAddress: "192.168.64.1",
+        })
+      ).statusCode,
+      200,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          url: "/api/session",
+          headers,
+          remoteAddress: "192.168.64.2",
+        })
+      ).statusCode,
+      403,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          url: "/api/session",
+          headers: { ...headers, origin: "https://evil.invalid" },
+          remoteAddress: "192.168.64.1",
+        })
+      ).statusCode,
+      403,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          url: "/api/session",
+          headers: { ...headers, "sec-fetch-site": "cross-site" },
+          remoteAddress: "192.168.64.1",
+        })
+      ).statusCode,
+      403,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          url: "/api/conversations",
+          method: "POST",
+          payload: { requestId: randomUUID(), title: "blocked" },
+          headers,
+          remoteAddress: "192.168.64.1",
+        })
+      ).statusCode,
+      401,
+    );
   } finally {
     await app.close();
     await f.service.close();

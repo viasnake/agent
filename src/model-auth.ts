@@ -38,7 +38,7 @@ export class ModelAuth {
         "進行中の ChatGPT 認証を完了または中止してください",
       );
     // The SDK can bind to an environment-selected host. Never expose its callback
-    // outside loopback; QEMU users can submit the full URL via the protected API.
+    // outside loopback; users of forwarded connections can submit the full URL via the protected API.
     if (
       process.env.PI_OAUTH_CALLBACK_HOST &&
       process.env.PI_OAUTH_CALLBACK_HOST !== "127.0.0.1"

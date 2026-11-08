@@ -1,5 +1,5 @@
 # Reserved public documentation ranges are blocked along with local/private routes.
-define work_uid = 981
+define work_uid = @WORK_UID@
 include "/etc/agent/protected-cidrs.nft"
 table inet agent_work {
   set blocked_v4 {
@@ -10,10 +10,9 @@ table inet agent_work {
   chain output {
     type filter hook output priority 0; policy accept;
     meta skuid != $work_uid return
+    @DNS_RULES@
     meta nfproto ipv6 reject
     ct state established,related accept
-    ip daddr 10.0.2.3 udp dport 53 accept
-    ip daddr 10.0.2.3 tcp dport 53 accept
     ip daddr 127.0.0.1 tcp dport 3000-3999 accept
     ip daddr @blocked_v4 reject
     ip daddr $protected_cidrs reject

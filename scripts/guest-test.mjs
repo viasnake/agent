@@ -27,17 +27,17 @@ function blocked(reason) {
 if (
   process.env.AGENT_GUEST_TEST !== "1" ||
   process.getuid?.() !== 0 ||
-  !existsSync("/etc/agent-data.uuid") ||
+  !existsSync("/etc/agent/installation.json") ||
   !existsSync("/opt/agent/dist/src/execution/client.js")
 )
   blocked(
-    "Use explicit opt-in as administrator in a dedicated, provisioned test guest",
+    "Use explicit opt-in as administrator in a dedicated Ubuntu test installation",
   );
 if (
   spawnSync("systemctl", ["is-active", "--quiet", "agent.service"]).status === 0
 )
   blocked(
-    "Stop agent.service explicitly in the dedicated test guest first; this test never stops user jobs",
+    "Stop agent.service explicitly in the dedicated test installation first; this test never stops user jobs",
   );
 const command = (file, args, options = {}) => {
   const result = spawnSync(file, args, {
@@ -50,8 +50,16 @@ const command = (file, args, options = {}) => {
   return result.stdout.trim();
 };
 const uid = (user) => Number(command("/usr/bin/id", ["-u", user]));
-assert.equal(uid("agent-control"), 980);
-assert.equal(uid("agent-work"), 981);
+const installation = JSON.parse(
+  await readFile("/etc/agent/installation.json", "utf8"),
+);
+const dataRoot = installation.dataRoot;
+const controlUid = uid("agent-control"),
+  workUid = uid("agent-work");
+assert.equal(controlUid, installation.controlUid);
+assert.equal(workUid, installation.workUid);
+assert.notEqual(controlUid, workUid);
+command("/usr/local/libexec/agent-preflight", []);
 for (const path of [
   "/usr/local/libexec/agent-work",
   "/opt/agent-node/bin/node",
@@ -64,10 +72,6 @@ for (const path of [
 }
 command("/usr/sbin/visudo", ["-cf", "/etc/sudoers.d/agent-work"]);
 command("/usr/sbin/nft", ["list", "table", "inet", "agent_work"]);
-assert.equal(
-  command("findmnt", ["-n", "-o", "UUID", "--mountpoint", "/srv/agent-data"]),
-  (await readFile("/etc/agent-data.uuid", "utf8")).trim(),
-);
 assert.notEqual(
   spawnSync("sudo", [
     "-u",
@@ -98,7 +102,7 @@ const { WorkerClient } = await import(
 );
 const runner = new WorkerClient(),
   id = randomUUID(),
-  secret = `/srv/agent-data/control/secrets/guest-test-${id}`,
+  secret = `${dataRoot}/control/secrets/guest-test-${id}`,
   probePath = `/run/agent-cgroup-probe-${id}.mjs`,
   unit = `agent-cgroup-probe-${id}`;
 const privateServer = createServer((_request, response) =>
@@ -115,7 +119,11 @@ try {
     flag: "wx",
     mode: 0o600,
   });
-  await chown(secret, 980, Number(command("id", ["-g", "agent-control"])));
+  await chown(
+    secret,
+    controlUid,
+    Number(command("id", ["-g", "agent-control"])),
+  );
   controller = spawn(
     "sudo",
     [
@@ -146,7 +154,7 @@ try {
   );
   await runner.ready();
   const health = await runner.call(id, "health", {});
-  assert.equal(health.uid, 981);
+  assert.equal(health.uid, workUid);
   await runner.call(id, "init", {});
   const shell = async (text) => {
     const result = await runner.call(id, "tool", {
@@ -163,10 +171,10 @@ try {
     return result;
   };
   await shell(
-    `test "$(id -u)" = 981 && ! cat '${secret}' >/dev/null 2>&1 && ! cat /proc/${controlPid}/environ >/dev/null 2>&1 && ! ls /proc/${controlPid}/fd >/dev/null 2>&1 && test -z "\${OPENAI_API_KEY-}\${GH_TOKEN-}\${SSH_AUTH_SOCK-}\${NODE_OPTIONS-}\${LD_PRELOAD-}\${AGENT_GUEST_SENTINEL-}" && ! sudo -n -u root /usr/bin/true >/dev/null 2>&1`,
+    `test "$(id -u)" = ${workUid} && ! cat '${secret}' >/dev/null 2>&1 && ! cat /proc/${controlPid}/environ >/dev/null 2>&1 && ! ls /proc/${controlPid}/fd >/dev/null 2>&1 && test -z "\${OPENAI_API_KEY-}\${GH_TOKEN-}\${SSH_AUTH_SOCK-}\${NODE_OPTIONS-}\${LD_PRELOAD-}\${AGENT_GUEST_SENTINEL-}" && ! sudo -n -u root /usr/bin/true >/dev/null 2>&1`,
   );
   await shell(
-    "! curl --connect-timeout 2 -fsS http://127.0.0.1:8080/ && ! curl --connect-timeout 2 -fsS http://10.0.2.2/ && ! curl --connect-timeout 2 -fsS http://169.254.169.254/ && ! curl -g --connect-timeout 2 -fsS 'http://[::1]:3098/' && ! curl -g --connect-timeout 2 -fsS 'http://[::ffff:127.0.0.1]:8080/'",
+    "! curl --connect-timeout 2 -fsS http://127.0.0.1:8080/ && ! curl --connect-timeout 2 -fsS http://192.0.2.1/ && ! curl --connect-timeout 2 -fsS http://169.254.169.254/ && ! curl -g --connect-timeout 2 -fsS 'http://[::1]:3098/' && ! curl -g --connect-timeout 2 -fsS 'http://[::ffff:127.0.0.1]:8080/'",
   );
   await shell(
     "getent ahostsv4 example.com >/dev/null && curl --connect-timeout 5 -fsS https://example.com/ >/dev/null && curl --connect-timeout 2 -fsS http://127.0.0.1:3098/ >/dev/null",
@@ -213,7 +221,7 @@ try {
   for (const pid of await readdir("/proc")) {
     if (!/^\d+$/.test(pid)) continue;
     try {
-      if ((await lstat(`/proc/${pid}`)).uid === 981) before.push(pid);
+      if ((await lstat(`/proc/${pid}`)).uid === workUid) before.push(pid);
     } catch {}
   }
   assert.ok(before.length > 0, "The cgroup probe did not start a real worker");
@@ -224,7 +232,7 @@ try {
       false,
       "A worker escaped service cgroup cleanup",
     );
-  const lock = "/srv/agent-data/control/writer.lock";
+  const lock = `${dataRoot}/control/writer.lock`;
   const first = spawn("flock", ["-n", lock, "/bin/sleep", "3"]);
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(
@@ -237,7 +245,7 @@ try {
       result: "pass",
       ids,
       limitations:
-        "This guest probe does not establish Windows/WHPX, real provider quality, host sleep, or backup restoration acceptance",
+        "This privileged probe does not establish live provider quality or backup restoration acceptance",
     }),
   );
 } finally {
@@ -250,7 +258,7 @@ try {
   spawnSync("systemctl", ["stop", unit]);
   await unlink(secret).catch(() => undefined);
   await unlink(probePath).catch(() => undefined);
-  await rm(`/srv/agent-data/work/conversations/${id}`, {
+  await rm(`${dataRoot}/work/conversations/${id}`, {
     recursive: true,
     force: true,
   });

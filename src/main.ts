@@ -6,7 +6,7 @@ import { loadConfig, checkDataRoot } from "./config.js";
 
 if (process.argv.includes("--help")) {
   console.log(
-    "Usage: npm start -- /etc/agent/config.yaml\nStarts the local personal agent inside the prepared Linux guest.\nThe guest data mount, work UID and egress policy are required.",
+    "Usage: npm start -- /etc/agent/config.yaml\nStarts the local personal agent on prepared Ubuntu.\nApproved persistent storage, separated users and egress policy are required.",
   );
 } else {
   if (

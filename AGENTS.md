@@ -2,9 +2,11 @@
 
 ## Product and scope
 
-This is a single-user, web-accessible Pi Durable agent inside a manually started
-Ubuntu VM. The host has QEMU init/start scripts and a browser. The guest has a
-thin TypeScript HTTP service, Pi Durable 1.5.0, SQLite and a separate work UID.
+This is a single-user, web-accessible Pi Durable application on prepared Ubuntu
+Server 26.04 with systemd. The application has a thin TypeScript HTTP service,
+Pi Durable 1.5.0, SQLite and separate control/work users. Machine provisioning,
+virtualization, disks, OS initialization and host networking belong outside this
+repository. Agent does not depend on or invoke a VM manager, including Devbox.
 The unit of use is a conversation and its working directory. An answered
 conversation accepts more input. At most one conversation executes; other
 execution requests receive busy, without a host FIFO or scheduler.
@@ -47,7 +49,7 @@ generated output or live provider responses.
   AWS client uses one attempt, with complete stream/tool/usage validation.
 - src/images.ts: bounded static-image decoding without resizing or recompression.
 - src/model-auth.ts: browser-session adapter to Pi OpenAI OAuth; keep the SDK
-  callback loopback-only, with explicit full-URL submission for QEMU users.
+  callback loopback-only, with explicit full-URL submission for forwarded connections.
   OAuth state/PKCE/exchange/refresh belong to Pi, not a custom inference client.
 - src/settings.ts: atomic mode-0600 control-owned settings, private credentials
   and secret-free projections. Import config.yaml only when settings-v1.json is
@@ -67,7 +69,15 @@ generated output or live provider responses.
   the conversation transcript, with a local retry for failed loads. Reselecting
   a conversation preserves its draft and subscription; ignore stale navigation
   requests and never let an initial HTTP load overwrite a newer SSE snapshot.
-- vm/: manual host scripts, initial disk setup, fixed UID launcher and guest units.
+- install/: application installation/update, dedicated users, approved storage,
+  systemd units, the fixed work-user launcher and application egress rules.
+  Never format, mount, partition or create storage here. Record the actual users
+  and persistent mount in root-owned /etc/agent/installation.json. Refuse missing
+  or changed mounts, shared identities, unsafe ownership and unexpected existing
+  installations. Updates require a stopped service and preserve configuration,
+  credentials and work files; keep the previous application/runtime as backups.
+  Use Ubuntu's resolver configuration without modifying it; allow only its DNS
+  addresses on TCP/UDP 53. Apply nftables atomically and fail closed on errors.
 
 Inspect installed SDK exports/declarations before changing integration code.
 Use public Pi APIs. Keep inputs and their metadata in the same transaction;
@@ -156,9 +166,10 @@ choices; never pass their files or environment to the worker.
 
 There is no UI password or login screen. Establish a
 CSRF session automatically for local browsers. Keep socket-peer, loopback Host,
-Origin, Fetch Metadata and CSRF checks; never trust forwarded headers. QEMU
-forwarding stays bound to host loopback. The guest accepts host-forwarded peers
-at 10.0.2.2 and loopback only; do not expose it through LAN/public proxies.
+Origin, Fetch Metadata and CSRF checks; never trust forwarded headers. Listen
+on loopback by default. Forwarding peers require explicit exact-IP grants in
+server.trustedPeers; never discover or trust a LAN automatically. Browser origins
+remain exact configured loopback URLs. Forwarding itself is outside Agent.
 Keep the control HTTP port outside work-side preview ports 3000-3999 and retain
 worker egress restrictions. Model API credentials remain control-only. Preserve
 legacy UI password files without reading, migrating or deleting them.
@@ -185,11 +196,11 @@ Pi/SQLite/file/process/HTTP/MCP tests, browser E2E and entry-point help. The fau
 provider avoids paid inference. Playwright is a test dependency, not an application
 pipeline. Use narrow checks first; tests must prevent concrete failures.
 
-Guest tests require explicit AGENT_GUEST_TEST=1, administrator privileges and a
-dedicated provisioned VM with agent.service explicitly stopped. Live tests require
+Privileged installation tests require explicit AGENT_GUEST_TEST=1, administrator privileges and a
+dedicated Ubuntu test environment with agent.service explicitly stopped. Live tests require
 explicit opt-in, a reviewed prompt and private credential file. They never belong
 in default CI. Missing prerequisites are blocked (exit 77), not pass. Report real
-WHPX/KVM, guest UID/network/cgroup, live-service and model-quality acceptance
+installation, UID/network/cgroup, live-service and model-quality acceptance
 separately. Nonprivileged same-UID fixtures do not establish isolation. Keep
 generated evidence in ignored test-results/.
 

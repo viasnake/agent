@@ -99,10 +99,15 @@ export async function createServer(
         "Content-Security-Policy",
         "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
       );
-    // QEMU user networking presents host-forwarded connections as 10.0.2.2.
     // Never trust proxy headers to establish the local access boundary.
     const peer = request.ip.replace(/^::ffff:/, "");
-    if (!["127.0.0.1", "::1", "10.0.2.2"].includes(peer))
+    if (
+      ![
+        "127.0.0.1",
+        "::1",
+        ...(service.config.server.trustedPeers ?? []),
+      ].includes(peer)
+    )
       throw new AppError(403, "ローカル接続のみ利用できます");
     if (request.url === "/healthz") return;
     if (

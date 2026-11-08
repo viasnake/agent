@@ -10,7 +10,7 @@ if (process.env.AGENT_LIVE_TEST !== "1" || !process.env.AGENT_LIVE_PROMPT_FILE)
   );
 const origin = process.env.AGENT_LIVE_ORIGIN ?? "http://127.0.0.1:8080";
 if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin))
-  throw new Error("Use the prepared local guest endpoint");
+  throw new Error("Use the configured local application endpoint");
 const text = await readFile(process.env.AGENT_LIVE_PROMPT_FILE, "utf8");
 if (!text.trim() || text.length > 64000)
   throw new Error("Review a bounded, nonempty prompt");

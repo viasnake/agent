@@ -3,7 +3,7 @@ Description=Personal work agent
 Requires=agent-egress.service
 After=network-online.target agent-egress.service
 Wants=network-online.target
-RequiresMountsFor=/srv/agent-data
+RequiresMountsFor=@DATA_ROOT@
 
 [Service]
 Type=simple
@@ -20,7 +20,7 @@ KillMode=control-group
 TimeoutStopSec=30
 SendSIGKILL=yes
 ProtectSystem=full
-ReadWritePaths=/srv/agent-data/control /srv/agent-data/work
+ReadWritePaths=@DATA_ROOT@/control @DATA_ROOT@/work
 ProtectHome=yes
 ProtectControlGroups=yes
 ProtectKernelTunables=yes

@@ -1,9 +1,9 @@
 schemaVersion: 2
 dataRoot: /srv/agent-data
-expectedMountLabel: AGENT_DATA
 server:
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 8080
+  trustedPeers: []
   origins:
     - http://127.0.0.1:8080
     - http://localhost:8080
@@ -14,7 +14,7 @@ model: null
 #   keyFile: /srv/agent-data/control/secrets/model-key
 #   disclosureApproved: true
 instructions: ""
-# Only stdio is supported. Commands run as agent-work, with its HOME and permissions.
+# Bootstrap stdio servers; manage stdio and HTTP(S) connections in Web settings.
 # Configure only explicitly approved servers. Use existing work-side credential files.
 mcp: []
 # mcp:

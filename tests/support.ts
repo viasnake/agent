@@ -64,9 +64,9 @@ export async function fixture(
   const config: Config = {
     schemaVersion: 2,
     dataRoot: root,
-    expectedMountLabel: "AGENT_DATA",
     server: {
       host: "127.0.0.1",
+      trustedPeers: [],
       port: 8080,
       origins: ["http://127.0.0.1:8080"],
     },

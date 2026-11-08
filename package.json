@@ -2,7 +2,7 @@
   "name": "@viasnake/agent",
   "version": "0.2.0",
   "private": true,
-  "description": "A web-accessible Pi Durable agent in a manually started Linux VM",
+  "description": "A web-accessible Pi Durable agent for prepared Ubuntu systems",
   "type": "module",
   "engines": {
     "node": "26.13.x"
@@ -14,11 +14,11 @@
     "test:e2e": "node scripts/build.mjs --clean-tests && tsc -p tsconfig.test.json && node --test .test-dist/tests/e2e/*.test.js",
     "test:guest": "node scripts/guest-test.mjs",
     "test:live": "node scripts/live-test.mjs",
-    "verify": "npm run format:check && npm run check && npm run build && npm run test:vm && npm test && npm run test:e2e && node dist/src/main.js --help",
+    "verify": "npm run format:check && npm run check && npm run build && npm run test:install && npm test && npm run test:e2e && node dist/src/main.js --help",
     "start": "node dist/src/main.js",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test:vm": "python3 -B -m unittest discover -s tests -p \"test_*.py\" && node --check scripts/guest-test.mjs && node --check scripts/live-test.mjs"
+    "test:install": "python3 -B -m unittest discover -s tests -p \"test_*.py\" && node --check scripts/guest-test.mjs && node --check scripts/live-test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "3.1127.0",
