@@ -232,6 +232,114 @@ test("local automatic session, Host/Origin/CSRF, idempotent requests, attachment
       400,
     );
     assert.equal((await f.service.list()).length, 1);
+    const sessionUrl = `/api/conversations/${id}`;
+    assert.equal(
+      (
+        await app.inject({
+          method: "PATCH",
+          url: sessionUrl,
+          headers: { ...headers, "x-csrf-token": "bad" },
+          payload: { title: "blocked" },
+        })
+      ).statusCode,
+      403,
+    );
+    for (const invalid of [{ title: " " }, {}, { model: "unsupported" }])
+      assert.equal(
+        (
+          await app.inject({
+            method: "PATCH",
+            url: sessionUrl,
+            headers,
+            payload: invalid,
+          })
+        ).statusCode,
+        400,
+      );
+    const renamed = await app.inject({
+      method: "PATCH",
+      url: sessionUrl,
+      headers,
+      payload: { title: "  保存する会話  ", pinned: true, archived: true },
+    });
+    assert.equal(renamed.statusCode, 200);
+    assert.equal(renamed.json().title, "保存する会話");
+    assert.equal(renamed.json().pinned, true);
+    assert.equal(renamed.json().archived, true);
+    const search = await app.inject({
+      url: sessionUrl + "/search?q=create",
+      headers,
+    });
+    assert.equal(search.statusCode, 200);
+    assert.equal(search.json().matches.length, 1);
+    const exported = await app.inject({ url: sessionUrl + "/export", headers });
+    assert.equal(exported.statusCode, 200);
+    assert.match(
+      exported.headers["content-disposition"]!.toString(),
+      /^attachment/,
+    );
+    assert.match(exported.body, /create file/);
+    assert.match(exported.body, /保存する会話/);
+    for (const deniedHeaders of [
+      { ...headers, "x-csrf-token": "bad" },
+      { ...headers, origin: "https://evil.invalid" },
+    ])
+      assert.equal(
+        (
+          await app.inject({
+            method: "DELETE",
+            url: sessionUrl,
+            headers: deniedHeaders,
+          })
+        ).statusCode,
+        403,
+      );
+    assert.equal(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: sessionUrl,
+          headers: { host: headers.host!, origin },
+        })
+      ).statusCode,
+      401,
+    );
+    assert.equal((await f.service.list()).length, 1);
+    for (let retry = 0; retry < 2; retry++)
+      assert.equal(
+        (await app.inject({ method: "DELETE", url: sessionUrl, headers }))
+          .statusCode,
+        200,
+      );
+    for (const suffix of [
+      "",
+      "/files",
+      "/search?q=create",
+      "/export",
+      "/download?path=outputs%2Ffile.txt",
+      "/events",
+      "/images?entry=1&message=0&block=0",
+    ])
+      assert.equal(
+        (await app.inject({ url: sessionUrl + suffix, headers })).statusCode,
+        404,
+      );
+    assert.deepEqual(
+      (await app.inject({ url: "/api/conversations", headers })).json()
+        .conversations,
+      [],
+    );
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/conversations",
+          headers,
+          payload,
+        })
+      ).statusCode,
+      410,
+    );
   } finally {
     await app.close();
     await f.service.close();

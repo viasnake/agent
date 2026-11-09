@@ -150,6 +150,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await page.getByRole("button", { name: "通知を閉じる" }).click();
     await page.locator("#error").waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "送る", exact: true }).click();
+    await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
     const conversations = await f.service.list();
     assert.equal(conversations.length, 1);
@@ -163,6 +164,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       (await f.service.download(id, "outputs/clean.csv")).toString(),
       "name,total\nAlice,12\n",
     );
+    await page.getByRole("tab", { name: "会話", exact: true }).click();
     await page
       .getByRole("heading", { name: "CSV の整形", exact: true })
       .waitFor();
@@ -186,14 +188,24 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await tool.locator("summary").click();
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
+      await page.getByRole("tab", { name: "ファイル", exact: true }).click();
       await assertReadable(
         page.locator(
-          ".conversation-item.selected, #state, #connection, .user-bubble, .markdown, .markdown pre, .markdown th, .markdown td, .tool-card summary, .tool-state, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
+          ".session-tabs .nav-link, .output-file, .output-file small, .output-label",
+        ),
+      );
+      await page.screenshot({
+        path: `test-results/session-files-${colorScheme}.png`,
+      });
+      await page.getByRole("tab", { name: "会話", exact: true }).click();
+      await assertReadable(
+        page.locator(
+          ".session-row.selected, #state, #connection, .user-bubble, .markdown, .markdown pre, .markdown th, .markdown td, .tool-card summary, .tool-state, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
         ),
       );
       await assertReadable(page.locator("#message"), "::placeholder");
       const create = page.getByRole("button", {
-        name: "新しい会話",
+        name: "新しいセッション",
         exact: true,
       });
       await assertReadable(create);
@@ -207,7 +219,9 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       }
       // A click creates an empty view; return to the preserved conversation.
       await page.locator("#conversations button").first().click();
+      await page.getByRole("tab", { name: "ファイル", exact: true }).click();
       await page.getByRole("link", { name: /clean.csv/ }).waitFor();
+      await page.getByRole("tab", { name: "会話", exact: true }).click();
       await page.locator("#message").fill("配色の確認");
       await assertReadable(page.locator("#send"));
       await page.locator("#send").hover();
@@ -223,7 +237,9 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await page.reload();
     await page.locator("#app").waitFor({ state: "visible" });
     await page.locator("#conversations button").first().click();
+    await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
+    await page.getByRole("tab", { name: "会話", exact: true }).click();
     f.faux.setResponses([
       call("write", {
         path: "outputs/note.md",
@@ -233,7 +249,9 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     ]);
     await page.locator("#message").fill("続けて Markdown を作って");
     await page.locator("#message").press("Control+Enter");
+    await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /note.md/ }).waitFor();
+    await page.getByRole("tab", { name: "会話", exact: true }).click();
     assert.equal((await f.service.list()).length, 1);
     await page.getByRole("link", { name: "文章を取得", exact: true }).waitFor();
     assert.match(
@@ -307,13 +325,14 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       "The composer stays inside the mobile viewport",
     );
     await page
-      .getByRole("button", { name: "会話一覧を開く", exact: true })
+      .getByRole("button", { name: "セッション一覧を開く", exact: true })
       .click();
     await page
-      .getByRole("navigation", { name: "会話一覧" })
+      .getByRole("navigation", { name: "セッション一覧" })
       .waitFor({ state: "visible" });
     await page.locator("#conversations button").first().click();
     assert.equal(await page.locator("#sidebar").isVisible(), false);
+    await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await context.clearCookies();
     await page.getByRole("button", { name: "更新", exact: true }).click();
     await page.getByRole("button", { name: "再接続", exact: true }).click();
@@ -375,7 +394,8 @@ test("real browser conversation: no category, attachments, response-loss retry, 
 test("conversation navigation preserves selection, ignores stale loads and contains failures in the thread", async () => {
   const f = await fixture([answer("最初の応答")]);
   const { randomUUID } = await import("node:crypto");
-  const a = await f.service.create(randomUUID(), "会話 A");
+  const creationReceipt = randomUUID();
+  const a = await f.service.create(creationReceipt, "会話 A");
   await f.service.create(randomUUID(), "会話 B");
   await f.service.send(a.id, randomUUID(), "最初の入力");
   await until(
@@ -395,7 +415,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     headless: true,
     args: ["--no-sandbox"],
   });
-  const page = await browser.newPage();
+  const page = await browser.newPage({ reducedMotion: "reduce" });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   try {
@@ -404,7 +424,29 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     const selectB = page.getByRole("button", { name: "会話 B", exact: true });
     await selectA.click();
     await page.getByText("最初の応答", { exact: true }).waitFor();
+    let subscriptions = 0;
+    page.on("request", (request) => {
+      if (request.url().endsWith("/events")) subscriptions++;
+    });
     await page.locator("#message").fill("未送信の入力");
+    await page.locator("#attachments").setInputFiles({
+      name: "draft.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("draft"),
+    });
+    const chatTab = page.getByRole("tab", { name: "会話", exact: true });
+    const filesTab = page.getByRole("tab", { name: "ファイル", exact: true });
+    await chatTab.focus();
+    await chatTab.press("ArrowRight");
+    assert.equal(await filesTab.getAttribute("aria-selected"), "true");
+    await page.getByText("ファイルはありません", { exact: true }).waitFor();
+    assert.equal(await page.locator("#message").isVisible(), false);
+    await filesTab.press("Home");
+    assert.equal(await chatTab.getAttribute("aria-selected"), "true");
+    assert.equal(await page.locator("#message").inputValue(), "未送信の入力");
+    assert.equal(await page.locator(".attachment-chip").count(), 1);
+    assert.equal(subscriptions, 0, "Tabs retain the existing SSE subscription");
+    await page.getByRole("button", { name: "draft.txt を取り除く" }).click();
     await selectA.click({ clickCount: 3 });
     assert.equal(await page.locator("#message").inputValue(), "未送信の入力");
     assert.equal(await page.locator(".history-loading").count(), 0);
@@ -419,6 +461,19 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     ]);
     await page.locator("#send").click();
     await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
+    await page
+      .getByRole("button", { name: "「会話 A」の操作", exact: true })
+      .click();
+    assert.equal(
+      await page
+        .getByRole("button", { name: "セッションを削除", exact: true })
+        .isDisabled(),
+      true,
+    );
+    await page.keyboard.press("Escape");
+    await filesTab.click();
+    await page.getByRole("button", { name: "停止", exact: true }).waitFor();
+    await chatTab.click();
     await selectB.click();
     await page.locator("#title").filter({ hasText: "会話 B" }).waitFor();
     assert.equal(
@@ -480,6 +535,118 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     await page.unrouteAll({ behavior: "wait" });
     await page.getByRole("button", { name: "再読み込み", exact: true }).click();
     await page.getByText("新しい応答", { exact: true }).waitFor();
+    // A failed file read stays in its tab and can be retried locally.
+    await page.route(`**/api/conversations/${a.id}/files`, (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: '{"error":"unavailable"}',
+      }),
+    );
+    await filesTab.click();
+    await page.getByRole("button", { name: "更新", exact: true }).click();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: "ファイルを読み込めませんでした" })
+      .waitFor();
+    await page.unrouteAll({ behavior: "wait" });
+    await page.getByRole("button", { name: "更新", exact: true }).click();
+    await page.getByText("ファイルはありません", { exact: true }).waitFor();
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await assertReadable(
+        page.locator(".session-tabs .nav-link, .files-empty, #refresh-files"),
+      );
+      await filesTab.hover();
+      await assertReadable(filesTab);
+    }
+    await chatTab.click();
+    await page.locator("#message").fill("削除をキャンセルしたら保持");
+    await page
+      .getByRole("button", { name: "「会話 A」の操作", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "セッションを削除", exact: true })
+      .click();
+    const deletion = page.getByRole("dialog", {
+      name: "セッションを削除",
+      exact: true,
+    });
+    await deletion
+      .getByRole("button", { name: "キャンセル", exact: true })
+      .click();
+    assert.equal(
+      await page.locator("#message").inputValue(),
+      "削除をキャンセルしたら保持",
+    );
+    assert.equal((await f.service.list()).length, 2);
+    // Reproduce the saved create receipt left by a failed first send.
+    await page.evaluate(async (id) => {
+      const digest = Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            "SHA-256",
+            new TextEncoder().encode(JSON.stringify({ title: "会話 A" })),
+          ),
+        ),
+      )
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      sessionStorage.setItem(
+        "agent-request-create",
+        JSON.stringify({ id, digest }),
+      );
+    }, creationReceipt);
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme });
+      await page
+        .getByRole("button", { name: "「会話 A」の操作", exact: true })
+        .click();
+      await assertReadable(page.locator(".session-popover button"));
+      await page.keyboard.press("Escape");
+    }
+    // Losing a successful deletion response must allow an explicit, idempotent retry.
+    await page.route(`**/api/conversations/${a.id}`, async (route) => {
+      if (route.request().method() !== "DELETE") return route.continue();
+      await route.fetch();
+      await route.abort("failed");
+    });
+    await page
+      .getByRole("button", { name: "「会話 A」の操作", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "セッションを削除", exact: true })
+      .click();
+    await deletion.getByRole("button", { name: "削除", exact: true }).click();
+    await deletion.getByRole("alert").waitFor();
+    assert.equal((await f.service.list()).length, 1);
+    assert.equal(
+      await page.locator("#message").inputValue(),
+      "削除をキャンセルしたら保持",
+    );
+    await page.unrouteAll({ behavior: "wait" });
+    await deletion.getByRole("button", { name: "削除", exact: true }).click();
+    await page
+      .locator("#title")
+      .filter({ hasText: "新しいセッション" })
+      .waitFor();
+    await selectA.waitFor({ state: "detached" });
+    assert.equal((await f.service.list()).length, 1);
+    assert.equal(await page.locator("#message").inputValue(), "");
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.id),
+      "message",
+    );
+    await page.reload();
+    await selectB.waitFor();
+    assert.equal(await selectA.count(), 0);
+    f.faux.setResponses([answer("新しいセッションで応答")]);
+    await page.locator("#message").fill("会話 A");
+    await page.locator("#send").click();
+    await page.getByText("新しいセッションで応答", { exact: true }).waitFor();
+    const sessions = await f.service.list();
+    assert.equal(sessions.length, 2);
+    assert.ok(sessions.every((session) => session.id !== a.id));
     assert.deepEqual(errors, []);
   } finally {
     await page.close();

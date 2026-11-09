@@ -129,6 +129,32 @@ test("images enter Pi atomically, retain original bytes after file changes, and 
     404,
   );
   assert.ok(!JSON.stringify(view).includes(bytes.toString("base64")));
+  const input = view.transcript.find((entry) =>
+    entry.messages.some((message) => message.role === "user"),
+  )!;
+  const branch = await f.service.branch(id, randomUUID(), input.id, "edit");
+  faux.setResponses([answer("Edited image received")]);
+  await f.service.send(
+    branch.id,
+    randomUUID(),
+    "Describe it differently",
+    false,
+    [],
+    { source: { sessionId: id, entryId: input.id } },
+  );
+  await until(
+    async () => (await f.service.conversation(branch.id)).status === "idle",
+  );
+  const editedImage = contexts[1]!.messages.flatMap((message) =>
+    Array.isArray(message.content)
+      ? message.content.filter((part) => part.type === "image")
+      : [],
+  )[0];
+  assert.equal(
+    editedImage?.data,
+    bytes.toString("base64"),
+    "Editing retains admitted image bytes, not a changed workspace file",
+  );
 });
 
 test("invalid images, attachment traversal, and text-only models fail before inference", async (t) => {

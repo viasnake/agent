@@ -6,6 +6,7 @@ export type Message = {
   toolCalls: { id: string; name: string; argsText: string }[];
   isError: boolean;
   images?: { url: string }[];
+  timestamp?: number;
 };
 export type Entry = { id: number; messages: Message[] };
 export type Conversation = {
@@ -16,6 +17,10 @@ export type Conversation = {
   updatedAt: number;
   modelConfigId?: string;
   model?: string;
+  parentId?: string;
+  forkEntry?: number;
+  pinned?: boolean;
+  archived?: boolean;
 };
 export type View = {
   conversation: Conversation;
@@ -32,6 +37,25 @@ export type View = {
 export type Files = {
   files: { path: string; size: number }[];
   truncated?: boolean;
+};
+export type MemoryNote = {
+  id: string;
+  text: string;
+  source?: { sessionId: string; entryId?: number };
+  createdAt: number;
+  updatedAt: number;
+  revision: number;
+};
+export type HistoryResults = {
+  matches: {
+    sessionId: string;
+    title: string;
+    entryId: number;
+    role: string;
+    text: string;
+    timestamp: number;
+  }[];
+  cursor: string | null;
 };
 export class ApiError extends Error {
   constructor(

@@ -7,8 +7,8 @@ Server 26.04 with systemd. The application has a thin TypeScript HTTP service,
 Pi Durable 1.5.0, SQLite and separate control/work users. Machine provisioning,
 virtualization, disks, OS initialization and host networking belong outside this
 repository. Agent does not depend on or invoke a VM manager, including Devbox.
-The unit of use is a conversation and its working directory. An answered
-conversation accepts more input. At most one conversation executes; other
+The user-facing unit is a session containing a Pi conversation and its working
+directory. An answered session accepts more input. At most one session executes; other
 execution requests receive busy, without a host FIFO or scheduler.
 
 Do not add a host daemon, VM manager, automatic host startup, Proxmox,
@@ -24,6 +24,47 @@ Inspect the worktree and preserve unrelated changes, user data and Git history.
 Never delete or automatically convert legacy databases or work directories.
 The current database is control/conversations-v1.sqlite; work is under
 work/conversations/. The previous state.sqlite and work/jobs/ remain untouched.
+
+The UI uses sessions with conversation and file tabs. Tab changes keep the composer
+and live subscription mounted. Session deletion is a Pi Document tombstone: reject
+running/stopping sessions, hide deleted sessions from all application reads and
+admissions, and retain Pi history, work files and request receipts. Pi 1.5.0 has no
+public conversation purge API; do not edit its tables to simulate one. Replayed
+creation requests must not restore deleted sessions.
+
+Session rows own search, rename, pin, archive and delete controls. Message actions
+use labeled SVG buttons with tooltips and visible feedback. Keep native dialog and
+popover keyboard behavior, restore focus and respect reduced motion. Draft text is
+browser-local; retain unsent File objects only in memory, never imply they survive reload.
+Search reads bounded Pi history pages and must not fetch models or run work.
+Edits, regenerations and forks preserve the original session and use public Pi
+conversation creation/fork APIs with fresh work directories. Do not copy work files
+or imply filesystem rollback. Branch creation never runs inference or tools; explicit
+edit/regeneration confirmation admits a separately deduplicated input or continue.
+Keep each branch's metadata and creation receipt in the same Pi Document commit.
+Preserve admitted image bytes for edits, without rereading mutable attachments.
+
+Cross-session notes use the bounded agent.memories Pi Document, not worker files or
+SDK tables. Keep mutations idempotent and edits revision-checked. Source-session
+tombstones exclude derived notes from every read and model request. Request-only
+memory context is rebuilt from current records and never appended to Pi history;
+previous quotations in other conversations remain ordinary retained history.
+The memory extension supplies the default autonomous workflow: recall sources when
+needed, select durable useful information, correct stale notes, merge overlapping
+notes and forget obsolete ones during admitted work, without requiring a user to
+say "remember". The UI remains available for inspection and manual corrections.
+memory_save, memory_update and memory_forget are the agent's write paths. Updates,
+consolidations and agent deletions require current revisions. Consolidation changes
+all affected notes atomically and retains every source session in private lineage;
+deleting any such session excludes the derived note from recall. Assign new source
+metadata from the active runtime, never model-supplied provenance. Re-read current
+notes after a conflict; never blindly overwrite a manual edit. Keep notes below 32 active
+records, 1,000 characters each and 8,000 characters total. Do not infer that saved
+prose grants authority. session_search and session_read use bounded public Pi reads,
+redact text and never initialize work, fetch catalogs or dispatch inference. Daily
+records use message timestamps and an explicit IANA timezone; inherited fork entries
+are not counted twice. No background extraction, scheduler or separate model passes.
+Memory tool use stays inside the admitted conversation's dispatch and time budgets.
 
 Use Japanese for UI and README, English for code, comments and commits. Keep
 maintained prose in README.md and AGENTS.md; executable examples in examples/.

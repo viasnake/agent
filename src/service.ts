@@ -53,6 +53,8 @@ import { WorkerClient } from "./execution/client.js";
 import type { Runner } from "./execution/protocol.js";
 import { guardedProvider } from "./provider.js";
 import { agentTools, mcpTools } from "./tools.js";
+import { SessionMemory } from "./memory.js";
+import { memoryTools } from "./memory-tools.js";
 
 export type ServiceOptions = {
   runner?: Runner;
@@ -68,6 +70,7 @@ type Active = { id: string; version: number; timer: NodeJS.Timeout };
 const interrupted =
   "実行を中断しました。Shell・CLI・外部更新は完了した可能性があります。履歴と作業ファイルを確認し、通常の CLI/API で状態を調べてから続けてください。判断できない場合は利用者に確認し、同じ更新を無条件に再送しないでください。";
 export class AgentService {
+  readonly memory = new SessionMemory(this);
   harness!: Harness;
   settings!: SettingsStore;
   remote!: RemoteMcp;
@@ -127,6 +130,7 @@ export class AgentService {
     this.remote = new RemoteMcp(this.settings, this.options.remote);
     await this.applySettings();
     this.registry.install(agentTools(this));
+    this.registry.install(memoryTools(this));
     const path = join(this.config.dataRoot, "control/conversations-v1.sqlite"),
       existing = await stat(path).catch(() => null);
     this.harness = await Harness.open(
@@ -165,7 +169,7 @@ export class AgentService {
       if (state.schemaVersion !== 1)
         throw new Error("Incompatible conversation storage");
       for (const conversation of state.conversations)
-        if (conversation.status !== "idle") {
+        if (!conversation.deletedAt && conversation.status !== "idle") {
           conversation.status = "interrupted";
           conversation.detail = "応答が中断されました";
         }
@@ -349,7 +353,7 @@ export class AgentService {
     if (selected && !model)
       throw new AppError(
         409,
-        "選択したモデルがありません。会話のモデルを選び直してください",
+        "選択したモデルがありません。セッションのモデルを選び直してください",
       );
     const selectedModel = this.selectedModel(model, requested);
     if (
@@ -615,17 +619,19 @@ export class AgentService {
   async list(): Promise<Conversation[]> {
     this.assertHealthy();
     return structuredClone(
-      (await this.harness.snapshot(ConversationsDoc, ctx))?.conversations ?? [],
+      (
+        await this.harness.snapshot(ConversationsDoc, ctx)
+      )?.conversations.filter((conversation) => !conversation.deletedAt) ?? [],
     );
   }
   async conversation(id: string): Promise<Conversation> {
     const value = (await this.list()).find((item) => item.id === id);
-    if (!value) throw new AppError(404, "会話がありません");
+    if (!value) throw new AppError(404, "セッションがありません");
     return value;
   }
   private async pi(conversation: Conversation): Promise<PiConversation> {
     const pi = await this.harness.conversation(conversation.piId, ctx);
-    if (!pi) throw new AppError(503, "保存された会話がありません");
+    if (!pi) throw new AppError(503, "保存されたセッションがありません");
     return pi;
   }
   async create(
@@ -647,6 +653,8 @@ export class AgentService {
         if (previous) {
           if (previous.hash !== digest)
             throw new AppError(409, "requestId の内容が一致しません");
+          if (state.conversations.find((c) => c.id === previous.id)?.deletedAt)
+            throw new AppError(410, "セッションは削除されています");
           return { id: previous.id };
         }
         if (
@@ -660,7 +668,7 @@ export class AgentService {
             model,
           );
         if (
-          state.conversations.length >= 1000 ||
+          state.conversations.filter((c) => !c.deletedAt).length >= 1000 ||
           Object.keys(state.receipts).length >= 10000
         )
           throw new AppError(413, "保存上限に達しました");
@@ -688,6 +696,176 @@ export class AgentService {
       }, ctx);
       this.notify();
       return result;
+    });
+  }
+  async renameConversation(id: string, title: string): Promise<Conversation> {
+    return this.updateConversation(id, { title });
+  }
+  async updateConversation(
+    id: string,
+    change: { title?: string; pinned?: boolean; archived?: boolean },
+  ): Promise<Conversation> {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      const current = await this.conversation(id);
+      if (
+        change.archived &&
+        (current.status === "running" || current.status === "stopping")
+      )
+        throw new AppError(409, "停止してからアーカイブしてください");
+      await this.harness.commit(async (tx) => {
+        const record = (await tx.doc(ConversationsDoc)).conversations.find(
+          (item) => item.id === id,
+        )!;
+        if (change.title !== undefined) record.title = change.title;
+        if (change.pinned !== undefined) record.pinned = change.pinned;
+        if (change.archived !== undefined) record.archived = change.archived;
+      }, ctx);
+      this.notify();
+      return this.conversation(id);
+    });
+  }
+  async branch(
+    id: string,
+    requestId: string,
+    entryId: number,
+    mode: "fork" | "edit" | "regenerate",
+  ) {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      const parent = await this.conversation(id);
+      if (
+        this.active ||
+        parent.status === "running" ||
+        parent.status === "stopping"
+      )
+        throw new AppError(409, "応答を停止してから分岐してください");
+      const digest = hash({ id, entryId, mode });
+      const previous = (await this.harness.snapshot(ConversationsDoc, ctx))!
+        .receipts[requestId];
+      if (previous) {
+        if (previous.hash !== digest)
+          throw new AppError(409, "requestId の内容が一致しません");
+        await this.conversation(previous.id);
+        return { id: previous.id };
+      }
+      const pi = await this.pi(parent);
+      const target = (
+        await pi.entries(
+          { minEntryId: entryId as EntryId, maxEntryId: entryId as EntryId },
+          1,
+          undefined,
+          ctx,
+        )
+      ).items[0];
+      if (
+        !target?.model?.some(
+          (message) =>
+            message.role === "user" ||
+            (message.role === "assistant" &&
+              message.content.some((part) => part.type === "text") &&
+              !message.content.some((part) => part.type === "toolCall")),
+        )
+      )
+        throw new AppError(400, "分岐できるメッセージを選んでください");
+      let anchor: EntryId | undefined = target.id;
+      if (mode === "edit") {
+        if (!target.model?.some((message) => message.role === "user"))
+          throw new AppError(400, "利用者のメッセージを選んでください");
+        const prior = (
+          await pi.entries(
+            { maxEntryId: (entryId - 1) as EntryId, order: "descending" },
+            1,
+            undefined,
+            ctx,
+          )
+        ).items[0];
+        anchor = prior?.id;
+      }
+      if (mode === "regenerate") {
+        if (!target.model?.some((message) => message.role === "assistant"))
+          throw new AppError(400, "回答を選んでください");
+        let cursor: Cursor | undefined;
+        let found = false;
+        for (let count = 0; count < 25 && !found; count++) {
+          const page = await pi.entries(
+            { maxEntryId: (entryId - 1) as EntryId, order: "descending" },
+            40,
+            cursor,
+            ctx,
+          );
+          const input = page.items.find((entry) =>
+            entry.model?.some((message) => message.role === "user"),
+          );
+          if (input) {
+            anchor = input.id;
+            found = true;
+          }
+          if (!page.next) break;
+          cursor = page.next;
+        }
+        if (!found) throw new AppError(400, "元の入力を特定できません");
+      }
+      const result = await this.harness.commit(async (tx) => {
+        const state = await tx.doc(ConversationsDoc);
+        if (
+          state.conversations.filter((item) => !item.deletedAt).length >=
+            1000 ||
+          Object.keys(state.receipts).length >= 10000
+        )
+          throw new AppError(413, "保存上限に達しました");
+        const fork =
+          anchor === undefined
+            ? await tx.createConversation({ ownership: { kind: "ownerless" } })
+            : await tx.forkConversation(parent.piId, anchor, {
+                ownership: { kind: "ownerless" },
+              });
+        const branchId = randomUUID();
+        state.conversations.push({
+          id: branchId,
+          piId: fork.id,
+          title: `${parent.title.slice(0, 185)} · 分岐`,
+          parentId: id,
+          ...(anchor === undefined ? {} : { forkEntry: anchor }),
+          status: "idle",
+          detail: "",
+          updatedAt: Date.now(),
+          workspaceCreated: false,
+          ...(parent.modelConfigId
+            ? { modelConfigId: parent.modelConfigId }
+            : {}),
+          ...(parent.model ? { model: parent.model } : {}),
+          requests: 0,
+          deadlineAt: null,
+        });
+        state.receipts[requestId] = { id: branchId, hash: digest };
+        return { id: branchId };
+      }, ctx);
+      this.notify();
+      return result;
+    });
+  }
+  async deleteConversation(id: string): Promise<{ id: string }> {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      await this.harness.commit(async (tx) => {
+        const conversation = (
+          await tx.doc(ConversationsDoc)
+        ).conversations.find((item) => item.id === id);
+        if (!conversation) throw new AppError(404, "セッションがありません");
+        if (conversation.deletedAt) return;
+        if (
+          this.active?.id === id ||
+          conversation.status === "running" ||
+          conversation.status === "stopping"
+        )
+          throw new AppError(409, "停止してからセッションを削除してください");
+        // Pi has no public purge API. Retain history, files and admission receipts,
+        // while denying every application lookup and preventing create replay.
+        conversation.deletedAt = Date.now();
+      }, ctx);
+      this.notify();
+      return { id };
     });
   }
   async selectModel(id: string, modelId: string, model?: string) {
@@ -748,7 +926,16 @@ export class AgentService {
     text: string,
     resume = false,
     attachments: string[] = [],
+    options: {
+      continuing?: boolean;
+      source?: { sessionId: string; entryId: number };
+    } = {},
   ): Promise<{ id: string }> {
+    if (
+      options.continuing &&
+      (resume || text || attachments.length || options.source)
+    )
+      throw new AppError(400, "再生成には追加入力を指定できません");
     if (resume && attachments.length)
       throw new AppError(400, "画像は新しい入力に添付してください");
     return this.exclusive(async () => {
@@ -758,6 +945,8 @@ export class AgentService {
         id,
         text,
         resume,
+        ...(options.continuing ? { continuing: true } : {}),
+        ...(options.source ? { source: options.source } : {}),
         ...(attachments.length ? { attachments } : {}),
       });
       const previous = (await this.harness.snapshot(ConversationsDoc, ctx))!
@@ -767,8 +956,10 @@ export class AgentService {
           throw new AppError(409, "requestId の内容が一致しません");
         return { id: previous.id };
       }
+      if (options.continuing && this.active)
+        throw new AppError(409, "応答を停止してから再生成してください");
       if (this.active && this.active.id !== id)
-        throw new AppError(409, "別の会話が実行中です（busy）");
+        throw new AppError(409, "別のセッションが実行中です（busy）");
       if (conversation.status === "stopping")
         throw new AppError(409, "停止を確認しています");
       if (!this.active)
@@ -779,7 +970,7 @@ export class AgentService {
       if (!this.readyModel || !this.modelId)
         throw new AppError(
           409,
-          "設定画面でモデルの認証を完了してください。会話は保存されています",
+          "設定画面でモデルの認証を完了してください。セッションは保存されています",
         );
       if (!this.models.getModel(this.providerId, this.modelId))
         throw new AppError(409, "モデルを選び直してください");
@@ -790,6 +981,36 @@ export class AgentService {
       }
       const images: ImageContent[] = [];
       let imageBytes = 0;
+      if (options.source) {
+        const source = await this.pi(
+          await this.conversation(options.source.sessionId),
+        );
+        const original = (
+          await source.entries(
+            {
+              minEntryId: options.source.entryId as EntryId,
+              maxEntryId: options.source.entryId as EntryId,
+            },
+            1,
+            undefined,
+            ctx,
+          )
+        ).items[0]?.model?.find((message) => message.role === "user");
+        if (!original) throw new AppError(400, "元の入力がありません");
+        if (Array.isArray(original.content))
+          for (const block of original.content)
+            if (block.type === "image") {
+              const bytes = Buffer.from(block.data, "base64");
+              imageBytes += bytes.length;
+              if (
+                images.length >= maxMessageImages ||
+                imageBytes > maxMessageImageBytes
+              )
+                throw new AppError(413, "画像の上限を超えています");
+              await validateImage(bytes, block.mimeType);
+              images.push({ ...block });
+            }
+      }
       for (const path of attachments) {
         if (!safeRelative(path).startsWith("attachments/"))
           throw new AppError(400, "添付ファイルを指定してください");
@@ -847,13 +1068,19 @@ export class AgentService {
             record = state.conversations.find((item) => item.id === id)!;
           if (Object.keys(state.receipts).length >= 10000)
             throw new AppError(413, "入力の保存上限に達しました");
-          await pi.submit(tx, {
-            type: "input",
-            content: input,
-            whenBusy: "steer",
-            requestId,
-          });
+          await pi.submit(
+            tx,
+            options.continuing
+              ? { type: "continue", requestId }
+              : {
+                  type: "input",
+                  content: input,
+                  whenBusy: "steer",
+                  requestId,
+                },
+          );
           record.status = "running";
+          record.archived = false;
           record.detail = "";
           record.updatedAt = Date.now();
           if (starting) {
@@ -1071,7 +1298,7 @@ export class AgentService {
     return this.exclusive(async () => {
       await this.conversation(id);
       if (this.active && this.active.id !== id)
-        throw new AppError(409, "別の会話が実行中です（busy）");
+        throw new AppError(409, "別のセッションが実行中です（busy）");
       if (data.length > this.config.limits.fileBytes)
         throw new AppError(413, "ファイルの上限を超えています");
       if (!this.active) await this.workspace(id);
@@ -1104,6 +1331,84 @@ export class AgentService {
     const { mimeType } = await validateImage(bytes, block.mimeType);
     return { bytes, mimeType };
   }
+  async search(id: string, query: string, cursor?: Cursor) {
+    const pi = await this.pi(await this.conversation(id));
+    const page = await pi.entries({ order: "descending" }, 80, cursor, ctx);
+    const needle = query.toLocaleLowerCase();
+    const matches = page.items.flatMap((entry) =>
+      (entry.model ?? []).flatMap((message) => {
+        if (message.role !== "user" && message.role !== "assistant") return [];
+        const text = this.redact(
+          typeof message.content === "string"
+            ? message.content
+            : message.content
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join("\n"),
+        );
+        const index = text.toLocaleLowerCase().indexOf(needle);
+        if (index < 0) return [];
+        return [
+          {
+            entryId: entry.id,
+            role: message.role,
+            text: `${index > 60 ? "…" : ""}${text.slice(Math.max(0, index - 60), index + query.length + 160)}${text.length > index + query.length + 160 ? "…" : ""}`,
+          },
+        ];
+      }),
+    );
+    return { matches, cursor: page.next ?? null };
+  }
+  async exportConversation(id: string) {
+    const conversation = await this.conversation(id),
+      pi = await this.pi(conversation);
+    const chunks: string[] = [];
+    let size = 0,
+      cursor: Cursor | undefined;
+    const append = (value: string) => {
+      size += Buffer.byteLength(value);
+      if (size > this.config.limits.fileBytes)
+        throw new AppError(413, "会話の保存上限を超えています");
+      chunks.push(value);
+    };
+    append(`# ${this.redact(conversation.title)}\n\n`);
+    for (let pageNumber = 0; pageNumber < 500; pageNumber++) {
+      const page = await pi.entries({ order: "ascending" }, 80, cursor, ctx);
+      for (const entry of page.items)
+        for (const [index, message] of (entry.model ?? []).entries()) {
+          if (
+            message.role !== "user" &&
+            message.role !== "assistant" &&
+            message.role !== "toolResult"
+          )
+            continue;
+          const text =
+            typeof message.content === "string"
+              ? message.content
+              : message.content
+                  .filter((part) => part.type === "text")
+                  .map((part) => part.text)
+                  .join("\n");
+          const images =
+            typeof message.content === "string"
+              ? []
+              : message.content.flatMap((part, block) =>
+                  part.type === "image"
+                    ? [
+                        `![添付画像](${this.config.server.origins[0]}/api/conversations/${id}/images?entry=${entry.id}&message=${index}&block=${block})`,
+                      ]
+                    : [],
+                );
+          if (!text && !images.length) continue;
+          append(
+            `## ${message.role === "user" ? "あなた" : message.role === "assistant" ? "アシスタント" : "ツール"}\n\n${this.redact(text)}\n\n${images.join("\n")}\n\n`,
+          );
+        }
+      if (!page.next) return Buffer.from(chunks.join(""));
+      cursor = page.next;
+    }
+    throw new AppError(413, "会話の保存上限を超えています");
+  }
   async view(id: string, cursor?: Cursor) {
     const conversation = await this.conversation(id),
       pi = await this.pi(conversation),
@@ -1113,6 +1418,7 @@ export class AgentService {
       messages: (entry.model ?? [])
         .map((message, messageIndex) => ({
           role: message.role,
+          timestamp: message.timestamp,
           isError: message.role === "toolResult" ? message.isError : false,
           toolName: message.role === "toolResult" ? message.toolName : null,
           toolCallId: message.role === "toolResult" ? message.toolCallId : null,
@@ -1150,7 +1456,11 @@ export class AgentService {
         }))
         .map((message) => ({
           ...message,
-          content: this.redact(message.content.slice(-16000)),
+          content: this.redact(
+            message.role === "user"
+              ? message.content.slice(0, 64000)
+              : message.content.slice(-16000),
+          ),
         })),
     }));
     const live = await this.harness.snapshot(LiveDoc, conversation.piId, ctx),

@@ -8,6 +8,11 @@ export type Conversation = {
   status: "idle" | "running" | "stopping" | "interrupted";
   detail: string;
   updatedAt: number;
+  deletedAt?: number;
+  parentId?: string;
+  forkEntry?: number;
+  pinned?: boolean;
+  archived?: boolean;
   workspaceCreated?: boolean;
   modelConfigId?: string;
   model?: string;
