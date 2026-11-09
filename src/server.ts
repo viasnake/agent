@@ -11,7 +11,7 @@ import type { AgentService } from "./service.js";
 import { AppError } from "./security.js";
 import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
-import { memoryId, memoryInput, historyInput } from "./memory.js";
+import { memoryId, memoryInput, memoryEdit, historyInput } from "./memory.js";
 
 const requestId = z.string().uuid();
 const identifier = z.object({ id: z.string().uuid() });
@@ -293,18 +293,17 @@ export async function createServer(
   );
   app.patch("/api/memories/:id", async (request) => {
     const { id } = z.object({ id: memoryId }).parse(request.params);
-    const change = z
-      .object({
-        text: z.string().trim().min(1).max(1000),
-        revision: z.number().int().positive(),
-      })
-      .strict()
-      .parse(request.body);
-    return safe(await service.memory.change(id, change));
+    return safe(
+      await service.memory.update(id, memoryEdit.parse(request.body)),
+    );
   });
   app.delete("/api/memories/:id", async (request) => {
     const { id } = z.object({ id: memoryId }).parse(request.params);
-    return safe(await service.memory.change(id));
+    const { revision } = z
+      .object({ revision: z.number().int().positive() })
+      .strict()
+      .parse(request.body);
+    return safe(await service.memory.forget(id, revision));
   });
   app.get("/api/history", async (request) =>
     safe(await service.memory.search(historyInput.parse(request.query))),

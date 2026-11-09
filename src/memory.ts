@@ -1,10 +1,21 @@
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { Cursor, EntryId } from "@earendil-works/pi-durable";
+import type { Message } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { z } from "zod";
 import type { AgentService } from "./service.js";
 import { ConversationsDoc } from "./state.js";
 import { AppError, hash } from "./security.js";
+
+const limits = { notes: 32, noteChars: 1000, totalChars: 8000, records: 2048 };
+const memoryText = z.string().trim().min(1).max(limits.noteChars);
+const messageText = (message: Message) =>
+  typeof message.content === "string"
+    ? message.content
+    : message.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
 
 export const memoryId = z.union([
   z.string().uuid(),
@@ -19,7 +30,7 @@ export const memorySource = z
 export const memoryInput = z
   .object({
     requestId: memoryId,
-    text: z.string().trim().min(1).max(1000),
+    text: memoryText,
     source: memorySource.optional(),
   })
   .strict();
@@ -70,14 +81,27 @@ export const memoryRevision = z
   })
   .strict();
 export const memoryUpdate = memoryRevision.extend({
-  text: z.string().trim().min(1).max(1000),
-  merge: z.array(memoryRevision).min(1).max(31).optional(),
+  text: memoryText,
+  merge: z
+    .array(memoryRevision)
+    .min(1)
+    .max(limits.notes - 1)
+    .optional(),
 });
-type MemoryWriteOptions = {
-  revision?: number;
+export const memoryEdit = memoryUpdate.omit({ id: true, merge: true });
+type MemoryUpdateOptions = {
   source?: z.infer<typeof memorySource>;
   merge?: z.infer<typeof memoryRevision>[];
 };
+type MemoryMutation =
+  | { type: "forget"; revision: number }
+  | {
+      type: "update";
+      revision: number;
+      text: string;
+      source?: z.infer<typeof memorySource>;
+      merge: z.infer<typeof memoryRevision>[];
+    };
 
 export function localDate(timestamp: number, timezone: string): string {
   const parts = new Intl.DateTimeFormat("en", {
@@ -111,14 +135,7 @@ export class SessionMemory {
     const messages = page.items.flatMap((entry) =>
       (entry.model ?? []).flatMap((message) => {
         if (remaining <= 0) return [];
-        const text = this.service.redact(
-          typeof message.content === "string"
-            ? message.content
-            : message.content
-                .filter((part) => part.type === "text")
-                .map((part) => part.text)
-                .join("\n"),
-        );
+        const text = this.service.redact(messageText(message));
         const excerpt = text.slice(0, remaining);
         remaining -= excerpt.length;
         return [
@@ -145,6 +162,22 @@ export class SessionMemory {
     };
   }
 
+  async latestInput(sessionId: string): Promise<z.infer<typeof memorySource>> {
+    const pi = await this.service.piConversation(sessionId);
+    let cursor: Cursor | undefined;
+    // Provenance depends on entry metadata, not the text budget of a prior tool result.
+    for (let count = 0; count < 4; count++) {
+      const page = await pi.entries({ order: "descending" }, 20, cursor, ctx);
+      const input = page.items.find((entry) =>
+        entry.model?.some((message) => message.role === "user"),
+      );
+      if (input) return { sessionId, entryId: input.id };
+      if (!page.next) break;
+      cursor = page.next;
+    }
+    return { sessionId };
+  }
+
   async list() {
     const notes =
       (await this.service.harness.snapshot(MemoriesDoc, ctx))?.notes ?? [];
@@ -166,7 +199,8 @@ export class SessionMemory {
     if (value.source?.entryId) {
       const session = await this.service.conversation(value.source.sessionId);
       const pi = await this.service.harness.conversation(session.piId, ctx);
-      const page = await pi!.entries(
+      if (!pi) throw new AppError(503, "保存されたセッションがありません");
+      const page = await pi.entries(
         {
           minEntryId: value.source.entryId as EntryId,
           maxEntryId: value.source.entryId as EntryId,
@@ -213,11 +247,11 @@ export class SessionMemory {
       );
       const active = state.notes.filter((note) => visibleNote(note, visible));
       if (
-        state.notes.length >= 2048 ||
-        active.length >= 32 ||
+        state.notes.length >= limits.records ||
+        active.length >= limits.notes ||
         active.reduce((size, note) => size + note.text.length, 0) +
           value.text.length >
-          8000
+          limits.totalChars
       )
         throw new AppError(
           413,
@@ -237,40 +271,45 @@ export class SessionMemory {
     return { id: value.requestId };
   }
 
-  async change(
+  async update(
     id: string,
-    change?: { text: string; revision: number },
-    options: MemoryWriteOptions = {},
+    input: z.infer<typeof memoryEdit>,
+    options: MemoryUpdateOptions = {},
   ) {
-    memoryId.parse(id);
-    if (change) {
-      change = z
-        .object({
-          text: z.string().trim().min(1).max(1000),
-          revision: z.number().int().positive(),
-        })
-        .strict()
-        .parse(change);
-      change.text = this.service.redact(change.text);
-    }
+    const change = memoryEdit.parse(input);
     const source = options.source
       ? memorySource.parse(options.source)
       : undefined;
     const merge = z
       .array(memoryRevision)
-      .max(31)
+      .max(limits.notes - 1)
       .parse(options.merge ?? []);
     if (
-      (!change && merge.length) ||
       merge.some((item) => item.id === id) ||
       new Set(merge.map((item) => item.id)).size !== merge.length
     )
       throw new AppError(400, "統合する記憶が不正です");
-    const expected =
-      change?.revision ??
-      (options.revision === undefined
-        ? undefined
-        : z.number().int().positive().parse(options.revision));
+    return this.mutate(id, {
+      type: "update",
+      revision: change.revision,
+      text: this.service.redact(change.text),
+      source,
+      merge,
+    });
+  }
+
+  async forget(id: string, revision: number) {
+    return this.mutate(id, {
+      type: "forget",
+      revision: z.number().int().positive().parse(revision),
+    });
+  }
+
+  private async mutate(id: string, mutation: MemoryMutation) {
+    memoryId.parse(id);
+    const update = mutation.type === "update" ? mutation : undefined;
+    const source = update?.source;
+    const merge = update?.merge ?? [];
     await this.service.list();
     await this.service.harness.commit(async (tx) => {
       const sessions = (await tx.doc(ConversationsDoc)).conversations;
@@ -287,19 +326,22 @@ export class SessionMemory {
         (source && !visible.has(source.sessionId))
       )
         throw new AppError(404, "記憶がありません");
+      if (note.deleted) {
+        if (mutation.type === "forget") return;
+        throw new AppError(410, "記憶は削除されています");
+      }
       const unchanged =
-        !!change && note.text === change.text && !source && !merge.length;
-      if (expected !== undefined && note.revision !== expected && !unchanged)
+        !!update && note.text === update.text && !source && !merge.length;
+      if (note.revision !== mutation.revision && !unchanged)
         throw new AppError(
           409,
           "記憶が更新されています。読み込み直してください",
         );
-      if (!change) {
+      if (!update) {
         note.deleted = true;
         note.text = "";
       } else {
-        if (note.deleted) throw new AppError(410, "記憶は削除されています");
-        if (note.text === change.text && !source && !merge.length) return;
+        if (unchanged) return;
         // Validate the entire consolidation before writing any note, including source lineage.
         const merged = merge.map((item) => {
           const candidate = notes.find((other) => other.id === item.id);
@@ -319,9 +361,9 @@ export class SessionMemory {
               !merged.some((other) => other.id === item.id),
           )
           .reduce((size, item) => size + item.text.length, 0);
-        if (total - note.text.length + change.text.length > 8000)
+        if (total - note.text.length + update.text.length > limits.totalChars)
           throw new AppError(413, "記憶の上限を超えています");
-        note.text = change.text;
+        note.text = update.text;
         note.sourceSessionIds = [
           ...new Set([
             ...sourceSessions(note),
@@ -417,14 +459,7 @@ export class SessionMemory {
               localDate(message.timestamp, value.timezone) !== value.date)
           )
             continue;
-          const text = this.service.redact(
-            typeof message.content === "string"
-              ? message.content
-              : message.content
-                  .filter((part) => part.type === "text")
-                  .map((part) => part.text)
-                  .join("\n"),
-          );
+          const text = this.service.redact(messageText(message));
           if (!text || (needle && !normalize(text).includes(needle))) continue;
           matches.push({
             sessionId: session.id,

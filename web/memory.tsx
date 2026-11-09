@@ -36,7 +36,9 @@ export function MemoryDialog({
     matches: [],
     cursor: null,
   });
-  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [acting, setActing] = useState(false);
+  const busy = loading || acting;
   const [error, setError] = useState("");
   const [version, setVersion] = useState(0);
   const searchVersion = useRef(0);
@@ -56,10 +58,10 @@ export function MemoryDialog({
       tab !== "notes" &&
       ((tab === "search" && !query.trim()) || (tab === "daily" && !date))
     ) {
-      setBusy(false);
+      setLoading(false);
       return;
     }
-    setBusy(true);
+    setLoading(true);
     const params = new URLSearchParams({ timezone });
     if (tab === "search") params.set("query", query.trim());
     if (tab === "daily") params.set("date", date);
@@ -69,7 +71,16 @@ export function MemoryDialog({
         const read =
           tab === "notes"
             ? api<{ memories: MemoryNote[] }>("/api/memories").then((value) => {
-                if (current === searchVersion.current) setNotes(value.memories);
+                if (current !== searchVersion.current) return;
+                setNotes(value.memories);
+                // Preserve the user's draft while refreshing the revision they can review and save.
+                setEditing((previous) =>
+                  previous
+                    ? (value.memories.find((note) => note.id === previous.id) ??
+                      previous)
+                    : null,
+                );
+                setDeleteId(null);
               })
             : api<HistoryResults>(currentSearch.current).then((value) => {
                 if (current === searchVersion.current) setResults(value);
@@ -79,7 +90,7 @@ export function MemoryDialog({
             if (current === searchVersion.current) setError(error.message);
           })
           .finally(() => {
-            if (current === searchVersion.current) setBusy(false);
+            if (current === searchVersion.current) setLoading(false);
           });
       },
       tab === "search" ? 200 : 0,
@@ -91,7 +102,7 @@ export function MemoryDialog({
   }, [tab, query, date, timezone, version]);
 
   async function action(run: () => Promise<unknown>) {
-    setBusy(true);
+    setActing(true);
     setError("");
     try {
       await run();
@@ -100,7 +111,29 @@ export function MemoryDialog({
       setError(error instanceof Error ? error.message : "操作できませんでした");
       return false;
     } finally {
-      setBusy(false);
+      setActing(false);
+    }
+  }
+  async function loadMore() {
+    const current = searchVersion.current;
+    setLoading(true);
+    setError("");
+    try {
+      const next = await api<HistoryResults>(
+        `${currentSearch.current}&cursor=${encodeURIComponent(results.cursor!)}`,
+      );
+      if (current === searchVersion.current)
+        setResults((old) => ({
+          matches: [...old.matches, ...next.matches],
+          cursor: next.cursor,
+        }));
+    } catch (error) {
+      if (current === searchVersion.current)
+        setError(
+          error instanceof Error ? error.message : "読み込めませんでした",
+        );
+    } finally {
+      if (current === searchVersion.current) setLoading(false);
     }
   }
   async function openSource(source: NonNullable<MemoryNote["source"]>) {
@@ -154,6 +187,7 @@ export function MemoryDialog({
             type="button"
             className="btn-text theme-secondary"
             aria-pressed={tab === key}
+            disabled={acting}
             onClick={() => {
               setTab(key);
               setDeleteId(null);
@@ -289,7 +323,9 @@ export function MemoryDialog({
                       }
                       if (
                         await action(() =>
-                          api(`/api/memories/${note.id}`, "DELETE", {}),
+                          api(`/api/memories/${note.id}`, "DELETE", {
+                            revision: note.revision,
+                          }),
                         )
                       ) {
                         setDeleteId(null);
@@ -359,19 +395,7 @@ export function MemoryDialog({
               <button
                 className="btn-text theme-secondary btn-sm"
                 disabled={busy}
-                onClick={async () => {
-                  const current = searchVersion.current;
-                  await action(async () => {
-                    const next = await api<HistoryResults>(
-                      `${currentSearch.current}&cursor=${encodeURIComponent(results.cursor!)}`,
-                    );
-                    if (current === searchVersion.current)
-                      setResults((old) => ({
-                        matches: [...old.matches, ...next.matches],
-                        cursor: next.cursor,
-                      }));
-                  });
-                }}
+                onClick={() => void loadMore()}
               >
                 さらに表示
               </button>
@@ -381,7 +405,7 @@ export function MemoryDialog({
       )}
       {busy && (
         <span role="status" className="small fg-2">
-          読み込み中…
+          {acting ? "処理中…" : "読み込み中…"}
         </span>
       )}
       {error && (

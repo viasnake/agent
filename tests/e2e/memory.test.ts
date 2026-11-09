@@ -86,13 +86,75 @@ test("memory, cross-session source navigation and daily records work in light, d
       .getByRole("button", { name: "記憶を編集", exact: true })
       .click();
     await panel.getByLabel("記憶の内容").fill("訂正した記憶");
+    const originalNote = (await f.service.memory.list())[0]!;
+    await f.service.memory.update(originalNote.id, {
+      text: "AI が更新した記憶",
+      revision: originalNote.revision,
+    });
+    await panel.getByRole("button", { name: "保存", exact: true }).click();
+    await panel
+      .getByRole("alert")
+      .getByText(/更新されています/)
+      .waitFor();
+    assert.equal(
+      await panel.getByLabel("記憶の内容").inputValue(),
+      "訂正した記憶",
+    );
+    await panel
+      .getByRole("button", { name: "再読み込み", exact: true })
+      .click();
+    await panel.getByText("AI が更新した記憶", { exact: true }).waitFor();
+    assert.equal(
+      await panel.getByLabel("記憶の内容").inputValue(),
+      "訂正した記憶",
+    );
     await panel.getByRole("button", { name: "保存", exact: true }).click();
     await panel.getByText("訂正した記憶", { exact: true }).waitFor();
     await panel.getByRole("button", { name: "検索", exact: true }).click();
     await panel.getByRole("searchbox").fill("認証");
     await panel.locator(".memory-result").first().waitFor();
+    let releaseSearch!: () => void;
+    const heldSearch = new Promise<void>((resolve) => {
+      releaseSearch = resolve;
+    });
+    await page.route("**/api/history?**", async (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      if (params.get("query") !== "遅延") return route.continue();
+      if (!params.has("cursor"))
+        return route.fulfill({ json: { matches: [], cursor: "held" } });
+      await heldSearch;
+      await route.fulfill({
+        status: 503,
+        json: { error: "以前の検索のエラー" },
+      });
+    });
+    await panel.getByRole("searchbox").fill("遅延");
+    const moreRequested = page.waitForRequest(
+      (request) => new URL(request.url()).searchParams.get("cursor") === "held",
+    );
+    await panel
+      .getByRole("button", { name: "さらに表示", exact: true })
+      .click();
+    await moreRequested;
     await panel.getByRole("button", { name: "日報", exact: true }).click();
     await panel.locator(".memory-result").first().waitFor();
+    const staleResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).searchParams.get("cursor") === "held",
+    );
+    releaseSearch();
+    await (await staleResponse).finished();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    assert.equal(
+      await panel.getByRole("alert").count(),
+      0,
+      "An earlier search failure cannot replace the active daily view",
+    );
     assert.match((await panel.textContent()) ?? "", /Asia\/Tokyo/);
     assert.match((await panel.textContent()) ?? "", /認証/);
     await page.setViewportSize({ width: 360, height: 740 });
@@ -105,6 +167,29 @@ test("memory, cross-session source navigation and daily records work in light, d
     await page.screenshot({ path: "test-results/memory-mobile.png" });
     await page.setViewportSize({ width: 1280, height: 900 });
     await panel.getByRole("button", { name: "記憶", exact: true }).click();
+    await panel
+      .getByRole("button", { name: "記憶を削除", exact: true })
+      .click();
+    const updatedNote = (await f.service.memory.list())[0]!;
+    await f.service.memory.update(updatedNote.id, {
+      text: "削除確認中の AI 更新",
+      revision: updatedNote.revision,
+    });
+    await panel
+      .getByRole("button", { name: "記憶の削除を確定", exact: true })
+      .click();
+    await panel
+      .getByRole("alert")
+      .getByText(/更新されています/)
+      .waitFor();
+    assert.equal(
+      (await f.service.memory.list())[0]!.text,
+      "削除確認中の AI 更新",
+    );
+    await panel
+      .getByRole("button", { name: "再読み込み", exact: true })
+      .click();
+    await panel.getByText("削除確認中の AI 更新", { exact: true }).waitFor();
     await panel
       .getByRole("button", { name: "記憶を削除", exact: true })
       .click();

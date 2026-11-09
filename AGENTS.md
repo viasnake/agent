@@ -54,7 +54,7 @@ needed, select durable useful information, correct stale notes, merge overlappin
 notes and forget obsolete ones during admitted work, without requiring a user to
 say "remember". The UI remains available for inspection and manual corrections.
 memory_save, memory_update and memory_forget are the agent's write paths. Updates,
-consolidations and agent deletions require current revisions. Consolidation changes
+consolidations and deletions require current revisions. Consolidation changes
 all affected notes atomically and retains every source session in private lineage;
 deleting any such session excludes the derived note from recall. Assign new source
 metadata from the active runtime, never model-supplied provenance. Re-read current

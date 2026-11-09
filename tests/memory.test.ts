@@ -63,7 +63,7 @@ test("ordinary work exposes autonomous memory policy and lets the agent resolve 
         ])
           assert.ok(tools.includes(name));
         // A human correction arrives after the model read revision 1.
-        await f.service.memory.change(primary, {
+        await f.service.memory.update(primary, {
           text: "このリポジトリは npm を使う。テストには接続確認を含める。",
           revision: 1,
         });
@@ -172,17 +172,14 @@ test("consolidation preserves source lineage across reopen and stale forgets can
     text: "B の記憶",
     source: { sessionId: b.id },
   });
-  await f.service.memory.change(
+  await f.service.memory.update(
     first,
     { text: "統合した記憶", revision: 1 },
     { source: { sessionId: c.id }, merge: [{ id: second, revision: 1 }] },
   );
   assert.equal((await f.service.memory.list()).length, 1);
-  await f.service.memory.change(first, { text: "利用者の修正", revision: 2 });
-  await assert.rejects(
-    f.service.memory.change(first, undefined, { revision: 2 }),
-    /更新されています/,
-  );
+  await f.service.memory.update(first, { text: "利用者の修正", revision: 2 });
+  await assert.rejects(f.service.memory.forget(first, 2), /更新されています/);
   assert.equal((await f.service.memory.list())[0]!.text, "利用者の修正");
   await f.service.close();
   f = await fixture([], { root: f.root });
@@ -195,7 +192,7 @@ test("consolidation preserves source lineage across reopen and stale forgets can
       "Deleting a merged source must hide the consolidated note even when its primary source is still visible",
     );
     await assert.rejects(
-      f.service.memory.change(
+      f.service.memory.update(
         first,
         { text: "復活させない", revision: 3 },
         { source: { sessionId: c.id } },
@@ -231,12 +228,12 @@ test("notes survive reopen, enter model context without entering history, and re
   await f.service.memory.save(note);
   await f.service.memory.save(note);
   assert.equal((await f.service.memory.list()).length, 1);
-  await f.service.memory.change(note.requestId, {
+  await f.service.memory.update(note.requestId, {
     text: "このプロジェクトは pnpm を使う",
     revision: 1,
   });
   await assert.rejects(
-    f.service.memory.change(note.requestId, { text: "古い変更", revision: 1 }),
+    f.service.memory.update(note.requestId, { text: "古い変更", revision: 1 }),
     /更新されています/,
   );
   await f.service.close();
@@ -297,7 +294,13 @@ test("notes survive reopen, enter model context without entering history, and re
 
 test("memory tools store notes with runtime-owned sources and read other sessions without worker execution", async () => {
   const f = await fixture([
-    call("memory_save", { text: "回答は日本語にする" }),
+    fauxAssistantMessage(
+      [
+        { type: "text", text: "x".repeat(13000) },
+        fauxToolCall("memory_save", { text: "回答は日本語にする" }),
+      ],
+      { stopReason: "toolUse" },
+    ),
     call("session_search", { query: "覚えて" }),
     (context) => {
       assert.match(JSON.stringify(context.messages), /回答は日本語にする/);
@@ -320,7 +323,7 @@ test("memory tools store notes with runtime-owned sources and read other session
     const requests = f.faux.state.callCount;
     await f.service.memory.search({ query: "日本語" });
     assert.equal(f.faux.state.callCount, requests);
-    await f.service.memory.change(notes[0]!.id);
+    await f.service.memory.forget(notes[0]!.id, notes[0]!.revision);
     await assert.rejects(
       f.service.memory.save({
         requestId: notes[0]!.id,
@@ -497,6 +500,23 @@ test("memory HTTP endpoints require local sessions and CSRF, enforce bounds, and
     assert.equal(
       (
         await app.inject({
+          method: "DELETE",
+          url: `/api/memories/${body.requestId}`,
+          headers,
+          payload: { revision: 1 },
+        })
+      ).statusCode,
+      409,
+    );
+    assert.equal(
+      (
+        await app.inject({ method: "GET", url: "/api/memories", headers })
+      ).json().memories[0].text,
+      "訂正後",
+    );
+    assert.equal(
+      (
+        await app.inject({
           method: "GET",
           url: "/api/history?date=2026-02-30",
           headers,
@@ -510,9 +530,22 @@ test("memory HTTP endpoints require local sessions and CSRF, enforce bounds, and
           method: "DELETE",
           url: `/api/memories/${body.requestId}`,
           headers,
+          payload: { revision: 2 },
         })
       ).statusCode,
       200,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: `/api/memories/${body.requestId}`,
+          headers,
+          payload: { revision: 2 },
+        })
+      ).statusCode,
+      200,
+      "A lost deletion response can be retried safely",
     );
     assert.equal(
       (

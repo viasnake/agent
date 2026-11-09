@@ -11,12 +11,11 @@ import {
   memorySource,
   memoryRevision,
   memoryUpdate,
+  memoryEdit,
 } from "./memory.js";
 import type { AgentService } from "./service.js";
 
-const saveInput = z
-  .object({ text: z.string().trim().min(1).max(1000) })
-  .strict();
+const saveInput = memoryEdit.pick({ text: true });
 const memoryPolicy = `Manage long-term memory autonomously as part of the user's task. Do not wait for the user to say "remember" or operate the memory UI.
 At the start of work, review the live saved notes supplied with this request. For questions about prior work, preferences, decisions or dates, use session_search and session_read when the notes are insufficient; check the source rather than guessing. Empty search pages may have a cursor.
 During work and before the final response, decide whether you learned a stable preference, standing decision, verified reusable fact or useful lesson. Save it with memory_save when useful. Skip transient progress, raw logs, duplicates, guesses and facts already stored unchanged; many conversations need no memory writes.
@@ -28,11 +27,7 @@ export function memoryTools(service: AgentService) {
     piId: Parameters<AgentService["toolConversation"]>[0],
   ) {
     const sessionId = await service.toolConversation(piId);
-    const recent = await service.memory.read({ sessionId });
-    const entryId = recent.messages.find(
-      (message) => message.role === "user",
-    )?.entryId;
-    return { sessionId, ...(entryId ? { entryId } : {}) };
+    return service.memory.latestInput(sessionId);
   }
   return defineExtension({
     name: "memory",
@@ -83,7 +78,7 @@ export function memoryTools(service: AgentService) {
         execute: async (input, api) => {
           const { id, text, revision, merge } = memoryUpdate.parse(input);
           const source = await sourceFor(api.conversationId);
-          const result = await service.memory.change(
+          const result = await service.memory.update(
             id,
             { text, revision },
             { source, merge },
@@ -104,9 +99,7 @@ export function memoryTools(service: AgentService) {
             output: [
               {
                 type: "text",
-                text: JSON.stringify(
-                  await service.memory.change(id, undefined, { revision }),
-                ),
+                text: JSON.stringify(await service.memory.forget(id, revision)),
               },
             ],
           };
