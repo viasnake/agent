@@ -30,6 +30,7 @@ export const modelInput = z
     id: identifier,
     provider: z.enum([
       "openai",
+      "github-copilot",
       "anthropic",
       "google",
       "google-vertex",
@@ -62,9 +63,11 @@ export const modelInput = z
         ? model.auth === "adc"
         : model.provider === "amazon-bedrock"
           ? ["aws", "api_key"].includes(model.auth ?? "api_key")
-          : model.provider === "openai"
-            ? ["oauth", "api_key"].includes(model.auth ?? "api_key")
-            : !model.auth || model.auth === "api_key";
+          : model.provider === "github-copilot"
+            ? model.auth === "oauth"
+            : model.provider === "openai"
+              ? ["oauth", "api_key"].includes(model.auth ?? "api_key")
+              : !model.auth || model.auth === "api_key";
     if (!validAuth)
       ctx.addIssue({
         code: "custom",

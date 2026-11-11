@@ -89,7 +89,11 @@ generated output or live provider responses.
   Vertex/Bedrock catalog reads must not probe external credential chains or call inference. Bedrock's
   AWS client uses one attempt, with complete stream/tool/usage validation.
 - src/images.ts: bounded static-image decoding without resizing or recompression.
-- src/model-auth.ts: browser-session adapter to Pi OpenAI OAuth; keep the SDK
+- src/model-auth.ts: browser-session adapter to Pi OpenAI and GitHub Copilot OAuth.
+  Copilot uses Pi Device Flow with an empty Enterprise-domain prompt; never bind
+  a callback port for it. Use Pi getAuth for refresh and getAvailable for account
+  models; reject missing permission metadata rather than exposing the full catalog.
+  Keep the SDK
   callback loopback-only, with explicit full-URL submission for forwarded connections.
   OAuth state/PKCE/exchange/refresh belong to Pi, not a custom inference client.
 - src/settings.ts: atomic mode-0600 control-owned settings, private credentials
