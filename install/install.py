@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/opt/agent-python/bin/python3
 """Install an application into prepared Ubuntu; never provision the operating system."""
 
 import argparse
@@ -29,6 +29,7 @@ from system import (
 
 APP = Path("/opt/agent")
 NODE = Path("/opt/agent-node")
+PYTHON = Path("/opt/agent-python")
 ETC = Path("/etc/agent")
 RECORD = ETC / "installation.json"
 UNITS = Path("/etc/systemd/system")
@@ -159,15 +160,28 @@ def install(args):
     inactive()
     if len(args.trusted_peer or []) > 16:
         raise RuntimeError("At most 16 forwarding peers are supported")
-    source, node = (
+    source, node, python = (
         Path(args.source).resolve(strict=True),
         Path(args.node).resolve(strict=True),
+        Path(args.python).resolve(strict=True),
     )
     if (
         not (node / "bin/node").is_file()
         or run(str(node / "bin/node"), "--version") != "v26.13.0"
     ):
         raise RuntimeError("Provide the extracted Node.js 26.13.0 directory")
+    if (
+        not (python / "bin/python3").is_file()
+        or run(
+            str(python / "bin/python3"),
+            "-I",
+            "-B",
+            "-c",
+            "import ssl, sqlite3, venv, ensurepip, sys; print(sys.version.split()[0])",
+        )
+        != "3.14.10"
+    ):
+        raise RuntimeError("Provide the extracted standalone Python 3.14.10 directory")
     for name in [
         "dist/src/main.js",
         "dist/web/app.js",
@@ -196,10 +210,13 @@ def install(args):
             LIBEXEC / "agent-preflight",
         ]:
             trusted(path)
+        if os.path.lexists(PYTHON):
+            trusted(PYTHON)
     else:
         for path in [
             APP,
             NODE,
+            PYTHON,
             ETC,
             SUDOERS,
             LIBEXEC / "agent-work",
@@ -215,6 +232,7 @@ def install(args):
     for destination in [
         APP,
         NODE,
+        PYTHON,
         ETC,
         SUDOERS,
         LIBEXEC / "agent-work",
@@ -227,7 +245,7 @@ def install(args):
     root = data_path(
         record["dataRoot"] if record else (args.data_dir or "/srv/agent-data")
     )
-    if any(root.is_relative_to(path) for path in [APP, NODE, ETC]):
+    if any(root.is_relative_to(path) for path in [APP, NODE, PYTHON, ETC]):
         raise RuntimeError(
             "Data must be outside application, runtime and configuration directories"
         )
@@ -288,6 +306,7 @@ def install(args):
     token = uuid.uuid4().hex
     staged_app = APP.with_name(APP.name + ".next-" + token)
     staged_node = NODE.with_name(NODE.name + ".next-" + token)
+    staged_python = PYTHON.with_name(PYTHON.name + ".next-" + token)
     staged_app.mkdir(mode=0o755)
     for name in ["dist", "node_modules", "install", "examples", "scripts"]:
         copy_tree(source / name, staged_app / name)
@@ -297,10 +316,15 @@ def install(args):
             raise RuntimeError("Invalid application input: " + name)
         shutil.copyfile(path, staged_app / name)
     copy_tree(node, staged_node)
+    copy_tree(python, staged_python)
     sudoers = (staged_app / "install/agent.sudoers").read_text()
     run("/usr/sbin/visudo", "-cf", str(staged_app / "install/agent.sudoers"))
     # Keep recoverable installation copies. Config, credentials and data are never replaced.
-    for target, staged in [(APP, staged_app), (NODE, staged_node)]:
+    for target, staged in [
+        (APP, staged_app),
+        (NODE, staged_node),
+        (PYTHON, staged_python),
+    ]:
         if target.exists():
             target.rename(str(target) + ".previous-" + token)
         staged.rename(target)
@@ -355,6 +379,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("source", help="built application directory")
     parser.add_argument("node", help="extracted Node.js 26.13.0 directory")
+    parser.add_argument("python", help="extracted standalone Python 3.14.10 directory")
     parser.add_argument(
         "--data-dir",
         help="directory on mounted persistent storage (default: /srv/agent-data)",

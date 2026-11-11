@@ -50,7 +50,7 @@ export class Worker {
   }
   private env(): Record<string, string> {
     return {
-      PATH: "/opt/agent-node/bin:/usr/local/bin:/usr/bin:/bin",
+      PATH: "/opt/agent-node/bin:/opt/agent-python/bin:/usr/local/bin:/usr/bin:/bin",
       HOME: join(this.options.root, "home"),
       TMPDIR: join(this.options.root, "tmp"),
       LANG: "C.UTF-8",

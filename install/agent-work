@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 [ "$#" -eq 0 ] || exit 64
-exec /usr/bin/env -i HOME=@DATA_ROOT@/work/home PATH=/opt/agent-node/bin:/usr/bin:/bin TMPDIR=@DATA_ROOT@/work/tmp LANG=C.UTF-8 /usr/bin/setpriv --no-new-privs /opt/agent-node/bin/node /opt/agent/dist/src/execution/worker-main.js
+exec /usr/bin/env -i HOME=@DATA_ROOT@/work/home PATH=/opt/agent-node/bin:/opt/agent-python/bin:/usr/bin:/bin TMPDIR=@DATA_ROOT@/work/tmp LANG=C.UTF-8 /usr/bin/setpriv --no-new-privs /opt/agent-node/bin/node /opt/agent/dist/src/execution/worker-main.js
