@@ -35,11 +35,18 @@ The current database is control/conversations-v1.sqlite; work is under
 work/conversations/. The previous state.sqlite and work/jobs/ remain untouched.
 
 The UI uses sessions with conversation and file tabs. Tab changes keep the composer
-and live subscription mounted. Session deletion is a Pi Document tombstone: reject
-running/stopping sessions, hide deleted sessions from all application reads and
-admissions, and retain Pi history, work files and request receipts. Pi 1.5.0 has no
-public conversation purge API; do not edit its tables to simulate one. Replayed
-creation requests must not restore deleted sessions.
+and live subscription mounted. Session deletion requires all execution to be idle.
+Persist a deletion intent, close the Harness, remove the entire session workspace
+through the work UID, and rebuild SQLite through public Pi Storage reads and commits.
+Atomically replace the closed database; never directly edit SDK tables. Remove the
+session's exclusive history, task/submission/document data and source-derived notes,
+including superseded document values. Retain only content already inherited or quoted
+by surviving sessions, stable history IDs, and content-free tombstones/request hashes
+that prevent replay from restoring deleted sessions. Preserve as-of document semantics
+for future forks. Resume an interrupted deletion before accepting requests on reopen;
+cleanup or storage failure must fail closed, never report successful deletion. Keep
+legacy state.sqlite and work/jobs/ untouched. This is application-file deletion, not
+secure erasure of storage media or user-managed backups.
 
 Session rows own search, rename, pin, archive and delete controls. Message actions
 use labeled SVG buttons with tooltips and visible feedback. Keep native dialog and
@@ -55,7 +62,8 @@ Preserve admitted image bytes for edits, without rereading mutable attachments.
 
 Cross-session notes use the bounded agent.memories Pi Document, not worker files or
 SDK tables. Keep mutations idempotent and edits revision-checked. Source-session
-tombstones exclude derived notes from every read and model request. Request-only
+tombstones exclude derived notes from every read and model request; complete deletion
+also removes their current and superseded stored text. Request-only
 memory context is rebuilt from current records and never appended to Pi history;
 previous quotations in other conversations remain ordinary retained history.
 The memory extension supplies the default autonomous workflow: recall sources when
@@ -65,7 +73,7 @@ say "remember". The UI remains available for inspection and manual corrections.
 memory_save, memory_update and memory_forget are the agent's write paths. Updates,
 consolidations and deletions require current revisions. Consolidation changes
 all affected notes atomically and retains every source session in private lineage;
-deleting any such session excludes the derived note from recall. Assign new source
+deleting any such session removes the derived note. Assign new source
 metadata from the active runtime, never model-supplied provenance. Re-read current
 notes after a conflict; never blindly overwrite a manual edit. Keep notes below 32 active
 records, 1,000 characters each and 8,000 characters total. Do not infer that saved
@@ -217,9 +225,10 @@ verification; model authorization uses its scoped access token. Keep this SDK
 limitation distinct from successful local OAuth transport tests.
 Uninitialized output listings are empty and must not initialize work or MCP.
 
-Keep downloads within outputs/: reject absolute paths, traversal, symlinks,
+List and allow downloads only within outputs/ and attachments/: reject absolute paths, traversal, symlinks,
 nonregular files, hardlinks, oversized files and path replacement during reads.
-Uploads go explicitly into attachments/. Files are mutable workspace files,
+Uploads go explicitly into attachments/ and appear alongside generated files with
+their original filenames. Files are mutable workspace files,
 not immutable artifacts. Image inputs are read through the worker's bounded
 attachment reader and saved as original bytes in Pi's user input
 transaction. Workspace edits do not change admitted history. Project only scoped,

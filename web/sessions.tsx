@@ -246,9 +246,10 @@ export function SessionList({
           </button>
           <button
             className="btn-text theme-danger"
-            disabled={
-              target?.status === "running" || target?.status === "stopping"
-            }
+            disabled={sessions.some(
+              (session) =>
+                session.status === "running" || session.status === "stopping",
+            )}
             onClick={() => choose("delete")}
           >
             <Icon name="trash" />
@@ -344,7 +345,7 @@ function SessionDialog({
           <>
             <p className="session-dialog-title">{action.session.title}</p>
             <p>
-              削除後は開けなくなります。履歴と作業ファイルはディスクに残ります。
+              履歴・添付・作業ファイルと、このセッションを出典とする記憶を削除します。元に戻せません。別セッションに分岐・引用した内容は残ります。
             </p>
           </>
         ) : (

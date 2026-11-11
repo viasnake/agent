@@ -54,6 +54,11 @@ import { WorkerClient } from "./execution/client.js";
 import type { Runner } from "./execution/protocol.js";
 import { guardedProvider } from "./provider.js";
 import { agentTools, mcpTools } from "./tools.js";
+import {
+  conversationDatabase,
+  requestDeletion,
+  finishDeletion,
+} from "./session-deletion.js";
 import { SessionMemory } from "./memory.js";
 import { memoryTools } from "./memory-tools.js";
 
@@ -102,6 +107,7 @@ export class AgentService {
   private active?: Active;
   private serial: Promise<unknown> = Promise.resolve();
   private closing = false;
+  private reopening = false;
   private fatal = false;
   private readyModel = false;
   private modelId: string | null;
@@ -132,7 +138,12 @@ export class AgentService {
     await this.applySettings();
     this.registry.install(agentTools(this));
     this.registry.install(memoryTools(this));
-    const path = join(this.config.dataRoot, "control/conversations-v1.sqlite"),
+    if (!this.options.storage)
+      await finishDeletion(join(this.config.dataRoot, "control"), this.runner);
+    await this.openHarness();
+  }
+  private async openHarness(): Promise<void> {
+    const path = join(this.config.dataRoot, "control", conversationDatabase),
       existing = await stat(path).catch(() => null);
     this.harness = await Harness.open(
       this.options.storage ?? (await openNodeSqliteStorage(path)),
@@ -176,11 +187,15 @@ export class AgentService {
         }
     }, ctx);
     // Opening never grants execution. Abort recovered scopes behind closed provider/tool gates before any user request can resume scheduling.
-    for (const conversation of await this.list())
-      if (conversation.status === "interrupted")
+    for (const conversation of (await this.harness.snapshot(
+      ConversationsDoc,
+      ctx,
+    ))!.conversations)
+      if (!conversation.deletedAt && conversation.status === "interrupted")
         await this.abortRetainingInput(await this.pi(conversation));
-    void this.harness.closed.then(() => {
-      if (!this.closing) {
+    const harness = this.harness;
+    void harness.closed.then(() => {
+      if (!this.closing && !this.reopening && this.harness === harness) {
         this.fatal = true;
         this.notify();
       }
@@ -623,7 +638,7 @@ export class AgentService {
     return result;
   }
   healthy(): boolean {
-    return !this.fatal && !this.closing;
+    return !this.fatal && !this.closing && !this.reopening;
   }
   private assertHealthy(): void {
     if (!this.healthy())
@@ -885,22 +900,38 @@ export class AgentService {
   async deleteConversation(id: string): Promise<{ id: string }> {
     return this.exclusive(async () => {
       this.assertHealthy();
-      await this.harness.commit(async (tx) => {
-        const conversation = (
-          await tx.doc(ConversationsDoc)
-        ).conversations.find((item) => item.id === id);
-        if (!conversation) throw new AppError(404, "セッションがありません");
-        if (conversation.deletedAt) return;
-        if (
-          this.active?.id === id ||
-          conversation.status === "running" ||
-          conversation.status === "stopping"
-        )
-          throw new AppError(409, "停止してからセッションを削除してください");
-        // Pi has no public purge API. Retain history, files and admission receipts,
-        // while denying every application lookup and preventing create replay.
-        conversation.deletedAt = Date.now();
-      }, ctx);
+      const conversation = (
+        await this.harness.snapshot(ConversationsDoc, ctx)
+      )?.conversations.find((item) => item.id === id);
+      if (!conversation) throw new AppError(404, "セッションがありません");
+      if (conversation.purgedAt) return { id };
+      if (
+        this.active ||
+        conversation.status === "running" ||
+        conversation.status === "stopping"
+      )
+        throw new AppError(
+          409,
+          "実行中のセッションを停止してから削除してください",
+        );
+      if (this.options.storage)
+        throw new AppError(503, "この保存方式では完全削除を利用できません");
+      this.reopening = true;
+      try {
+        const control = join(this.config.dataRoot, "control");
+        await requestDeletion(control, id);
+        await this.harness.close(ctx);
+        await finishDeletion(control, this.runner);
+        await this.openHarness();
+      } catch {
+        this.fatal = true;
+        throw new AppError(
+          503,
+          "削除が完了していません。サービスを再起動して削除状態を確認してください",
+        );
+      } finally {
+        this.reopening = false;
+      }
       this.notify();
       return { id };
     });
@@ -1327,8 +1358,11 @@ export class AgentService {
   async download(id: string, path: string): Promise<Buffer> {
     await this.conversation(id);
     safeRelative(path);
-    if (!path.startsWith("outputs/"))
-      throw new AppError(400, "outputs/ 内のファイルを指定してください");
+    if (!path.startsWith("outputs/") && !path.startsWith("attachments/"))
+      throw new AppError(
+        400,
+        "outputs/ または attachments/ 内のファイルを指定してください",
+      );
     if ((await this.conversation(id)).workspaceCreated === false)
       throw new AppError(404, "ファイルがありません");
     await this.runner.ready();

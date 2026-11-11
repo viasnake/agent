@@ -494,7 +494,12 @@ export async function createServer(
         .strict()
         .parse(request.query);
     const bytes = await service.download(id, path),
-      name = path.split("/").at(-1)!;
+      name = path.startsWith("attachments/")
+        ? path
+            .split("/")
+            .at(-1)!
+            .replace(/^[0-9a-f-]{36}-/i, "")
+        : path.split("/").at(-1)!;
     return reply
       .header("Content-Type", "application/octet-stream")
       .header(

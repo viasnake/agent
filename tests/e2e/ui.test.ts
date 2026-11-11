@@ -152,6 +152,16 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await page.getByRole("button", { name: "送る", exact: true }).click();
     await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
+    const uploadedLink = page.getByRole("link", { name: /input.csv.*添付/ });
+    await uploadedLink.waitFor();
+    const uploadedDownload = page.waitForEvent("download");
+    await uploadedLink.click();
+    const uploaded = await uploadedDownload;
+    assert.equal(uploaded.suggestedFilename(), "input.csv");
+    assert.equal(
+      await readFile((await uploaded.path())!, "utf8"),
+      "name,total\n Alice,12\n",
+    );
     const conversations = await f.service.list();
     assert.equal(conversations.length, 1);
     const id = conversations[0]!.id;

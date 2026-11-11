@@ -9,6 +9,7 @@ export type Conversation = {
   detail: string;
   updatedAt: number;
   deletedAt?: number;
+  purgedAt?: number;
   parentId?: string;
   forkEntry?: number;
   pinned?: boolean;
