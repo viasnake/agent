@@ -236,7 +236,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           }
           disabled={busy}
         >
-          会話に戻る
+          セッションに戻る
         </button>
       </header>
       <nav className="settings-tabs" aria-label="設定の種類">

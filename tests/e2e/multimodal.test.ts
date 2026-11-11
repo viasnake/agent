@@ -69,9 +69,11 @@ test("Web settings save cloud connections and display private image inputs acros
       .fill("fixture-profile");
     await page.getByRole("button", { name: "保存", exact: true }).click();
     await until(async () => f.service.settings.snapshot().models.length === 2);
-    await page.getByRole("button", { name: "会話に戻る", exact: true }).click();
     await page
-      .getByRole("button", { name: "会話のモデル", exact: true })
+      .getByRole("button", { name: "セッションに戻る", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "セッションのモデル", exact: true })
       .click();
     await page
       .getByRole("searchbox", { name: "モデルを検索" })
@@ -90,6 +92,11 @@ test("Web settings save cloud connections and display private image inputs acros
       mimeType: "image/png",
       buffer: bytes,
     });
+    await page.waitForFunction(
+      () =>
+        document.querySelector<HTMLImageElement>(".attachment-preview")
+          ?.naturalWidth === 2048,
+    );
     await page.locator("#message").fill("この画像を説明してください。");
     await page.locator("#send").click();
     await page.getByText("画像を受け取りました。", { exact: true }).waitFor();
@@ -103,6 +110,17 @@ test("Web settings save cloud connections and display private image inputs acros
       .getByAltText("添付画像", { exact: true })
       .getAttribute("src");
     assert.ok(url?.startsWith("/api/conversations/"));
+    await page.getByRole("button", { name: "画像を拡大", exact: true }).click();
+    await page
+      .getByRole("dialog", { name: "画像プレビュー", exact: true })
+      .waitFor();
+    await page.keyboard.press("Escape");
+    assert.equal(
+      await page
+        .getByRole("button", { name: "画像を拡大", exact: true })
+        .evaluate((node) => node === document.activeElement),
+      true,
+    );
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
       await page.setViewportSize({

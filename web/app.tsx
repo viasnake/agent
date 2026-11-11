@@ -1,5 +1,12 @@
 import { NotificationProvider, useNotify } from "./notifications.js";
 import { ModelPicker } from "./model-picker.js";
+import { SessionList } from "./sessions.js";
+import { MessageActions, MessageActionDialog } from "./message-actions.js";
+import type { MessageAction } from "./message-actions.js";
+import { readDraft, saveDraft } from "./drafts.js";
+import { ConversationSearch } from "./search.js";
+import { MemoryDialog } from "./memory.js";
+import type { MemoryPanel } from "./memory.js";
 import type { ReactNode } from "react";
 import { Settings } from "./settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,6 +42,7 @@ import {
 import { Icon } from "./icons.js";
 
 type ThreadProps = {
+  draftId: string | null;
   view: View | null;
   entries: Entry[];
   cursor: unknown;
@@ -56,16 +64,19 @@ function SendButton({ sending }: { sending: boolean }) {
     <button
       id="send"
       type="button"
-      className="btn-solid theme-primary btn-sm ms-auto"
+      className="btn-solid theme-primary btn-sm ms-auto icon-button send-button"
+      aria-label={sending ? "送信中…" : "送る"}
+      title="送信（Ctrl / ⌘ + Enter）"
+      aria-busy={sending}
       disabled={!canSend || sending}
       onClick={() => aui.composer().send()}
     >
-      <Icon name="send" />
-      {sending ? "送信中…" : "送る"}
+      <Icon name={sending ? "retry" : "send"} />
     </button>
   );
 }
 function Chat({
+  draftId,
   view,
   entries,
   cursor,
@@ -79,6 +90,8 @@ function Chat({
   loadError,
   onRetry,
 }: ThreadProps) {
+  const notify = useNotify();
+  const draftFailure = useRef(false);
   const messages = useMemo(
     () => threadMessages(entries, view),
     [entries, view],
@@ -107,11 +120,47 @@ function Chat({
     onLoadEarlier: onEarlier,
   });
   const input = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  useEffect(() => {
+    runtime.thread.composer.setText(readDraft(draftId));
+    return runtime.thread.composer.subscribe(() => {
+      if (
+        !saveDraft(draftId, runtime.thread.composer.getState().text) &&
+        !draftFailure.current
+      ) {
+        draftFailure.current = true;
+        notify(
+          "下書きを保存できません。画面を閉じる前にコピーしてください",
+          true,
+        );
+      }
+    });
+  }, [runtime, draftId, notify]);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ConversationId.Provider value={view?.conversation.id ?? null}>
         <ThreadPrimitive.Root
-          className={`chat-thread ${!messages.length && !loading ? "chat-empty" : ""}`}
+          className={`chat-thread ${!messages.length && !loading ? "chat-empty" : ""} ${dragging ? "drop-target" : ""}`}
+          onDragOver={(event) => {
+            if (!sending && event.dataTransfer.types.includes("Files")) {
+              event.preventDefault();
+              setDragging(true);
+            }
+          }}
+          onDragLeave={(event) => {
+            if (
+              !event.currentTarget.contains(event.relatedTarget as Node | null)
+            )
+              setDragging(false);
+          }}
+          onDrop={(event) => {
+            setDragging(false);
+            if (sending || !event.dataTransfer.files.length) return;
+            event.preventDefault();
+            setAttachments(
+              [...attachments, ...event.dataTransfer.files].slice(0, 20),
+            );
+          }}
         >
           <ThreadPrimitive.Viewport
             className="thread-viewport"
@@ -216,13 +265,24 @@ function Chat({
                   }
                 }}
                 addAttachmentOnPaste={false}
+                onPaste={(event) => {
+                  if (!sending && event.clipboardData.files.length) {
+                    event.preventDefault();
+                    setAttachments(
+                      [...attachments, ...event.clipboardData.files].slice(
+                        0,
+                        20,
+                      ),
+                    );
+                  }
+                }}
                 autoFocus
               />
               {attachments.length > 0 && (
                 <div className="attachment-chips">
                   {attachments.map((file, index) => (
                     <span key={index} className="attachment-chip">
-                      <Icon name="file" />
+                      <AttachmentIcon file={file} />
                       <span>{file.name}</span>
                       <button
                         type="button"
@@ -285,6 +345,32 @@ function Chat({
   );
 }
 
+function AttachmentIcon({ file }: { file: File }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    setUrl("");
+    if (
+      ![
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+      ].includes(file.type) ||
+      file.size > 20 * 1024 * 1024
+    )
+      return;
+    const next = URL.createObjectURL(file);
+    setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [file]);
+  return url ? (
+    <img className="attachment-preview" src={url} alt="" />
+  ) : (
+    <Icon name="file" />
+  );
+}
+
 function App() {
   const notify = useNotify();
   const [modelOptions, setModelOptions] = useState<ModelOptions>({
@@ -298,6 +384,13 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(
     new URLSearchParams(location.search).has("settings"),
   );
+  const [collapsed, setCollapsed] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [memoryPanel, setMemoryPanel] = useState<MemoryPanel | null>(null);
+  const memoryOrigin = useRef<HTMLElement | null>(null);
+  const memoryTarget = useRef<{ sessionId: string; entryId?: number } | null>(
+    null,
+  );
   const [ready, setReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -306,12 +399,24 @@ function App() {
   const [reload, setReload] = useState(0);
   const [loadError, setLoadError] = useState("");
   const [view, setView] = useState<View | null>(null);
+  const [messageAction, setMessageAction] = useState<MessageAction | null>(
+    null,
+  );
+  const messageActionOrigin = useRef<HTMLElement | null>(null);
+  const [activeEntry, setActiveEntry] = useState<number | null>(null);
+  const attachmentDrafts = useRef(new Map<string, File[]>());
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<unknown>(null);
   const [files, setFiles] = useState<Files>({ files: [] });
+  const [tab, setTab] = useState<"chat" | "files">("chat");
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesError, setFilesError] = useState("");
+  const filesVersion = useRef(0);
+  const listVersion = useRef(0);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [acting, setActing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [threadKey, setThreadKey] = useState(0);
   const [sidebar, setSidebar] = useState(false);
   const [connection, setConnection] = useState("接続中");
@@ -327,17 +432,35 @@ function App() {
     [notify],
   );
   const list = useCallback(async () => {
+    const version = ++listVersion.current;
     const result = await api<{ conversations: Conversation[] }>(
       "/api/conversations",
     );
-    setConversations(result.conversations);
+    if (listVersion.current === version) setConversations(result.conversations);
   }, []);
-  const refreshFiles = useCallback(async (id: string) => {
-    const version = selectionVersion.current;
-    const result = await api<Files>(`/api/conversations/${id}/files`);
-    if (selectedRef.current === id && selectionVersion.current === version)
-      setFiles(result);
-  }, []);
+  const refreshFiles = useCallback(
+    async (id: string) => {
+      const version = selectionVersion.current;
+      const request = ++filesVersion.current;
+      const isCurrent = () =>
+        selectedRef.current === id &&
+        selectionVersion.current === version &&
+        filesVersion.current === request;
+      setFilesLoading(true);
+      setFilesError("");
+      try {
+        const result = await api<Files>(`/api/conversations/${id}/files`);
+        if (isCurrent()) setFiles(result);
+      } catch (error) {
+        if (!isCurrent()) return;
+        if (error instanceof ApiError && error.status === 401) notice(error);
+        else setFilesError("ファイルを読み込めませんでした");
+      } finally {
+        if (isCurrent()) setFilesLoading(false);
+      }
+    },
+    [notice],
+  );
   const merge = useCallback((next: View) => {
     if (selectedRef.current !== next.conversation.id) return;
     setView(next);
@@ -348,10 +471,12 @@ function App() {
     ]);
   }, []);
   function select(id: string | null) {
+    setSearchOpen(false);
     setSettingsOpen(false);
     setSidebar(false);
     // Reselecting the visible conversation must preserve its subscription and draft.
     if (id !== null && selectedRef.current === id) return;
+    attachmentDrafts.current.set(selectedRef.current ?? "new", attachments);
     selectionVersion.current++;
     setReload((value) => value + 1);
     selectedRef.current = id;
@@ -360,7 +485,11 @@ function App() {
     setEntries([]);
     setCursor(null);
     setFiles({ files: [] });
-    setAttachments([]);
+    setFilesLoading(false);
+    setFilesError("");
+    setTab("chat");
+    setAttachments(attachmentDrafts.current.get(id ?? "new") ?? []);
+    setActiveEntry(null);
     setError("");
     setLoadError("");
     setThreadKey((key) => key + 1);
@@ -457,7 +586,8 @@ function App() {
       .catch((error) => {
         if (!isCurrent()) return;
         if (error instanceof ApiError && error.status === 401) notice(error);
-        else if (!snapshotReceived) setLoadError("会話を読み込めませんでした");
+        else if (!snapshotReceived)
+          setLoadError("セッションを読み込めませんでした");
       });
     events.addEventListener("snapshot", (event) => {
       if (!isCurrent()) return;
@@ -488,7 +618,11 @@ function App() {
   useEffect(() => {
     if (!sidebar) return;
     const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSidebar(false);
+      if (
+        event.key === "Escape" &&
+        !document.querySelector(":popover-open, dialog[open]")
+      )
+        setSidebar(false);
     };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
@@ -522,6 +656,8 @@ function App() {
           },
         );
         id = created.id;
+        saveDraft(null, "");
+        attachmentDrafts.current.delete("new");
         // Keep the composer mounted so a rejected/lost response can restore its draft.
         selectedRef.current = id;
         setSelected(id);
@@ -542,11 +678,13 @@ function App() {
       });
       forget(key);
       forget("create");
+      saveDraft(id, "");
       for (const file of attached) forget(`upload-${id}-${file.name}`);
       setAttachments([]);
       await api<View>(`/api/conversations/${id}`).then(merge).catch(notice);
       await list().catch(notice);
     } catch (error) {
+      if (error instanceof ApiError && error.status === 410) forget("create");
       notice(error);
       throw error;
     } finally {
@@ -599,6 +737,155 @@ function App() {
       setActing(false);
     }
   }
+  async function deleteSession(session: Conversation) {
+    if (sending || acting || deleting) return;
+    const id = session.id;
+    setDeleting(true);
+    try {
+      await api(`/api/conversations/${id}`, "DELETE", {});
+      // A failed first send can leave its creation request saved for retry.
+      if (selectedRef.current === id) forget("create");
+      saveDraft(id, "");
+      if (selectedRef.current === id) select(null);
+      attachmentDrafts.current.delete(id);
+      setConversations((items) => items.filter((item) => item.id !== id));
+      await list().catch(notice);
+      notify("セッションを削除しました");
+    } finally {
+      setDeleting(false);
+    }
+  }
+  async function renameSession(session: Conversation, title: string) {
+    await updateSession(session, { title });
+    notify("名前を変更しました");
+  }
+  async function updateSession(
+    session: Conversation,
+    change: { title?: string; pinned?: boolean; archived?: boolean },
+  ) {
+    const updated = await api<Conversation>(
+      `/api/conversations/${session.id}`,
+      "PATCH",
+      change,
+    );
+    setConversations((sessions) =>
+      sessions.map((item) =>
+        item.id === updated.id ? { ...item, ...change } : item,
+      ),
+    );
+    setView((view) =>
+      view?.conversation.id === updated.id
+        ? { ...view, conversation: { ...view.conversation, ...change } }
+        : view,
+    );
+  }
+  async function branchMessage(text: string) {
+    if (!selected || !messageAction) return;
+    const sourceId = selected;
+    const body = { entryId: messageAction.entryId, mode: messageAction.kind };
+    const key = `branch-${sourceId}`;
+    try {
+      const branch = await api<{ id: string }>(
+        `/api/conversations/${sourceId}/branch`,
+        "POST",
+        { ...body, requestId: await requestId(key, { ...body, text }) },
+      );
+      // Creation and execution have separate durable receipts. A lost response never
+      // authorizes another inference or tool mutation with a different identity.
+      if (messageAction.kind !== "fork") {
+        const sendKey = `branch-send-${branch.id}`;
+        const content =
+          messageAction.kind === "edit"
+            ? {
+                text,
+                source: { sessionId: sourceId, entryId: messageAction.entryId },
+              }
+            : {};
+        await api(
+          `/api/conversations/${branch.id}/${messageAction.kind === "edit" ? "messages" : "continue"}`,
+          "POST",
+          { ...content, requestId: await requestId(sendKey, content) },
+        );
+        forget(sendKey);
+      }
+      forget(key);
+      select(branch.id);
+    } finally {
+      await list().catch(notice);
+    }
+  }
+  async function jumpTo(entryId: number) {
+    if (!selected) return;
+    const id = selected,
+      version = selectionVersion.current;
+    let nextCursor = cursor;
+    const loaded = [...entries];
+    for (
+      let page = 0;
+      !loaded.some((entry) => entry.id === entryId) && nextCursor && page < 40;
+      page++
+    ) {
+      const encoded = btoa(JSON.stringify(nextCursor))
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+      const next = await api<View>(
+        `/api/conversations/${id}?cursor=${encodeURIComponent(encoded)}`,
+      );
+      if (selectedRef.current !== id || selectionVersion.current !== version)
+        return;
+      loaded.push(...next.transcript);
+      nextCursor = next.cursor;
+    }
+    setEntries((old) => [
+      ...new Map(
+        [...old, ...loaded].map((entry) => [entry.id, entry]),
+      ).values(),
+    ]);
+    setCursor(nextCursor);
+    if (!loaded.some((entry) => entry.id === entryId))
+      throw new Error("履歴の読み込み上限に達しました");
+    setTab("chat");
+    setActiveEntry(entryId);
+    requestAnimationFrame(() =>
+      document
+        .querySelector<HTMLElement>(`[data-entry-id="${entryId}"]`)
+        ?.scrollIntoView({
+          block: "center",
+          behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
+            ? "instant"
+            : "smooth",
+        }),
+    );
+  }
+  useEffect(() => {
+    const target = memoryTarget.current;
+    if (!target || view?.conversation.id !== target.sessionId) return;
+    memoryTarget.current = null;
+    if (target.entryId) void jumpTo(target.entryId).catch(notice);
+  }, [view?.conversation.id]);
+  function openMemory(panel: MemoryPanel) {
+    memoryOrigin.current = document.activeElement as HTMLElement;
+    setMemoryPanel(panel);
+    setSidebar(false);
+  }
+  useEffect(() => {
+    const shortcuts = (event: KeyboardEvent) => {
+      if (document.querySelector("dialog[open]")) return;
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "f" &&
+        selected
+      ) {
+        event.preventDefault();
+        setTab("chat");
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", shortcuts);
+    return () => window.removeEventListener("keydown", shortcuts);
+  }, [selected]);
   if (!ready)
     return (
       <div className="connection-page">
@@ -618,11 +905,14 @@ function App() {
       </div>
     );
   return (
-    <div id="app" className="app-shell">
+    <div
+      id="app"
+      className={`app-shell ${collapsed ? "sidebar-collapsed" : ""}`}
+    >
       {sidebar && (
         <button
           className="sidebar-backdrop"
-          aria-label="会話一覧を閉じる"
+          aria-label="セッション一覧を閉じる"
           onClick={() => setSidebar(false)}
         />
       )}
@@ -630,38 +920,59 @@ function App() {
         id="sidebar"
         className={`sidebar ${sidebar ? "sidebar-open" : ""}`}
       >
-        <button
-          className="sidebar-close mobile-only btn-text theme-secondary btn-sm"
-          aria-label="会話一覧を閉じる"
-          onClick={() => setSidebar(false)}
-        >
-          <Icon name="close" />
-        </button>
-        <button
-          id="new-conversation"
-          className="btn-outline theme-secondary new-conversation"
-          disabled={sending}
-          onClick={() => select(null)}
-        >
-          <Icon name="plus" />
-          新しい会話
-        </button>
-        <h2 className="sidebar-label">会話</h2>
-        <nav id="conversations" aria-label="会話一覧">
-          {conversations.map((conversation) => (
-            <button
-              key={conversation.id}
-              disabled={sending}
-              aria-current={conversation.id === selected ? "true" : undefined}
-              className={`conversation-item ${conversation.id === selected ? "selected" : ""}`}
-              onClick={() => select(conversation.id)}
-            >
-              <span className={`status-dot ${conversation.status}`} />
-              <span>{conversation.title}</span>
-            </button>
-          ))}
-        </nav>
+        <div className="sidebar-header">
+          <button
+            className="sidebar-close btn-text theme-secondary btn-sm icon-button"
+            aria-label="セッション一覧を閉じる"
+            title="一覧を閉じる"
+            onClick={() =>
+              matchMedia("(min-width: 768px)").matches
+                ? setCollapsed(true)
+                : setSidebar(false)
+            }
+          >
+            <Icon name="close" />
+          </button>
+          <button
+            id="new-conversation"
+            className="btn-outline theme-secondary new-conversation"
+            disabled={sending || deleting}
+            onClick={() => select(null)}
+          >
+            <Icon name="plus" />
+            新しいセッション
+          </button>
+        </div>
+        <SessionList
+          sessions={conversations.map((session) =>
+            session.id === view?.conversation.id ? view.conversation : session,
+          )}
+          selected={selected}
+          disabled={sending || deleting}
+          onSelect={select}
+          onRename={renameSession}
+          onDelete={deleteSession}
+          onUpdate={(session, change) =>
+            updateSession(session, change).catch(notice)
+          }
+        />
         <div className="sidebar-footer">
+          <button
+            className="btn-text theme-secondary btn-sm icon-button"
+            aria-label="記憶を開く"
+            title="記憶・検索"
+            onClick={() => openMemory({ tab: "notes" })}
+          >
+            <Icon name="memory" />
+          </button>
+          <button
+            className="btn-text theme-secondary btn-sm icon-button"
+            aria-label="日次レポートを開く"
+            title="日次レポート"
+            onClick={() => openMemory({ tab: "daily" })}
+          >
+            <Icon name="calendar" />
+          </button>
           <button
             className="btn-text theme-secondary btn-sm"
             onClick={() => {
@@ -669,13 +980,16 @@ function App() {
               setSidebar(false);
             }}
           >
+            <Icon name="settings" />
             設定
           </button>
           <span id="connection" className="small fg-2" role="status">
             <span
               className={`status-dot ${connection === "接続中" ? "connected" : ""}`}
             />
-            {connection}
+            <span title={connection} aria-label={connection}>
+              <Icon name={connection === "接続中" ? "check" : "retry"} />
+            </span>
           </span>
         </div>
       </aside>
@@ -689,16 +1003,36 @@ function App() {
       ) : (
         <main className="workspace">
           <header className="conversation-header">
+            {collapsed && (
+              <button
+                className="desktop-only btn-text theme-secondary btn-sm icon-button"
+                aria-label="セッション一覧を開く"
+                title="一覧を開く"
+                onClick={() => setCollapsed(false)}
+              >
+                <Icon name="menu" />
+              </button>
+            )}
             <button
               className="mobile-only btn-text theme-secondary btn-sm"
-              aria-label="会話一覧を開く"
+              aria-label="セッション一覧を開く"
               aria-expanded={sidebar}
               aria-controls="sidebar"
               onClick={() => setSidebar(!sidebar)}
             >
               <Icon name="menu" />
             </button>
-            <h1 id="title">{view?.conversation.title ?? "新しい会話"}</h1>
+            <h1 id="title">{view?.conversation.title ?? "新しいセッション"}</h1>
+            {view?.conversation.parentId && (
+              <button
+                className="btn-text theme-secondary btn-sm icon-button"
+                aria-label="元のセッションを開く"
+                title="元のセッション"
+                onClick={() => select(view.conversation.parentId!)}
+              >
+                <Icon name="fork" />
+              </button>
+            )}
             {view && (
               <span
                 id="state"
@@ -708,19 +1042,86 @@ function App() {
               </span>
             )}
             <div id="actions" className="ms-auto">
+              {selected && (
+                <button
+                  className="btn-text theme-secondary btn-sm icon-button"
+                  aria-label="会話内を検索"
+                  title="会話内を検索（Ctrl / ⌘ + Shift + F）"
+                  onClick={() => {
+                    setTab("chat");
+                    setSearchOpen(true);
+                  }}
+                >
+                  <Icon name="search" />
+                </button>
+              )}
               {(currentStatus === "running" ||
                 currentStatus === "interrupted") && (
                 <button
-                  className="btn-outline theme-secondary btn-sm"
-                  disabled={acting}
+                  className="btn-outline theme-secondary btn-sm icon-button"
+                  aria-label={currentStatus === "running" ? "停止" : "再開"}
+                  title={currentStatus === "running" ? "停止" : "再開"}
+                  disabled={acting || deleting}
                   onClick={() => void action()}
                 >
-                  {currentStatus === "running" ? "停止" : "再開"}
+                  <Icon name={currentStatus === "running" ? "stop" : "retry"} />
                 </button>
               )}
             </div>
           </header>
-          {files.files.length > 0 && (
+          <div
+            className="nav nav-pills session-tabs"
+            role="tablist"
+            aria-label="セッションの内容"
+          >
+            {(
+              [
+                ["chat", "会話"],
+                ["files", "ファイル"],
+              ] as const
+            ).map(([name, label]) => (
+              <button
+                key={name}
+                id={`${name}-tab`}
+                role="tab"
+                className={`nav-link ${tab === name ? "active" : ""}`}
+                aria-selected={tab === name}
+                aria-controls={`${name}-panel`}
+                tabIndex={tab === name ? 0 : -1}
+                onClick={() => setTab(name)}
+                onKeyDown={(event) => {
+                  if (
+                    !["ArrowLeft", "ArrowRight", "Home", "End"].includes(
+                      event.key,
+                    )
+                  )
+                    return;
+                  event.preventDefault();
+                  const next =
+                    event.key === "Home"
+                      ? "chat"
+                      : event.key === "End"
+                        ? "files"
+                        : name === "chat"
+                          ? "files"
+                          : "chat";
+                  setTab(next);
+                  document.getElementById(`${next}-tab`)?.focus();
+                }}
+              >
+                <Icon name={name === "chat" ? "chat" : "file"} />
+                {label}
+              </button>
+            ))}
+          </div>
+          <section
+            id="files-panel"
+            role="tabpanel"
+            aria-labelledby="files-tab"
+            hidden={tab !== "files"}
+            className="session-panel"
+            tabIndex={0}
+          >
             <section
               id="files-section"
               className="output-files"
@@ -731,14 +1132,20 @@ function App() {
                 <span>ファイル</span>
                 <button
                   id="refresh-files"
-                  className="btn-text theme-secondary btn-sm"
-                  onClick={() =>
-                    selected && void refreshFiles(selected).catch(notice)
-                  }
+                  className="btn-text theme-secondary btn-sm icon-button"
+                  aria-label="更新"
+                  title="更新"
+                  disabled={!selected || filesLoading}
+                  onClick={() => selected && void refreshFiles(selected)}
                 >
-                  更新
+                  <Icon name="retry" />
                 </button>
               </div>
+              {filesLoading && <p role="status">読み込み中…</p>}
+              {filesError && <p role="alert">{filesError}</p>}
+              {!filesLoading && !filesError && !files.files.length && (
+                <p className="files-empty">ファイルはありません</p>
+              )}
               <div id="files">
                 {files.files.map((file) => (
                   <a
@@ -756,54 +1163,134 @@ function App() {
                 )}
               </div>
             </section>
-          )}
-          <Chat
-            key={threadKey}
-            view={view}
-            entries={entries}
-            cursor={cursor}
-            sending={sending || changingModel || (selected !== null && !view)}
-            loading={selected !== null && !view && !loadError}
-            loadError={loadError}
-            onRetry={() => {
-              setLoadError("");
-              setReload((value) => value + 1);
-            }}
-            modelPicker={
-              <ModelPicker
-                label="会話のモデル"
-                compact
-                value={
-                  view?.conversation.modelConfigId
-                    ? JSON.stringify([
-                        view.conversation.modelConfigId,
-                        view.conversation.model ??
-                          modelOptions.models.find(
-                            (m) => m.id === view.conversation.modelConfigId,
-                          )?.model,
-                      ])
-                    : draftModel
-                }
-                models={choices}
-                disabled={
+          </section>
+          <section
+            id="chat-panel"
+            role="tabpanel"
+            aria-labelledby="chat-tab"
+            hidden={tab !== "chat"}
+            className="session-panel"
+          >
+            <MessageActions.Provider
+              value={{
+                disabled:
                   sending ||
                   changingModel ||
-                  (selected !== null && !view) ||
+                  acting ||
+                  deleting ||
                   currentStatus === "running" ||
-                  currentStatus === "stopping"
+                  currentStatus === "stopping",
+                activeEntry,
+                onRemember: (entryId, text) => {
+                  if (selected)
+                    openMemory({
+                      tab: "notes",
+                      text,
+                      source: { sessionId: selected, entryId },
+                    });
+                },
+                onAction: (action) => {
+                  messageActionOrigin.current =
+                    document.activeElement as HTMLElement;
+                  setMessageAction(action);
+                },
+              }}
+            >
+              <Chat
+                draftId={selected}
+                key={threadKey}
+                view={view}
+                entries={entries}
+                cursor={cursor}
+                sending={
+                  sending ||
+                  deleting ||
+                  changingModel ||
+                  (selected !== null && !view)
                 }
-                onChange={(id) => void changeModel(id)}
-                onManage={() => {
-                  setSettingsOpen(true);
+                loading={selected !== null && !view && !loadError}
+                loadError={loadError}
+                onRetry={() => {
+                  setLoadError("");
+                  setReload((value) => value + 1);
                 }}
+                modelPicker={
+                  <ModelPicker
+                    label="セッションのモデル"
+                    compact
+                    value={
+                      view?.conversation.modelConfigId
+                        ? JSON.stringify([
+                            view.conversation.modelConfigId,
+                            view.conversation.model ??
+                              modelOptions.models.find(
+                                (m) => m.id === view.conversation.modelConfigId,
+                              )?.model,
+                          ])
+                        : draftModel
+                    }
+                    models={choices}
+                    disabled={
+                      sending ||
+                      deleting ||
+                      changingModel ||
+                      (selected !== null && !view) ||
+                      currentStatus === "running" ||
+                      currentStatus === "stopping"
+                    }
+                    onChange={(id) => void changeModel(id)}
+                    onManage={() => {
+                      setSettingsOpen(true);
+                    }}
+                  />
+                }
+                attachments={attachments}
+                setAttachments={setAttachments}
+                onSend={send}
+                onEarlier={earlier}
               />
-            }
-            attachments={attachments}
-            setAttachments={setAttachments}
-            onSend={send}
-            onEarlier={earlier}
-          />
+            </MessageActions.Provider>
+          </section>
+          {messageAction && (
+            <MessageActionDialog
+              action={messageAction}
+              onClose={() => {
+                setMessageAction(null);
+                if (messageActionOrigin.current?.isConnected)
+                  messageActionOrigin.current.focus();
+                else document.getElementById("message")?.focus();
+              }}
+              onSubmit={branchMessage}
+            />
+          )}
+          {searchOpen && selected && (
+            <ConversationSearch
+              id={selected}
+              onClose={() => setSearchOpen(false)}
+              onSelect={jumpTo}
+            />
+          )}
         </main>
+      )}
+      {memoryPanel && (
+        <MemoryDialog
+          initial={memoryPanel}
+          onClose={() => {
+            setMemoryPanel(null);
+            if (memoryOrigin.current?.isConnected) memoryOrigin.current.focus();
+            else document.getElementById("message")?.focus();
+          }}
+          onSelect={async (source) => {
+            if (selectedRef.current === source.sessionId) {
+              if (source.entryId) await jumpTo(source.entryId);
+              setTab("chat");
+            } else {
+              await api<View>(`/api/conversations/${source.sessionId}`);
+              memoryTarget.current = source;
+              select(source.sessionId);
+            }
+          }}
+        />
       )}
     </div>
   );

@@ -11,6 +11,7 @@ import type { AgentService } from "./service.js";
 import { AppError } from "./security.js";
 import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
+import { memoryId, memoryInput, memoryEdit, historyInput } from "./memory.js";
 
 const requestId = z.string().uuid();
 const identifier = z.object({ id: z.string().uuid() });
@@ -97,7 +98,7 @@ export async function createServer(
       .header("Cache-Control", "no-store")
       .header(
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
       );
     // Never trust proxy headers to establish the local access boundary.
     const peer = request.ip.replace(/^::ffff:/, "");
@@ -284,6 +285,29 @@ export async function createServer(
       );
     return value;
   };
+  app.get("/api/memories", async () =>
+    safe({ memories: await service.memory.list() }),
+  );
+  app.post("/api/memories", async (request) =>
+    safe(await service.memory.save(memoryInput.parse(request.body))),
+  );
+  app.patch("/api/memories/:id", async (request) => {
+    const { id } = z.object({ id: memoryId }).parse(request.params);
+    return safe(
+      await service.memory.update(id, memoryEdit.parse(request.body)),
+    );
+  });
+  app.delete("/api/memories/:id", async (request) => {
+    const { id } = z.object({ id: memoryId }).parse(request.params);
+    const { revision } = z
+      .object({ revision: z.number().int().positive() })
+      .strict()
+      .parse(request.body);
+    return safe(await service.memory.forget(id, revision));
+  });
+  app.get("/api/history", async (request) =>
+    safe(await service.memory.search(historyInput.parse(request.query))),
+  );
   app.get("/api/conversations", async () =>
     safe({ conversations: (await service.list()).reverse() }),
   );
@@ -322,6 +346,46 @@ export async function createServer(
       : undefined;
     return safe(await service.view(id, parsed));
   });
+  app.delete("/api/conversations/:id", async (request) => {
+    const { id } = identifier.parse(request.params);
+    return service.deleteConversation(id);
+  });
+  app.patch("/api/conversations/:id", async (request) => {
+    const { id } = identifier.parse(request.params);
+    const change = z
+      .object({
+        title: z.string().trim().min(1).max(200).optional(),
+        pinned: z.boolean().optional(),
+        archived: z.boolean().optional(),
+      })
+      .strict()
+      .refine((value) => Object.keys(value).length > 0)
+      .parse(request.body);
+    return safe(await service.updateConversation(id, change));
+  });
+  app.post("/api/conversations/:id/branch", async (request, reply) => {
+    const { id } = identifier.parse(request.params);
+    const body = z
+      .object({
+        requestId,
+        entryId: z.number().int().positive(),
+        mode: z.enum(["fork", "edit", "regenerate"]),
+      })
+      .strict()
+      .parse(request.body);
+    return reply
+      .code(201)
+      .send(await service.branch(id, body.requestId, body.entryId, body.mode));
+  });
+  app.post("/api/conversations/:id/continue", async (request, reply) => {
+    const { id } = identifier.parse(request.params);
+    const body = z.object({ requestId }).strict().parse(request.body);
+    return reply.code(202).send(
+      await service.send(id, body.requestId, "", false, [], {
+        continuing: true,
+      }),
+    );
+  });
   app.put("/api/conversations/:id/model", async (request) => {
     const { id } = identifier.parse(request.params);
     const { modelId, model } = z
@@ -340,6 +404,13 @@ export async function createServer(
           requestId,
           text: z.string().min(1).max(64000),
           attachments: z.array(z.string().max(240)).max(20).default([]),
+          source: z
+            .object({
+              sessionId: z.string().uuid(),
+              entryId: z.number().int().positive(),
+            })
+            .strict()
+            .optional(),
         })
         .strict()
         .parse(request.body);
@@ -352,6 +423,7 @@ export async function createServer(
           body.text,
           false,
           body.attachments,
+          { source: body.source },
         ),
       );
   });
@@ -388,6 +460,32 @@ export async function createServer(
   app.get("/api/conversations/:id/files", async (request) => {
     const { id } = identifier.parse(request.params);
     return service.files(id);
+  });
+  app.get("/api/conversations/:id/export", async (request, reply) => {
+    const { id } = identifier.parse(request.params);
+    return reply
+      .header("Content-Type", "text/markdown; charset=utf-8")
+      .header("Content-Disposition", `attachment; filename="session-${id}.md"`)
+      .header("Content-Security-Policy", "sandbox; default-src 'none'")
+      .send(await service.exportConversation(id));
+  });
+  app.get("/api/conversations/:id/search", async (request) => {
+    const { id } = identifier.parse(request.params);
+    const { q, cursor } = z
+      .object({
+        q: z.string().trim().min(1).max(200),
+        cursor: z.string().max(3000).optional(),
+      })
+      .strict()
+      .parse(request.query);
+    const parsed = cursor
+      ? (z
+          .record(z.string(), z.json())
+          .parse(
+            JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")),
+          ) as Cursor)
+      : undefined;
+    return safe(await service.search(id, q, parsed));
   });
   app.get("/api/conversations/:id/download", async (request, reply) => {
     const { id } = identifier.parse(request.params),

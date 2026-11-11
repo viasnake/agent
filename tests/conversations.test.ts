@@ -336,3 +336,233 @@ test("an unavailable provider model is refused before input admission or work in
     await f.service.close();
   }
 });
+
+test("session deletion denies all reads and admissions, retains disk data, and survives restart without create replay", async () => {
+  let f = await fixture([
+    call("write", { path: "outputs/keep.txt", content: "retained" }),
+    answer("保存しました"),
+  ]);
+  const creation = randomUUID();
+  const { id } = await f.service.create(creation, "削除するセッション");
+  const other = await f.service.create(randomUUID(), "残すセッション");
+  await f.service.send(id, randomUUID(), "保存して");
+  await until(async () => (await f.service.conversation(id)).status === "idle");
+  const piId = (await f.service.conversation(id)).piId;
+  await f.service.deleteConversation(id);
+  await f.service.deleteConversation(id);
+  await f.service.close();
+  f = await fixture([], { root: f.root });
+  try {
+    assert.deepEqual(
+      (await f.service.list()).map((c) => c.id),
+      [other.id],
+    );
+    for (const request of [
+      () => f.service.view(id),
+      () => f.service.files(id),
+      () => f.service.download(id, "outputs/keep.txt"),
+      () => f.service.image(id, 1, 0, 0),
+      () => f.service.piConversation(id),
+      () => f.service.upload(id, randomUUID(), "file", Buffer.from("x")),
+      () => f.service.send(id, randomUUID(), "復活しない"),
+      () => f.service.send(id, randomUUID(), "", true),
+      () => f.service.selectModel(id, randomUUID()),
+      () => f.service.stop(id),
+    ])
+      await assert.rejects(request(), { statusCode: 404 });
+    await assert.rejects(f.service.create(creation, "削除するセッション"), {
+      statusCode: 410,
+    });
+    await assert.rejects(f.service.deleteConversation(randomUUID()), {
+      statusCode: 404,
+    });
+    assert.equal(
+      await readFile(
+        join(f.root, "work/conversations", id, "outputs/keep.txt"),
+        "utf8",
+      ),
+      "retained",
+    );
+    const { BACKGROUND_CONTEXT: context } = await import(
+      "@earendil-works/chord/context"
+    );
+    const pi = await f.service.harness.conversation(piId, context);
+    assert.ok(pi);
+    assert.ok((await pi.entries({}, 40, undefined, context)).items.length);
+  } finally {
+    await f.service.close();
+  }
+});
+
+test("session deletion rejects active execution and serializes against input admission", async () => {
+  const f = await fixture([call("bash", { command: "sleep 30" })]);
+  try {
+    const { id } = await f.service.create(randomUUID(), "実行中");
+    const other = await f.service.create(randomUUID(), "待機中");
+    await f.service.send(id, randomUUID(), "実行");
+    await assert.rejects(f.service.deleteConversation(id), { statusCode: 409 });
+    await f.service.deleteConversation(other.id);
+    assert.equal((await f.service.conversation(id)).status, "running");
+    await f.service.stop(id);
+    await f.service.deleteConversation(id);
+    assert.deepEqual(await f.service.list(), []);
+
+    const next = await f.service.create(randomUUID(), "同時操作");
+    const deleted = f.service.deleteConversation(next.id);
+    const sent = f.service.send(next.id, randomUUID(), "遅れた入力");
+    const results = await Promise.allSettled([deleted, sent]);
+    assert.equal(results[0]!.status, "fulfilled");
+    assert.equal(results[1]!.status, "rejected");
+    await assert.rejects(f.service.conversation(next.id), { statusCode: 404 });
+  } finally {
+    await f.service.close();
+  }
+});
+
+test("renaming and bounded search preserve selection; branching is atomic and never replays tools before explicit input", async () => {
+  const f = await fixture([
+    call("bash", {
+      command: "printf once >> effect; printf output > outputs/result.txt",
+    }),
+    answer("original response needle"),
+  ]);
+  try {
+    const { id } = await f.service.create(randomUUID(), "original");
+    const originalText = `original input needle\n${"x".repeat(20000)}`;
+    await f.service.send(id, randomUUID(), originalText);
+    await until(
+      async () => (await f.service.conversation(id)).status === "idle",
+    );
+    const before = await f.service.conversation(id);
+    const renamed = await f.service.renameConversation(id, "renamed");
+    assert.equal(renamed.title, "renamed");
+    assert.equal(renamed.model, before.model);
+    assert.equal(renamed.updatedAt, before.updatedAt);
+    const entries = (await f.service.view(id)).transcript;
+    const input = entries.find((entry) =>
+      entry.messages.some((message) => message.role === "user"),
+    )!;
+    assert.equal(
+      input.messages.find((message) => message.role === "user")!.content,
+      originalText,
+      "Editing must receive the full admitted user text",
+    );
+    const response = entries.find((entry) =>
+      entry.messages.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.content.includes("original response"),
+      ),
+    )!;
+    const matches = await f.service.search(id, "NEEDLE");
+    assert.equal(matches.matches.length, 2);
+    assert.match(
+      (await f.service.exportConversation(id)).toString(),
+      /original input needle/,
+    );
+    const limit = f.config.limits.fileBytes;
+    f.config.limits.fileBytes = 16;
+    await assert.rejects(f.service.exportConversation(id), { statusCode: 413 });
+    f.config.limits.fileBytes = limit;
+    const key = randomUUID();
+    const branch = await f.service.branch(id, key, response.id, "fork");
+    assert.deepEqual(
+      await f.service.branch(id, key, response.id, "fork"),
+      branch,
+    );
+    await assert.rejects(f.service.branch(id, key, response.id, "regenerate"), {
+      statusCode: 409,
+    });
+    assert.equal(
+      (await f.service.conversation(branch.id)).workspaceCreated,
+      false,
+    );
+    assert.equal((await f.service.conversation(branch.id)).parentId, id);
+    assert.equal((await f.service.conversation(branch.id)).model, before.model);
+    assert.equal((await f.service.conversation(branch.id)).requests, 0);
+    assert.match(
+      JSON.stringify(await f.service.view(branch.id)),
+      /original response needle/,
+    );
+    assert.deepEqual((await f.service.files(branch.id)).files, []);
+    assert.equal(
+      await readFile(join(f.root, "work/conversations", id, "effect"), "utf8"),
+      "once",
+    );
+    await assert.rejects(f.service.branch(id, randomUUID(), 999999, "fork"), {
+      statusCode: 400,
+    });
+    await assert.rejects(
+      f.service.branch(branch.id, randomUUID(), response.id, "edit"),
+      { statusCode: 400 },
+    );
+
+    const regenerated = await f.service.branch(
+      id,
+      randomUUID(),
+      response.id,
+      "regenerate",
+    );
+    assert.doesNotMatch(
+      JSON.stringify(await f.service.view(regenerated.id)),
+      /original response needle/,
+    );
+    assert.match(
+      JSON.stringify(await f.service.view(regenerated.id)),
+      /original input needle/,
+    );
+    f.faux.setResponses([answer("new response")]);
+    const run = randomUUID();
+    await f.service.send(regenerated.id, run, "", false, [], {
+      continuing: true,
+    });
+    await until(
+      async () =>
+        (await f.service.conversation(regenerated.id)).status === "idle",
+    );
+    await f.service.send(regenerated.id, run, "", false, [], {
+      continuing: true,
+    });
+    assert.equal((await f.service.conversation(regenerated.id)).requests, 1);
+    assert.match(
+      JSON.stringify(await f.service.view(regenerated.id)),
+      /new response/,
+    );
+    assert.equal(
+      await readFile(join(f.root, "work/conversations", id, "effect"), "utf8"),
+      "once",
+    );
+
+    const edited = await f.service.branch(id, randomUUID(), input.id, "edit");
+    assert.doesNotMatch(
+      JSON.stringify(await f.service.view(edited.id)),
+      /original input needle/,
+    );
+    f.faux.setResponses([answer("edited response")]);
+    await f.service.send(edited.id, randomUUID(), "edited input", false, [], {
+      source: { sessionId: id, entryId: input.id },
+    });
+    await until(
+      async () => (await f.service.conversation(edited.id)).status === "idle",
+    );
+    assert.match(
+      JSON.stringify(await f.service.view(edited.id)),
+      /edited input/,
+    );
+    assert.match(
+      JSON.stringify(await f.service.view(id)),
+      /original input needle/,
+    );
+    await f.service.deleteConversation(id);
+    await assert.rejects(f.service.search(id, "needle"), { statusCode: 404 });
+    await assert.rejects(f.service.renameConversation(id, "restore"), {
+      statusCode: 404,
+    });
+    assert.match(
+      JSON.stringify(await f.service.view(branch.id)),
+      /original response needle/,
+    );
+  } finally {
+    await f.service.close();
+  }
+});

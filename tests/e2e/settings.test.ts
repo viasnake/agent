@@ -327,9 +327,11 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       call("write", { path: "outputs/browser.txt", content: "verified" }),
       answer("完了しました"),
     ]);
-    await page.getByRole("button", { name: "会話に戻る", exact: true }).click();
     await page
-      .getByRole("button", { name: "会話のモデル", exact: true })
+      .getByRole("button", { name: "セッションに戻る", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "セッションのモデル", exact: true })
       .click();
     const search = page.getByRole("searchbox", { name: "モデルを検索" });
     await page
@@ -355,7 +357,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await until(async () => (await f.service.list())[0]?.status === "idle");
     await page.getByText("完了しました", { exact: true }).waitFor();
     const picker = page.getByRole("button", {
-      name: "会話のモデル",
+      name: "セッションのモデル",
       exact: true,
     });
     await picker.click();
@@ -385,10 +387,10 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
 
     await page.reload();
     await page.locator("#app").waitFor();
-    await page.getByRole("button", { name: "会話一覧を開く" }).click();
+    await page.getByRole("button", { name: "セッション一覧を開く" }).click();
     await page.locator(".conversation-item").first().click();
     await page
-      .getByRole("button", { name: "会話のモデル", exact: true })
+      .getByRole("button", { name: "セッションのモデル", exact: true })
       .filter({ hasText: "gpt-4.1-mini" })
       .waitFor();
     await page.getByText("完了しました", { exact: true }).waitFor();
