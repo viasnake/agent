@@ -1,6 +1,7 @@
 """Filesystem fixtures never install users, mount storage or modify host policy."""
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -238,16 +239,92 @@ class Installation(unittest.TestCase):
                 installer.origin(value)
 
     def test_shell_entrypoints_parse_and_help_needs_no_privileges(self):
-        for name in ["install.sh", "agent-work", "agent-preflight"]:
+        for name in ["install.sh", "runtimes.sh"]:
+            subprocess.run(["/bin/bash", "-n", str(INSTALL / name)], check=True)
+        for name in ["agent-work", "agent-preflight"]:
             subprocess.run(["/bin/sh", "-n", str(INSTALL / name)], check=True)
         result = subprocess.run(
-            ["/bin/sh", str(INSTALL / "install.sh"), "--help"],
+            ["/bin/bash", str(INSTALL / "install.sh"), "--help"],
             capture_output=True,
             text=True,
             check=True,
         )
         self.assertIn("--update", result.stdout)
         self.assertIn("--trusted-peer", result.stdout)
+        self.assertIn("--build-only", result.stdout)
+
+    def test_invalid_setup_arguments_do_not_download_or_request_sudo(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ["curl", "sudo"]:
+                command = root / name
+                command.write_text(
+                    '#!/bin/sh\ntouch "' + str(root / "called") + '"\nexit 99\n'
+                )
+                command.chmod(0o755)
+            for args in [
+                ["--unknown"],
+                ["--data-dir"],
+                ["--data-dir", "--update"],
+                ["--build-only", "--update"],
+                ["--update", "--data-dir", "/srv/other"],
+            ]:
+                result = subprocess.run(
+                    ["/bin/bash", str(INSTALL / "install.sh"), *args],
+                    env={"PATH": str(root) + ":/usr/bin:/bin"},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertFalse((root / "called").exists())
+
+    def test_runtime_checksum_failure_stops_before_extraction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = '''set -e
+source "$1"
+curl() {
+  while [[ "$1" != --output ]]; do shift; done
+  printf 'damaged download' > "$2"
+}
+tar() { touch "$CHECK_EXTRACTED"; }
+prepare_runtimes "$2"
+'''
+            result = subprocess.run(
+                [
+                    "/bin/bash", "-c", script, "test",
+                    str(INSTALL / "runtimes.sh"), str(root),
+                ],
+                env={**os.environ, "CHECK_EXTRACTED": str(root / "extracted")},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((root / "extracted").exists())
+            self.assertFalse((root / "node").exists())
+
+    def test_runtime_download_accepts_only_matching_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "download"
+            digest = hashlib.sha256(b"fixture runtime").hexdigest()
+            script = '''set -e
+source "$1"
+curl() {
+  while [[ "$1" != --output ]]; do shift; done
+  printf 'fixture runtime' > "$2"
+}
+download_runtime https://example.test/runtime "$2" "$3"
+'''
+            subprocess.run(
+                [
+                    "/bin/bash", "-c", script, "test",
+                    str(INSTALL / "runtimes.sh"), digest, str(destination),
+                ],
+                check=True,
+            )
+            self.assertEqual(destination.read_bytes(), b"fixture runtime")
 
     def test_copy_rejects_external_links_and_nonregular_input(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -277,7 +354,7 @@ class Installation(unittest.TestCase):
     def test_install_and_update_preserve_settings_data_and_previous_app(self):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             root = Path(temporary)
-            source, node = root / "source", root / "node"
+            source, node, python = root / "source", root / "node", root / "python"
             source.mkdir()
             for name in ["dist/src", "dist/web", "node_modules", "examples", "scripts"]:
                 (source / name).mkdir(parents=True)
@@ -296,9 +373,12 @@ class Installation(unittest.TestCase):
             )
             (node / "bin").mkdir(parents=True)
             (node / "bin/node").write_text("node fixture")
+            (python / "bin").mkdir(parents=True)
+            (python / "bin/python3").write_text("python fixture")
             paths = {
                 "APP": root / "opt/agent",
                 "NODE": root / "opt/agent-node",
+                "PYTHON": root / "opt/agent-python",
                 "ETC": root / "etc/agent",
                 "UNITS": root / "etc/systemd/system",
                 "LIBEXEC": root / "usr/local/libexec",
@@ -317,7 +397,15 @@ class Installation(unittest.TestCase):
             stack.enter_context(
                 patch.object(installer, "check", side_effect=lambda record: record)
             )
-            stack.enter_context(patch.object(installer, "run", return_value="v26.13.0"))
+            stack.enter_context(
+                patch.object(
+                    installer,
+                    "run",
+                    side_effect=lambda *args: "3.14.10"
+                    if args[0] == str(python / "bin/python3")
+                    else "v26.13.0",
+                )
+            )
             process_probe = stack.enter_context(
                 patch.object(
                     installer.subprocess,
@@ -352,13 +440,17 @@ class Installation(unittest.TestCase):
             args = argparse.Namespace(
                 source=str(source),
                 node=str(node),
+                python=str(python),
                 update=False,
                 data_dir=str(data),
                 listen=None,
                 origin=None,
                 trusted_peer=None,
             )
-            for path in [paths["APP"], paths["NODE"] / "data", paths["ETC"]]:
+            for path in [
+                paths["APP"], paths["NODE"] / "data",
+                paths["PYTHON"] / "data", paths["ETC"],
+            ]:
                 args.data_dir = str(path)
                 with self.assertRaisesRegex(RuntimeError, "Data must be outside"):
                     installer.install(args)
@@ -411,10 +503,24 @@ class Installation(unittest.TestCase):
             for path, content in retained.items():
                 self.assertEqual(path.read_bytes(), content)
             self.assertEqual(firewall.call_count, 2)
+            self.assertEqual(
+                (paths["PYTHON"] / "bin/python3").read_text(), "python fixture"
+            )
+            self.assertEqual(
+                len(list(paths["PYTHON"].parent.glob("agent-python.previous-*"))), 1
+            )
             self.assertIn(str(data), (paths["LIBEXEC"] / "agent-work").read_text())
             self.assertNotIn(
                 "@DATA_ROOT@", (paths["UNITS"] / "agent.service").read_text()
             )
+            # An existing installation can add the dedicated Python without adopting data.
+            paths["PYTHON"].rename(root / "old-python")
+            installer.install(args)
+            self.assertTrue((paths["PYTHON"] / "bin/python3").is_file())
+            self.assertEqual(config_path.read_bytes(), config)
+            self.assertEqual(json.loads(record_path.read_text()), record)
+            for path, content in retained.items():
+                self.assertEqual(path.read_bytes(), content)
 
 
 if __name__ == "__main__":

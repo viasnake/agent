@@ -1,23 +1,43 @@
 # Agent
 
-Web から使える Pi Durable Agent。Ubuntu Server 26.04、systemd、Node.js 26.13.0、永続ストレージが必要です。マシンの準備と接続経路は [Devbox](https://github.com/viasnake/devbox) などで用意します。
+Web から使える Pi Durable Agent。用意済みの Ubuntu Server にインストールし、手元のブラウザから使います。
+
+## 必要な環境
+
+- 導入先：Ubuntu Server 26.04（x86-64 / ARM64）、稼働中の systemd、sudo 権限、インターネット接続。
+- 保存先：UUID のある ext4・XFS・Btrfs。OS のルートファイルシステムも利用できます。既定の `/srv/agent-data` とその親は root 所有とし、シンボリックリンクを含めず、他ユーザーの書き込みを許可しないでください。
+- 操作端末：Windows・macOS・Linux のブラウザ。別端末から使う場合は `ssh` コマンドと、導入先への SSH 接続が必要です。
+
+OS・ストレージ・SSH は事前に準備してください。以下のコマンドは導入先の Ubuntu で実行します。
 
 ## インストール
 
-展開済み Node.js のディレクトリを指定します。データ保存先の親は root 所有とし、ext4・XFS・Btrfs の永続ファイルシステムを事前にマウントしてください。OS のルートファイルシステムも利用できます。
+一般ユーザーで実行します。`install.sh` が OS パッケージの導入、CPU に合うランタイムの取得・SHA-256 検証、ビルド、配置、サービス起動を行い、必要な操作だけ sudo を使います。
 
 ```sh
-sudo apt-get install git python3 python3-venv openssl curl nftables sudo util-linux procps
-export PATH="/path/to/node-v26.13.0-linux-x64/bin:$PATH"
+sudo apt-get update
+sudo apt-get install -y git ca-certificates
 git clone https://github.com/viasnake/agent.git
 cd agent
-npm ci --ignore-scripts --no-audit --no-fund
-npm run build
-sudo bash install/install.sh "$PWD" /path/to/node-v26.13.0-linux-x64 --data-dir /srv/agent-data
-sudo systemctl enable --now agent.service
+bash install/install.sh
+curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080/healthz
 ```
 
-既定では `127.0.0.1:8080` で待ち受けます。転送を使う場合は、インストール時に `--listen <待受IP> --trusted-peer <転送元IP> --origin http://localhost:<公開ポート>` を指定します。接続元と Origin は自動許可しません。
+`{"ok":true}` が返れば起動済みです。Node.js 26.13.0 は `/opt/agent-node`、[再配置可能な Python](https://docs.astral.sh/python-build-standalone/) 3.14.10 は `/opt/agent-python`、アプリは `/opt/agent` に配置します。起動前チェックと作業中の `node`・`npm`・`python3` は専用ランタイムを使い、OS の Node.js・Python は変更しません。systemd・nftables・sudo などの OS 機能とパッケージは Ubuntu 側で使います。
+
+保存先を変える場合は、マウント済み領域に合わせて `bash install/install.sh --data-dir /mnt/data/agent-data` を使います。`findmnt --target /mnt/data --output TARGET,FSTYPE,UUID` でマウントと UUID を確認してください。その他の指定は `bash install/install.sh --help` で確認できます。
+
+## ブラウザから接続
+
+導入先にブラウザがある場合は [http://127.0.0.1:8080](http://127.0.0.1:8080) を開きます。別端末の場合は、その端末の PowerShell またはターミナルで実行します。`USER@SERVER` は Ubuntu の SSH ユーザー名と接続先に置き換えてください。
+
+```sh
+ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:8080:127.0.0.1:8080 USER@SERVER
+```
+
+接続中のターミナルを開いたまま、手元のブラウザで [http://127.0.0.1:8080](http://127.0.0.1:8080) を開きます。UI のログイン画面はありません。この SSH 接続では既定のループバック待ち受けを使うため、8080 番の外部公開や `--trusted-peer` の追加は不要です。
+
+手元の 8080 番が使用中なら、`sudoedit /etc/agent/config.yaml` で `server.origins` に `http://127.0.0.1:18080` を追加してサービスを再起動し、転送指定を `-L 127.0.0.1:18080:127.0.0.1:8080` に変えて [http://127.0.0.1:18080](http://127.0.0.1:18080) を開きます。
 
 ## 使い方
 
@@ -43,23 +63,26 @@ ChatGPT の認証後に localhost へ接続できない場合は、認証後の 
 sudo systemctl start agent.service
 sudo systemctl stop agent.service
 
-# 更新したソースでビルドしてから実行
-npm ci --ignore-scripts --no-audit --no-fund
-npm run build
-sudo bash install/install.sh "$PWD" /path/to/node-v26.13.0-linux-x64 --update
-sudo systemctl start agent.service
+# ソースのリポジトリで実行
+git pull --ff-only
+sudo systemctl stop agent.service
+bash install/install.sh --update
+curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080/healthz
 ```
 
-設定は `/etc/agent/config.yaml`、データは既定で `/srv/agent-data` に保存します。バックアップはサービスを停止し、両ディレクトリを所有者・権限ごと保護してコピーします。更新はデータ・資格情報・設定を保持し、以前のアプリを `/opt/agent.previous-*`、ランタイムを `/opt/agent-node.previous-*` に残します。旧形式の配置や、マウント・専用ユーザーの変更を検出した場合は上書きせず停止します。
+設定は `/etc/agent/config.yaml`、データは既定で `/srv/agent-data` に保存します。バックアップはサービスを停止し、両ディレクトリを所有者・権限ごと保護してコピーします。更新はデータ・資格情報・設定を保持し、以前のアプリを `/opt/agent.previous-*`、ランタイムを `/opt/agent-node.previous-*`・`/opt/agent-python.previous-*` に残します。旧形式の配置や、マウント・専用ユーザーの変更を検出した場合は上書きせず停止します。
+
+起動しない場合は `sudo systemctl status agent.service agent-egress.service --no-pager` と `sudo journalctl -u agent.service -u agent-egress.service -n 100 --no-pager` で確認します。マウント・所有者・nftables・DNS の検査に失敗した場合は、表示された原因を修正してから `sudo systemctl restart agent.service` を実行してください。
 
 ## テスト
 
+`bash install/install.sh --build-only` は sudo を使わず、ランタイムの取得・検証とビルドだけを行います。全検証は導入済みランタイムを使い、ソースのリポジトリで実行します。
+
 ```sh
+export PATH="/opt/agent-node/bin:/opt/agent-python/bin:$PATH"
+npm ci --ignore-scripts --no-audit --no-fund
 npx playwright install --with-deps chromium
-npm run build
-npm test
-npm run test:e2e
-npm run test:install
+npm run verify
 ```
 
 実環境の権限・通信制限の検査は、専用 Ubuntu 環境でサービスを停止し、`sudo env AGENT_GUEST_TEST=1 /opt/agent-node/bin/node /opt/agent/scripts/guest-test.mjs` を実行します。通常 CI では管理者操作や実モデル呼び出しを行いません。

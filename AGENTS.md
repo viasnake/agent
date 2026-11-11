@@ -11,6 +11,15 @@ The user-facing unit is a session containing a Pi conversation and its working
 directory. An answered session accepts more input. At most one session executes; other
 execution requests receive busy, without a host FIFO or scheduler.
 
+install/install.sh downloads checksum-pinned Node.js 26.13.0 and standalone
+Python 3.14.10 for Agent. Keep them root-owned under /opt/agent-node and
+/opt/agent-python, including preflight checks and work-side PATH. Never depend
+on or replace host Node.js/Python. Ubuntu systemd, nftables, sudo and other
+OS utilities remain host dependencies. Build as the invoking regular user;
+use sudo only for OS packages, deployment and service control. --build-only
+must never request sudo or change the installation. Updates require an
+explicitly stopped service and preserve settings, credentials and work data.
+
 Do not add a host daemon, VM manager, automatic host startup, Proxmox,
 Firecracker, distributed workers, workflow engine or plugin management system.
 Do not add job classifications, service-specific connectors or ledgers, fixed

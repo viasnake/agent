@@ -63,6 +63,7 @@ command("/usr/local/libexec/agent-preflight", []);
 for (const path of [
   "/usr/local/libexec/agent-work",
   "/opt/agent-node/bin/node",
+  "/opt/agent-python",
   "/opt/agent/dist/src/execution/worker-main.js",
   "/run/agent-egress.ready",
 ]) {
@@ -196,7 +197,7 @@ try {
     commandBytes: 1048576,
   });
   await shell(
-    "npm install --ignore-scripts --no-audit --no-fund ./dependency && node -e 'if(require(\"guest-local-fixture\")!==42)process.exit(1)' && python3 -m venv .venv",
+    "npm install --ignore-scripts --no-audit --no-fund ./dependency && node -e 'if(require(\"guest-local-fixture\")!==42)process.exit(1)' && test \"$(command -v python3)\" = /opt/agent-python/bin/python3 && python3 -c 'import sys; assert sys.base_prefix == \"/opt/agent-python\"' && python3 -m venv .venv && .venv/bin/python -c 'import ssl, sqlite3'",
   );
   assert.equal((await runner.call(id, "cleanup", {})).cleanup, true);
   await runner.close();

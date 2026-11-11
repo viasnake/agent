@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { readInstallation } from "../installation.js";
@@ -37,6 +37,11 @@ export class WorkerClient implements Runner {
     const installation = await readInstallation();
     await trusted("/usr/local/libexec/agent-work");
     await trusted("/opt/agent-node/bin/node");
+    await trusted("/opt/agent-python");
+    const python = await realpath("/opt/agent-python/bin/python3");
+    if (!python.startsWith("/opt/agent-python/"))
+      throw new Error("Worker Python must use the installed runtime");
+    await trusted(python);
     await trusted("/opt/agent/dist/src/execution/worker-main.js");
     await trusted("/run/agent-egress.ready");
     if (

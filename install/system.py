@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/opt/agent-python/bin/python3
 """Shared installation and startup checks; never creates or mounts storage."""
 
 import grp

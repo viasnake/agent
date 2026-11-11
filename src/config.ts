@@ -107,8 +107,8 @@ export async function checkDataRoot(config: Config): Promise<void> {
       "Configuration does not match the installed data root or control identity",
     );
   await promisify(execFile)(
-    "/usr/bin/python3",
-    ["/opt/agent/install/system.py", "check"],
+    "/opt/agent-python/bin/python3",
+    ["-I", "-B", "/opt/agent/install/system.py", "check"],
     { timeout: 15000 },
   );
 }
