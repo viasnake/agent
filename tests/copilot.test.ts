@@ -426,3 +426,56 @@ test("Copilot device failures, cancellation, expiry, stale login and provider ch
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+test("Copilot test failures classify SDK errors without leaking provider responses or retrying", async (t) => {
+  const f = await fixture([], { noModel: true, modelCatalog: undefined });
+  let status = 400;
+  let code = "model_not_supported";
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    requests++;
+    return Response.json(
+      {
+        error: {
+          code,
+          type: "invalid_request_error",
+          message: "private-copilot-secret private-request-content",
+          param: "model",
+        },
+      },
+      { status },
+    );
+  });
+  try {
+    const id = await configure(f);
+    for (const modelId of ["claude-haiku-4.5", "gpt-5.6-luna"]) {
+      const model = f.service.settings.snapshot().models[0]!;
+      await f.service.settings.setModelOAuth(id, model.authVersion, {
+        type: "oauth",
+        access: "private-copilot-secret",
+        refresh: "private-refresh-secret",
+        expires: Date.now() + 3600000,
+        availableModelIds: [modelId],
+      });
+      for (const failure of [
+        {
+          status: 400,
+          code: "model_not_supported",
+          expected: "モデルを利用できません",
+        },
+        { status: 403, code: "forbidden", expected: "接続失敗（HTTP 403）" },
+      ]) {
+        status = failure.status;
+        code = failure.code;
+        const before = requests;
+        const result = await f.service.testModel(id);
+        assert.equal(result.models[0]!.status, failure.expected);
+        assert.equal(requests, before + 1, "never retry a rejected inference");
+        assert.ok(!JSON.stringify(result).includes("private-"));
+      }
+    }
+  } finally {
+    await f.service.close();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
