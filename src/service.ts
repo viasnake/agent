@@ -13,6 +13,7 @@ import type {
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
   chatgptTestModel,
+  copilotAccountModels,
   openaiAccountModels,
   modelCatalogs,
   modelProvider,
@@ -208,8 +209,8 @@ export class AgentService {
           ) ??
           (m.auth === "oauth"
             ? m.authorized
-              ? "ChatGPT 認証済み"
-              : "ChatGPT 未認証"
+              ? `${m.provider === "github-copilot" ? "GitHub Copilot" : "ChatGPT"} 認証済み`
+              : `${m.provider === "github-copilot" ? "GitHub Copilot" : "ChatGPT"} 未認証`
             : m.auth === "adc" || m.auth === "aws"
               ? "外部認証・未確認"
               : m.hasKey
@@ -254,11 +255,13 @@ export class AgentService {
         id: m.id,
         name:
           m.name ||
-          (m.auth === "oauth"
-            ? "ChatGPT"
-            : m.provider === "openai"
-              ? "OpenAI API"
-              : m.provider),
+          (m.provider === "github-copilot"
+            ? "GitHub Copilot"
+            : m.auth === "oauth"
+              ? "ChatGPT"
+              : m.provider === "openai"
+                ? "OpenAI API"
+                : m.provider),
         provider: m.provider,
         model: m.model,
         available: !!modelCredential(m),
@@ -281,7 +284,7 @@ export class AgentService {
           (model) => model.id === connection.id,
         )!;
         if (!connection.available) return { ...connection, catalog: [] };
-        if (config.provider !== "openai")
+        if (!["openai", "github-copilot"].includes(config.provider))
           return {
             ...connection,
             catalog: modelProvider(config)
@@ -298,14 +301,28 @@ export class AgentService {
                 return {
                   catalog: await this.options.modelCatalog(config, signal),
                 };
+              const credentials = this.settings.credentials(config);
               const models = createModels({
-                credentials: this.settings.credentials(config),
+                credentials,
                 authContext: {
                   env: async () => undefined,
                   fileExists: async () => false,
                 },
               });
               models.setProvider(modelProvider(config));
+              if (config.provider === "github-copilot") {
+                const catalog = await copilotAccountModels(
+                  models,
+                  credentials,
+                  signal,
+                );
+                return {
+                  catalog,
+                  ...(!catalog.length
+                    ? { error: "利用できるモデルがありません" }
+                    : {}),
+                };
+              }
               return {
                 catalog: await openaiAccountModels(
                   models,
@@ -317,7 +334,15 @@ export class AgentService {
               return { catalog: [], error: modelTestFailure(error) };
             }
           })();
-          entry = { expires: Date.now() + 60000, result };
+          entry = {
+            expires: Math.min(
+              Date.now() + 60000,
+              config.provider === "github-copilot"
+                ? (config.oauth?.expires ?? Infinity)
+                : Infinity,
+            ),
+            result,
+          };
           this.accountCatalogs.set(key, entry);
         }
         return { ...connection, ...(await entry.result) };
@@ -545,8 +570,9 @@ export class AgentService {
             : (model.key ?? ""),
         );
       else {
+        const credentials = this.settings.credentials(model);
         const models = createModels({
-          credentials: this.settings.credentials(model),
+          credentials,
           authContext: {
             env: async () => undefined,
             fileExists: async () => false,
@@ -556,6 +582,17 @@ export class AgentService {
         const signal = AbortSignal.timeout(30000);
         if (model.provider === "openai" && model.auth === "oauth")
           modelId = await chatgptTestModel(models, signal, model.model);
+        if (model.provider === "github-copilot") {
+          const available = await copilotAccountModels(
+            models,
+            credentials,
+            signal,
+          );
+          modelId = model.model
+            ? available.find((id) => id === model.model)
+            : available[0];
+          if (!modelId) throw new AppError(400, "利用できるモデルがありません");
+        }
         const selected = models.getModel(model.provider, modelId);
         if (!selected) throw new Error("Unknown model");
         const result = await models.completeSimple(
@@ -975,6 +1012,22 @@ export class AgentService {
       if (!this.models.getModel(this.providerId, this.modelId))
         throw new AppError(409, "モデルを選び直してください");
       const starting = !this.active;
+      if (starting && this.providerId === "github-copilot") {
+        try {
+          const available = await copilotAccountModels(
+            this.models,
+            this.credentials,
+            AbortSignal.timeout(10000),
+          );
+          if (!available.includes(this.modelId))
+            throw new AppError(
+              409,
+              "利用できないモデルです。モデルを選び直してください",
+            );
+        } catch (error) {
+          throw new AppError(409, modelTestFailure(error));
+        }
+      }
       if (starting) {
         await this.workspace(id);
         await this.prepareMcp(id);

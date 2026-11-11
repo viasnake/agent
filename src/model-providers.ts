@@ -1,9 +1,10 @@
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { githubCopilotProvider } from "@earendil-works/pi-ai/providers/github-copilot";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { googleVertexProvider } from "@earendil-works/pi-ai/providers/google-vertex";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
-import type { Models, Provider } from "@earendil-works/pi-ai";
+import type { CredentialStore, Models, Provider } from "@earendil-works/pi-ai";
 import { z } from "zod";
 import { AppError } from "./security.js";
 import type { ModelConfig } from "./settings.js";
@@ -11,11 +12,37 @@ import { bedrockProvider } from "./bedrock.js";
 
 const catalogs = {
   openai: openaiProvider,
+  "github-copilot": githubCopilotProvider,
   anthropic: anthropicProvider,
   google: googleProvider,
   "google-vertex": googleVertexProvider,
   "amazon-bedrock": amazonBedrockProvider,
 };
+
+export async function copilotAccountModels(
+  models: Models,
+  credentials: CredentialStore,
+  signal: AbortSignal,
+) {
+  // getAvailable checks stored credentials but does not refresh them. Pi refreshes
+  // both the token and account model permissions through getAuth.
+  const auth = await models.getAuth("github-copilot", { signal });
+  if (!auth) throw new AppError(401, "認証が必要です");
+  const credential = await credentials.read("github-copilot", { signal });
+  // Pi falls back to its entire catalog when permission metadata is absent.
+  if (
+    credential?.type !== "oauth" ||
+    !Array.isArray(credential.availableModelIds) ||
+    !credential.availableModelIds.every((id) => typeof id === "string")
+  )
+    throw new AppError(
+      401,
+      "利用可能モデルを確認できません。再認証してください",
+    );
+  return (await models.getAvailable("github-copilot", { signal })).map(
+    (model) => model.id,
+  );
+}
 
 // Read account metadata without inference. Pi owns credential refresh and dispatch.
 export async function openaiAccountModels(

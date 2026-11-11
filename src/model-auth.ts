@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { OAuthAuth } from "@earendil-works/pi-ai";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { modelProvider } from "./model-providers.js";
 import { SettingsStore } from "./settings.js";
 import { AppError } from "./security.js";
 
 export type ModelLogin = {
   id: string;
   modelId: string;
+  provider: string;
+  userCode?: string;
   state: "waiting" | "exchanging" | "complete" | "error";
   url?: string;
   message: string;
@@ -21,25 +23,28 @@ type Pending = {
 };
 
 // Adapt Pi's public interactive OAuth API to the local browser session. The SDK
-// owns PKCE, state, code exchange and the temporary loopback callback listener.
+// owns device polling or PKCE, code exchange and the loopback callback listener.
 export class ModelAuth {
   private pending?: Pending;
   constructor(
     private settings: SettingsStore,
-    private oauth: OAuthAuth = openaiProvider().auth.oauth!,
+    private oauth?: OAuthAuth,
   ) {}
   async begin(modelId: string, owner: string): Promise<ModelLogin> {
     if (
       this.pending &&
       !["complete", "error"].includes(this.pending.view.state)
     )
-      throw new AppError(
-        409,
-        "進行中の ChatGPT 認証を完了または中止してください",
-      );
-    // The SDK can bind to an environment-selected host. Never expose its callback
-    // outside loopback; users of forwarded connections can submit the full URL via the protected API.
+      throw new AppError(409, "進行中の認証を完了または中止してください");
+    const model = this.settings.snapshot().models.find((m) => m.id === modelId);
+    if (!model || model.auth !== "oauth")
+      throw new AppError(400, "OAuth 接続を保存してください");
+    const copilot = model.provider === "github-copilot";
+    const oauth = this.oauth ?? modelProvider(model).auth.oauth;
+    if (!oauth) throw new AppError(400, "OAuth に対応していません");
+    // Only ChatGPT starts a callback listener; Device Flow never binds a port.
     if (
+      !copilot &&
       process.env.PI_OAUTH_CALLBACK_HOST &&
       process.env.PI_OAUTH_CALLBACK_HOST !== "127.0.0.1"
     )
@@ -47,9 +52,6 @@ export class ModelAuth {
         400,
         "PI_OAUTH_CALLBACK_HOST は 127.0.0.1 にしてください",
       );
-    const model = this.settings.snapshot().models.find((m) => m.id === modelId);
-    if (!model || model.auth !== "oauth")
-      throw new AppError(400, "ChatGPT 認証のモデルを保存してください");
     if (this.pending) clearTimeout(this.pending.timer);
     const abort = new AbortController();
     let ready!: () => void;
@@ -60,6 +62,7 @@ export class ModelAuth {
       view: {
         id: randomUUID(),
         modelId,
+        provider: model.provider,
         state: "waiting",
         message: "認証の準備中",
       },
@@ -70,12 +73,28 @@ export class ModelAuth {
     };
     pending.timer.unref();
     this.pending = pending;
-    pending.done = this.oauth
+    pending.done = oauth
       .login(
         {
           signal: abort.signal,
           notify: (event) => {
-            if (event.type === "auth_url") {
+            abort.signal.throwIfAborted();
+            if (copilot && event.type === "device_code") {
+              const url = new URL(event.verificationUri);
+              if (
+                url.origin !== "https://github.com" ||
+                url.username ||
+                url.password
+              )
+                throw new Error("Unexpected authorization origin");
+              pending.view.url = url.href;
+              pending.view.userCode = event.userCode;
+              pending.view.message =
+                "GitHub でコードを入力し、認証を完了してください";
+              ready();
+            } else if (copilot && event.type === "progress") {
+              pending.view.message = "利用可能なモデルを確認中";
+            } else if (!copilot && event.type === "auth_url") {
               const url = new URL(event.url);
               if (url.origin !== "https://auth.openai.com")
                 throw new Error("Unexpected authorization origin");
@@ -86,7 +105,9 @@ export class ModelAuth {
             }
           },
           prompt: async (prompt) => {
-            if (prompt.type !== "manual_code")
+            abort.signal.throwIfAborted();
+            if (copilot && prompt.type === "text") return "";
+            if (copilot || prompt.type !== "manual_code")
               throw new Error("Unsupported login prompt");
             const signal = AbortSignal.any([
               abort.signal,
@@ -122,16 +143,22 @@ export class ModelAuth {
         pending.view.state = "complete";
         pending.view.message = "認証しました。次の実行開始時に反映します。";
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         pending.view.state = "error";
         pending.view.message = abort.signal.aborted
           ? "認証を中止しました（有効期限は10分）"
-          : "認証できません。認可・コールバック URL・VM 内のポート1455の使用状況を確認し、やり直してください。";
+          : copilot
+            ? error instanceof Error &&
+              /Device flow timed out|expired_token/.test(error.message)
+              ? "認証の有効期限が切れました。やり直してください。"
+              : "GitHub 認証に失敗しました。認可と接続を確認し、やり直してください。"
+            : "認証できません。認可・コールバック URL・VM 内のポート1455の使用状況を確認し、やり直してください。";
       })
       .finally(() => {
         clearTimeout(pending.timer);
         pending.submit = undefined;
         delete pending.view.url;
+        delete pending.view.userCode;
         ready();
       });
     await started;

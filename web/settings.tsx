@@ -148,7 +148,9 @@ export function Settings({
         if (next.state === "complete") {
           accept(await api<PublicSettings>("/api/settings"));
           setCallbackUrl("");
-          notify("ChatGPT に接続しました。");
+          notify(
+            `${next.provider === "github-copilot" ? "GitHub Copilot" : "ChatGPT"} に接続しました。`,
+          );
         }
         if (["waiting", "exchanging"].includes(next.state))
           timer = setTimeout(() => void poll(), 1000);
@@ -276,7 +278,14 @@ export function Settings({
       </nav>
       <div className="settings-content">
         {loginPending && login && (
-          <section className="settings-card" aria-label="ChatGPT 認証">
+          <section
+            className="settings-card"
+            aria-label={
+              login.provider === "github-copilot"
+                ? "GitHub Copilot 認証"
+                : "ChatGPT 認証"
+            }
+          >
             <p role="status">{login.message}</p>
             {loginPending && (
               <>
@@ -287,39 +296,52 @@ export function Settings({
                     target="_blank"
                     rel="noreferrer"
                   >
-                    ChatGPT の認証を開く
+                    {login.provider === "github-copilot"
+                      ? "GitHub の認証を開く"
+                      : "ChatGPT の認証を開く"}
                   </a>
                 )}
-                <label className="form-label">
-                  認証後の URL（localhost に接続できなかった場合）
-                  <input
-                    className="form-control"
-                    type="password"
-                    autoComplete="off"
-                    value={callbackUrl}
-                    onChange={(e) => setCallbackUrl(e.target.value)}
-                    placeholder="http://127.0.0.1:1455/auth/callback?..."
-                  />
-                </label>
+                {login.provider === "github-copilot" ? (
+                  <p>
+                    認証コード:{" "}
+                    <code aria-label="認証コード">{login.userCode}</code>
+                  </p>
+                ) : (
+                  <label className="form-label">
+                    認証後の URL（localhost に接続できなかった場合）
+                    <input
+                      className="form-control"
+                      type="password"
+                      autoComplete="off"
+                      value={callbackUrl}
+                      onChange={(e) => setCallbackUrl(e.target.value)}
+                      placeholder="http://127.0.0.1:1455/auth/callback?..."
+                    />
+                  </label>
+                )}
                 <div className="settings-actions">
-                  <button
-                    className="btn-solid theme-primary"
-                    disabled={busy || !callbackUrl || login.state !== "waiting"}
-                    onClick={() =>
-                      void perform(async () => {
-                        setLogin(
-                          await api<ModelLogin>(
-                            `/api/settings/model-login/${login.id}`,
-                            "POST",
-                            { url: callbackUrl },
-                          ),
-                        );
-                        setCallbackUrl("");
-                      })
-                    }
-                  >
-                    認証を完了
-                  </button>
+                  {login.provider !== "github-copilot" && (
+                    <button
+                      className="btn-solid theme-primary"
+                      disabled={
+                        busy || !callbackUrl || login.state !== "waiting"
+                      }
+                      onClick={() =>
+                        void perform(async () => {
+                          setLogin(
+                            await api<ModelLogin>(
+                              `/api/settings/model-login/${login.id}`,
+                              "POST",
+                              { url: callbackUrl },
+                            ),
+                          );
+                          setCallbackUrl("");
+                        })
+                      }
+                    >
+                      認証を完了
+                    </button>
+                  )}
                   <button
                     className="btn-text theme-secondary"
                     disabled={busy}
@@ -374,11 +396,13 @@ export function Settings({
                       <summary>
                         <span>
                           {model.name ||
-                            (model.auth === "oauth"
-                              ? "ChatGPT"
-                              : model.provider === "openai"
-                                ? "OpenAI API"
-                                : model.provider)}
+                            (model.provider === "github-copilot"
+                              ? "GitHub Copilot"
+                              : model.auth === "oauth"
+                                ? "ChatGPT"
+                                : model.provider === "openai"
+                                  ? "OpenAI API"
+                                  : model.provider)}
                         </span>
                         <small>
                           {current?.status === "未確認" ? "" : current?.status}
@@ -399,11 +423,13 @@ export function Settings({
                                 model: undefined,
                                 key: "",
                                 auth:
-                                  provider === "google-vertex"
-                                    ? "adc"
-                                    : provider === "amazon-bedrock"
-                                      ? "aws"
-                                      : "api_key",
+                                  provider === "github-copilot"
+                                    ? "oauth"
+                                    : provider === "google-vertex"
+                                      ? "adc"
+                                      : provider === "amazon-bedrock"
+                                        ? "aws"
+                                        : "api_key",
                                 project: undefined,
                                 location:
                                   provider === "google-vertex"
@@ -419,6 +445,9 @@ export function Settings({
                             }}
                           >
                             <option value="openai">OpenAI</option>
+                            <option value="github-copilot">
+                              GitHub Copilot
+                            </option>
                             <option value="anthropic">Anthropic</option>
                             <option value="google">Gemini</option>
                             <option value="google-vertex">Vertex AI</option>
@@ -433,11 +462,13 @@ export function Settings({
                             className="form-control"
                             aria-label="接続名"
                             placeholder={
-                              model.auth === "oauth"
-                                ? "ChatGPT"
-                                : model.provider === "openai"
-                                  ? "OpenAI API"
-                                  : model.provider
+                              model.provider === "github-copilot"
+                                ? "GitHub Copilot"
+                                : model.auth === "oauth"
+                                  ? "ChatGPT"
+                                  : model.provider === "openai"
+                                    ? "OpenAI API"
+                                    : model.provider
                             }
                             value={model.name ?? ""}
                             onChange={(e) => update({ name: e.target.value })}
@@ -512,8 +543,11 @@ export function Settings({
                               })
                             }
                           >
-                            {model.provider !== "google-vertex" && (
-                              <option value="api_key">API キー</option>
+                            {!["google-vertex", "github-copilot"].includes(
+                              model.provider,
+                            ) && <option value="api_key">API キー</option>}
+                            {model.provider === "github-copilot" && (
+                              <option value="oauth">GitHub（OAuth）</option>
                             )}
                             {model.provider === "openai" && (
                               <option value="oauth">ChatGPT（OAuth）</option>
@@ -607,8 +641,33 @@ export function Settings({
                                   })
                                 }
                               >
-                                Continue with ChatGPT
+                                {model.provider === "github-copilot"
+                                  ? "Continue with GitHub"
+                                  : "Continue with ChatGPT"}
                               </button>
+                              {model.provider === "github-copilot" &&
+                                current?.authorized && (
+                                  <button
+                                    className="btn-text theme-secondary btn-sm"
+                                    disabled={dirty}
+                                    onClick={() =>
+                                      void perform(async () => {
+                                        accept(
+                                          await api<PublicSettings>(
+                                            `/api/settings/models/${model.id}/disconnect`,
+                                            "POST",
+                                            {},
+                                          ),
+                                        );
+                                        if (login?.modelId === model.id)
+                                          setLogin(undefined);
+                                        notify("認証を解除しました。");
+                                      })
+                                    }
+                                  >
+                                    認証を解除
+                                  </button>
+                                )}
                             </>
                           ) : null}
                           <button
