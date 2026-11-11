@@ -1,5 +1,13 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import {
@@ -166,9 +174,10 @@ export class Worker {
         await walk(`${name}/${item}`, depth + 1).catch(() => {});
       }
     };
-    await walk("outputs", 0).catch((error) => {
-      if (error.code !== "ENOENT") throw error;
-    });
+    for (const name of ["outputs", "attachments"])
+      await walk(name, 0).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
     return { files, truncated };
   }
   async cleanup(): Promise<boolean> {
@@ -396,6 +405,26 @@ export class Worker {
   ): Promise<WorkerResult> {
     const { conversationId: id, op, args } = request;
     if (op === "health") return { uid: process.getuid?.() ?? -1 };
+    if (op === "delete_workspace") {
+      const base = this.workspace(id);
+      const parent = dirname(base);
+      const info = await lstat(parent).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (!info) return {};
+      if (info.isSymbolicLink() || (await realpath(parent)) !== parent)
+        throw new Error("Workspace parent was replaced");
+      // rm unlinks a substituted session symlink; it never follows it into another session.
+      await rm(base, { recursive: true, force: true });
+      const directory = await open(parent, "r");
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+      return {};
+    }
     for (const name of ["home", "tmp"])
       await mkdir(join(this.options.root, name), {
         recursive: true,
@@ -423,8 +452,8 @@ export class Worker {
       return { data: (await this.bytes(id, name)).toString("base64") };
     }
     if (op === "download") {
-      if (!name.startsWith("outputs/"))
-        throw new Error("Only outputs are downloadable");
+      if (!name.startsWith("outputs/") && !name.startsWith("attachments/"))
+        throw new Error("Only outputs and attachments are downloadable");
       try {
         return { data: (await this.bytes(id, name)).toString("base64") };
       } catch (error) {

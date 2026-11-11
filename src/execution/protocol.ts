@@ -15,6 +15,7 @@ export const requestSchema = z
       "upload",
       "read_attachment",
       "cleanup",
+      "delete_workspace",
     ]),
     args: z.record(z.string(), z.unknown()),
   })

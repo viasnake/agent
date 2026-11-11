@@ -75,7 +75,7 @@ test("CSV and Markdown use unmodified Pi file/edit/bash tools, outputs are downl
       (await service.download(id, "outputs/note.md")).toString(),
       /確認します/,
     );
-    assert.equal((await service.files(id)).files!.length, 2);
+    assert.equal((await service.files(id)).files!.length, 4);
     assert.ok(runner instanceof TestRunner);
   } finally {
     await service.close();
@@ -228,7 +228,12 @@ test("downloads reject traversal, absolute paths, symlinks, hardlinks, FIFO and 
   const { service, root } = await fixture();
   try {
     const { id } = await service.create(randomUUID(), "境界");
-    await service.upload(id, randomUUID(), "init.txt", Buffer.from("init"));
+    const attachment = await service.upload(
+      id,
+      randomUUID(),
+      "init.txt",
+      Buffer.from("init"),
+    );
     const base = join(root, "work/conversations", id);
     await writeFile(join(base, "outputs/good.csv"), "a,b\n1,2\n");
     await symlink("/etc/passwd", join(base, "outputs/link"));
@@ -257,7 +262,27 @@ test("downloads reject traversal, absolute paths, symlinks, hardlinks, FIFO and 
     );
     assert.deepEqual(
       (await service.files(id)).files?.map((file) => file.path),
-      ["outputs/good.csv"],
+      ["outputs/good.csv", attachment.path],
+    );
+    assert.equal(
+      (await service.download(id, attachment.path)).toString(),
+      "init",
+    );
+    for (const name of ["link", "parent", "hard", "pipe", "large"]) {
+      await rename(
+        join(base, "outputs", name),
+        join(base, "attachments", name),
+      );
+      await assert.rejects(
+        service.download(
+          id,
+          `attachments/${name === "parent" ? "parent/private" : name}`,
+        ),
+      );
+    }
+    assert.deepEqual(
+      (await service.files(id)).files?.map((file) => file.path),
+      ["outputs/good.csv", attachment.path],
     );
     await assert.rejects(
       service.upload(id, randomUUID(), "big", Buffer.alloc(20971521)),
@@ -337,7 +362,7 @@ test("an unavailable provider model is refused before input admission or work in
   }
 });
 
-test("session deletion denies all reads and admissions, retains disk data, and survives restart without create replay", async () => {
+test("session deletion purges history and files and survives restart without create replay", async () => {
   let f = await fixture([
     call("write", { path: "outputs/keep.txt", content: "retained" }),
     answer("保存しました"),
@@ -376,19 +401,15 @@ test("session deletion denies all reads and admissions, retains disk data, and s
     await assert.rejects(f.service.deleteConversation(randomUUID()), {
       statusCode: 404,
     });
-    assert.equal(
-      await readFile(
-        join(f.root, "work/conversations", id, "outputs/keep.txt"),
-        "utf8",
-      ),
-      "retained",
+    await assert.rejects(
+      readFile(join(f.root, "work/conversations", id, "outputs/keep.txt")),
+      { code: "ENOENT" },
     );
     const { BACKGROUND_CONTEXT: context } = await import(
       "@earendil-works/chord/context"
     );
     const pi = await f.service.harness.conversation(piId, context);
-    assert.ok(pi);
-    assert.ok((await pi.entries({}, 40, undefined, context)).items.length);
+    assert.equal(pi, undefined);
   } finally {
     await f.service.close();
   }
@@ -401,9 +422,12 @@ test("session deletion rejects active execution and serializes against input adm
     const other = await f.service.create(randomUUID(), "待機中");
     await f.service.send(id, randomUUID(), "実行");
     await assert.rejects(f.service.deleteConversation(id), { statusCode: 409 });
-    await f.service.deleteConversation(other.id);
+    await assert.rejects(f.service.deleteConversation(other.id), {
+      statusCode: 409,
+    });
     assert.equal((await f.service.conversation(id)).status, "running");
     await f.service.stop(id);
+    await f.service.deleteConversation(other.id);
     await f.service.deleteConversation(id);
     assert.deepEqual(await f.service.list(), []);
 

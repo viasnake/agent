@@ -1126,7 +1126,7 @@ function App() {
                 <section
                   id="files-section"
                   className="output-files"
-                  aria-label="生成ファイル"
+                  aria-label="ファイル"
                 >
                   <div className="output-label">
                     <Icon name="file" />
@@ -1155,7 +1155,19 @@ function App() {
                         href={`/api/conversations/${selected}/download?path=${encodeURIComponent(file.path)}`}
                       >
                         <Icon name="down" />
-                        <span>{file.path.slice(8)}</span>
+                        <span>
+                          {file.path.startsWith("attachments/")
+                            ? file.path.replace(
+                                /^attachments\/[0-9a-f-]{36}-/i,
+                                "",
+                              )
+                            : file.path.slice(8)}
+                        </span>
+                        <small>
+                          {file.path.startsWith("attachments/")
+                            ? "添付"
+                            : "生成"}
+                        </small>
                         <small>{fileSize(file.size)}</small>
                       </a>
                     ))}

@@ -185,6 +185,17 @@ test("local automatic session, Host/Origin/CSRF, idempotent requests, attachment
     });
     assert.equal(upload.statusCode, 201);
     assert.match(upload.json().path, /attachments\//);
+    const attachment = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${id}/download?path=${encodeURIComponent(upload.json().path)}`,
+      headers,
+    });
+    assert.equal(attachment.statusCode, 200);
+    assert.equal(attachment.body, "a,b\n1,2\n");
+    assert.match(
+      attachment.headers["content-disposition"]!.toString(),
+      /filename\*=UTF-8''test.csv$/,
+    );
     const input = { requestId: randomUUID(), text: "create file" };
     assert.equal(
       (
