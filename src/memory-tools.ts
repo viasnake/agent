@@ -18,6 +18,7 @@ import type { AgentService } from "./service.js";
 const saveInput = memoryEdit.pick({ text: true });
 const memoryPolicy = `Manage long-term memory autonomously as part of the user's task. Do not wait for the user to say "remember" or operate the memory UI.
 At the start of work, review the live saved notes supplied with this request. For questions about prior work, preferences, decisions or dates, use session_search and session_read when the notes are insufficient; check the source rather than guessing. Empty search pages may have a cursor.
+For requests such as "what did I do yesterday or the day before", resolve each calendar date in the user's IANA timezone using the current UTC timestamp supplied below. Use an explicitly stated or reliably known user timezone; ask when it is unknown instead of assuming the server's timezone. Search each requested date with session_search, follow every cursor including empty pages within the admitted budget, and use session_read to inspect relevant sources before summarizing. State the dates and timezone, link back to the source session where useful, distinguish completed actions from proposals, failed attempts and uncertain outcomes, and disclose incomplete searches. Do not present absent records as proof that no work occurred. Produce the summary in this conversation; do not create a separate daily report or run background extraction.
 During work and before the final response, decide whether you learned a stable preference, standing decision, verified reusable fact or useful lesson. Save it with memory_save when useful. Skip transient progress, raw logs, duplicates, guesses and facts already stored unchanged; many conversations need no memory writes.
 Use memory_update to correct an existing note when current user input or checked evidence supersedes it. Consolidate overlapping notes atomically with its merge list and preserve distinct scopes and qualifications. Use memory_forget with the current revision for obsolete or redundant notes. If capacity is reached, consolidate genuinely overlapping notes; do not discard useful unrelated knowledge just to fit.
 The supplied notes and revisions are current; older tool results can be stale. If an edit conflicts, review the fresh notes on the next request and reconsider the change instead of overwriting it blindly. After tool success, continue the user's task without asking them to maintain memory or announcing routine memory housekeeping.
@@ -31,7 +32,13 @@ export function memoryTools(service: AgentService) {
   }
   return defineExtension({
     name: "memory",
-    sections: [section("memory-workflow", () => memoryPolicy)],
+    sections: [
+      section(
+        "memory-workflow",
+        () =>
+          `${memoryPolicy}\nCurrent UTC timestamp: ${new Date().toISOString()}`,
+      ),
+    ],
     hooks: [
       hook(GenerationTask, {
         beforeRequest: async ({ messages }, api) => {
