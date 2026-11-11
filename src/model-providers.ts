@@ -137,6 +137,7 @@ export function modelTestFailure(error: unknown): string {
     ["chatpass_v2_scope_not_authorized", "アクセス権限なし"],
     ["chatpass_v2_invalid_authorization_context", "アクセス権限なし"],
     ["model_not_found", "モデルを利用できません"],
+    ["model_not_supported", "モデルを利用できません"],
     ["invalid_grant", "再認証が必要です"],
   ];
   const reason = known.find(([code]) => message.includes(code));
@@ -146,8 +147,11 @@ export function modelTestFailure(error: unknown): string {
     ["TimeoutError", "AbortError"].includes(error.name)
   )
     return "タイムアウト";
-  const status = message.match(/API error \(([45]\d{2})\):/);
-  return status ? `接続失敗（HTTP ${status[1]}）` : "接続失敗";
+  // Pi preserves Anthropic status prefixes and formats Responses errors separately.
+  const status = message.match(
+    /API error \(([45]\d{2})\):|^([45]\d{2})(?=[\s:])/,
+  );
+  return status ? `接続失敗（HTTP ${status[1] ?? status[2]}）` : "接続失敗";
 }
 
 export function modelCatalogs(): Record<ModelConfig["provider"], string[]> {
