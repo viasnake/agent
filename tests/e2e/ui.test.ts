@@ -436,12 +436,16 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     });
     const chatTab = page.getByRole("tab", { name: "会話", exact: true });
     const filesTab = page.getByRole("tab", { name: "ファイル", exact: true });
+    assert.equal(await filesTab.getAttribute("aria-controls"), "files-panel");
+    assert.equal(await chatTab.getAttribute("aria-controls"), "chat-panel");
     await chatTab.focus();
     await chatTab.press("ArrowRight");
+    await filesTab.and(page.locator('[aria-selected="true"]')).waitFor();
     assert.equal(await filesTab.getAttribute("aria-selected"), "true");
     await page.getByText("ファイルはありません", { exact: true }).waitFor();
     assert.equal(await page.locator("#message").isVisible(), false);
     await filesTab.press("Home");
+    await chatTab.and(page.locator('[aria-selected="true"]')).waitFor();
     assert.equal(await chatTab.getAttribute("aria-selected"), "true");
     assert.equal(await page.locator("#message").inputValue(), "未送信の入力");
     assert.equal(await page.locator(".attachment-chip").count(), 1);
@@ -650,6 +654,85 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     assert.deepEqual(errors, []);
   } finally {
     await page.close();
+    await browser.close();
+    await server.close();
+    await f.service.close();
+  }
+});
+
+test("sidebar scrolling stays within the session list at short desktop and mobile heights", async () => {
+  const f = await fixture();
+  for (let index = 0; index < 32; index++)
+    await f.service.create(crypto.randomUUID(), `スクロール確認 ${index}`);
+  const probe = portProbe();
+  await new Promise<void>((done) => probe.listen(0, "127.0.0.1", done));
+  const address = probe.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((done) => probe.close(() => done()));
+  const origin = `http://127.0.0.1:${port}`;
+  f.config.server.origins = [origin];
+  const server = await createServer(f.service, resolve("dist/web") + "/");
+  await server.listen({ host: "127.0.0.1", port });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox"],
+  });
+  const page = await browser.newPage({ reducedMotion: "reduce" });
+  try {
+    await page.goto(origin);
+    await page.locator(".conversation-item").first().waitFor();
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 400 });
+      if (width < 768)
+        await page
+          .getByRole("button", { name: "セッション一覧を開く", exact: true })
+          .click();
+      const fixed = page.locator(
+        ".sidebar-header, .session-list-controls, .sidebar-footer",
+      );
+      const bounds = () =>
+        fixed.evaluateAll((nodes) =>
+          nodes.map((node) => {
+            const { x, y, width, height } = node.getBoundingClientRect();
+            return { x, y, width, height };
+          }),
+        );
+      const before = await bounds();
+      assert.equal(
+        await page.evaluate(() => document.documentElement.clientWidth),
+        width,
+        "Only scrollable panels reserve scrollbar space",
+      );
+      const list = page.locator("#conversations");
+      assert.equal(
+        await list.evaluate((node) => node.scrollHeight > node.clientHeight),
+        true,
+      );
+      await list.hover();
+      await page.mouse.wheel(0, 5000);
+      await page.waitForFunction(
+        () => document.getElementById("conversations")!.scrollTop > 0,
+      );
+      await page.mouse.wheel(0, 5000);
+      assert.deepEqual(await bounds(), before);
+      assert.equal(await page.evaluate(() => scrollY), 0);
+      assert.equal(
+        await list.evaluate((node) => node.scrollWidth <= node.clientWidth),
+        true,
+      );
+      await page.locator(".sidebar-header").hover();
+      await page.mouse.wheel(0, 5000);
+      assert.deepEqual(await bounds(), before);
+      assert.equal(
+        await page.locator("#sidebar").evaluate((node) => node.scrollTop),
+        0,
+      );
+      await page.screenshot({
+        path: `test-results/sidebar-scroll-${width}.png`,
+      });
+    }
+  } finally {
     await browser.close();
     await server.close();
     await f.service.close();

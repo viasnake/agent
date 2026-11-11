@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import {
   ActionBarPrimitive,
   MessagePrimitive,
+  MessagePartPrimitive,
   useAuiState,
   useAui,
 } from "@assistant-ui/react";
@@ -223,16 +224,20 @@ function ToolResult({
               : "実行結果"}
         </span>
       </summary>
+      <div className="tool-detail-label">入力</div>
       <pre>
         {toolName}
         {argsText ? `\n${argsText}` : ""}
       </pre>
       {result !== undefined && (
-        <pre>
-          {typeof result === "string"
-            ? result
-            : JSON.stringify(result, null, 2)}
-        </pre>
+        <>
+          <div className="tool-detail-label">出力</div>
+          <pre>
+            {typeof result === "string"
+              ? result
+              : JSON.stringify(result, null, 2)}
+          </pre>
+        </>
       )}
     </details>
   );
@@ -247,12 +252,14 @@ export function UserMessage() {
     >
       <div className="visually-hidden">あなた</div>
       <div className="user-bubble">
-        <MessagePrimitive.Parts
-          components={{
-            Text: ({ text }) => <UserText text={text} />,
-            Image: ({ image }) => <ImagePreview image={image} />,
+        <MessagePrimitive.Parts>
+          {({ part }) => {
+            if (part.type === "text") return <UserText text={part.text} />;
+            if (part.type === "image")
+              return <ImagePreview image={part.image} />;
+            return null;
           }}
-        />
+        </MessagePrimitive.Parts>
       </div>
       <MessageToolbar user />
     </MessagePrimitive.Root>
@@ -262,7 +269,7 @@ function UserText({ text }: { text: string }) {
   const attachments = text.match(
     /\n\n添付：\n((?:attachments\/[0-9a-f-]{36}-[^\n/]+\n?)+)$/i,
   );
-  if (!attachments) return <span className="user-text">{text}</span>;
+  if (!attachments) return <MessagePartPrimitive.Text className="user-text" />;
   return (
     <>
       <span className="user-text">{text.slice(0, attachments.index)}</span>
@@ -294,9 +301,15 @@ export function AssistantMessage() {
       className={`message assistant-message ${activeEntry === Number(id.split("-")[0]) ? "search-current" : ""}`}
     >
       <div className="visually-hidden">アシスタント</div>
-      <MessagePrimitive.Parts
-        components={{ Text: MarkdownText, tools: { Fallback: ToolResult } }}
-      />
+      <div className="assistant-content">
+        <MessagePrimitive.Parts>
+          {({ part }) => {
+            if (part.type === "text") return <MarkdownText text={part.text} />;
+            if (part.type === "tool-call") return <ToolResult {...part} />;
+            return null;
+          }}
+        </MessagePrimitive.Parts>
+      </div>
       {hasText && <MessageToolbar />}
     </MessagePrimitive.Root>
   );
@@ -313,9 +326,13 @@ function MessageToolbar({ user = false }: { user?: boolean }) {
     .map((part) => part.text)
     .join("\n");
   const timestamp = message.createdAt;
+  const isLast = useAuiState(
+    (state) => state.thread.messages.at(-1)?.id === state.message.id,
+  );
   return (
     <ActionBarPrimitive.Root
       className="message-actions"
+      data-last={isLast || undefined}
       hideWhenRunning={false}
     >
       <ActionBarPrimitive.Copy
@@ -345,7 +362,7 @@ function MessageToolbar({ user = false }: { user?: boolean }) {
             return;
           }
           aui.thread().composer().setText(quote);
-          document.getElementById("message")?.focus();
+          document.getElementById("message")?.focus({ preventScroll: true });
         }}
       >
         <Icon name="quote" />
@@ -416,23 +433,26 @@ function CodeBlock({ children }: { children?: import("react").ReactNode }) {
   }, [copied]);
   return (
     <div className="code-block">
-      <button
-        className="btn-text theme-secondary btn-sm icon-button"
-        aria-label="コードをコピー"
-        title="コードをコピー"
-        onClick={async () => {
-          try {
-            await navigator.clipboard.writeText(
-              block.current?.textContent ?? "",
-            );
-            setCopied(true);
-          } catch {
-            notify("コピーできませんでした", true);
-          }
-        }}
-      >
-        <Icon name={copied ? "check" : "copy"} />
-      </button>
+      <div className="code-header">
+        <span>コード</span>
+        <button
+          className="btn-text theme-secondary btn-sm icon-button"
+          aria-label="コードをコピー"
+          title="コードをコピー"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(
+                block.current?.textContent ?? "",
+              );
+              setCopied(true);
+            } catch {
+              notify("コピーできませんでした", true);
+            }
+          }}
+        >
+          <Icon name={copied ? "check" : "copy"} />
+        </button>
+      </div>
       <pre ref={block}>{children}</pre>
     </div>
   );

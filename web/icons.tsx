@@ -1,4 +1,5 @@
 const paths = {
+  sidebar: "M3 4h18v16H3zM9 4v16",
   memory:
     "M4 3h6a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3H4zM13 6a3 3 0 0 1 3-3h5v15h-5a3 3 0 0 0-3 3",
   calendar: "M4 5h16v16H4zM4 10h16M8 3v4M16 3v4M8 14h2M14 14h2M8 18h2",

@@ -8,7 +8,7 @@ import { chromium } from "playwright";
 import { fixture, answer, until } from "../support.js";
 import { createServer } from "../../src/server.js";
 
-test("memory, cross-session source navigation and daily records work in light, dark and mobile layouts", async () => {
+test("memory settings and inline session search preserve conflicts, sources and drafts across screen sizes", async () => {
   const f = await fixture([answer("認証の設定を確認しました")]);
   const source = await f.service.create(randomUUID(), "認証の作業");
   const other = await f.service.create(randomUUID(), "別のセッション");
@@ -39,11 +39,18 @@ test("memory, cross-session source navigation and daily records work in light, d
   page.on("pageerror", (error) => errors.push(error.message));
   const row = (id: string) =>
     page.locator(`[data-session-id="${id}"] .conversation-item`);
-  const panel = page.locator(".memory-dialog");
+  const panel = page.locator(".memory-content");
   const close = () =>
-    page
-      .getByRole("button", { name: "記憶パネルを閉じる", exact: true })
-      .click();
+    page.getByRole("button", { name: "セッションに戻る", exact: true }).click();
+  const openMemory = async () => {
+    if ((page.viewportSize()?.width ?? 1280) < 768) {
+      await page
+        .getByRole("button", { name: "セッション一覧を開く", exact: true })
+        .click();
+    }
+    await page.getByRole("button", { name: "設定", exact: true }).click();
+    await page.getByRole("button", { name: "記憶", exact: true }).click();
+  };
   try {
     await page.goto(origin);
     await row(source.id).click();
@@ -64,7 +71,8 @@ test("memory, cross-session source navigation and daily records work in light, d
       await page.screenshot({ path: `test-results/memory-${colorScheme}.png` });
       const styles = await panel.locator(".memory-note").evaluate((node) => ({
         color: getComputedStyle(node).color,
-        background: getComputedStyle(node.closest("dialog")!).backgroundColor,
+        background: getComputedStyle(node.closest(".settings-page")!)
+          .backgroundColor,
       }));
       assert.notEqual(styles.color, styles.background);
     }
@@ -74,14 +82,14 @@ test("memory, cross-session source navigation and daily records work in light, d
       "保存される下書き",
     );
     await row(other.id).click();
-    await page.getByRole("button", { name: "記憶を開く", exact: true }).click();
+    await openMemory();
     await panel.getByRole("button", { name: "出典", exact: true }).click();
     await panel.waitFor({ state: "hidden" });
     await page.waitForFunction(
       () => document.getElementById("title")?.textContent === "認証の作業",
     );
     await page.locator(".search-current").waitFor();
-    await page.getByRole("button", { name: "記憶を開く", exact: true }).click();
+    await openMemory();
     await panel
       .getByRole("button", { name: "記憶を編集", exact: true })
       .click();
@@ -110,9 +118,18 @@ test("memory, cross-session source navigation and daily records work in light, d
     );
     await panel.getByRole("button", { name: "保存", exact: true }).click();
     await panel.getByText("訂正した記憶", { exact: true }).waitFor();
-    await panel.getByRole("button", { name: "検索", exact: true }).click();
-    await panel.getByRole("searchbox").fill("認証");
-    await panel.locator(".memory-result").first().waitFor();
+    await close();
+    const search = page.getByRole("searchbox", {
+      name: "セッションを検索",
+      exact: true,
+    });
+    const results = page.getByRole("region", {
+      name: "会話本文の検索結果",
+      exact: true,
+    });
+    await search.fill("認証");
+    await results.locator(".search-result").first().waitFor();
+    assert.equal(await page.getByRole("dialog").count(), 0);
     let releaseSearch!: () => void;
     const heldSearch = new Promise<void>((resolve) => {
       releaseSearch = resolve;
@@ -128,35 +145,23 @@ test("memory, cross-session source navigation and daily records work in light, d
         json: { error: "以前の検索のエラー" },
       });
     });
-    await panel.getByRole("searchbox").fill("遅延");
+    await search.fill("遅延");
     const moreRequested = page.waitForRequest(
       (request) => new URL(request.url()).searchParams.get("cursor") === "held",
     );
-    await panel
-      .getByRole("button", { name: "さらに表示", exact: true })
+    await results
+      .getByRole("button", { name: "さらに検索", exact: true })
       .click();
     await moreRequested;
-    await panel.getByRole("button", { name: "日報", exact: true }).click();
-    await panel.locator(".memory-result").first().waitFor();
-    const staleResponse = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).searchParams.get("cursor") === "held",
-    );
+    await search.fill("認証");
+    await results.locator(".search-result").first().waitFor();
     releaseSearch();
-    await (await staleResponse).finished();
-    await page.evaluate(
-      () =>
-        new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-        ),
-    );
-    assert.equal(
-      await panel.getByRole("alert").count(),
-      0,
-      "An earlier search failure cannot replace the active daily view",
-    );
-    assert.match((await panel.textContent()) ?? "", /Asia\/Tokyo/);
-    assert.match((await panel.textContent()) ?? "", /認証/);
+    await page.unrouteAll({ behavior: "wait" });
+    assert.equal(await results.getByRole("alert").count(), 0);
+    await results.locator(".search-result").first().click();
+    await page.locator(".search-current").waitFor();
+    assert.equal(await search.inputValue(), "");
+    await openMemory();
     await page.setViewportSize({ width: 360, height: 740 });
     assert.equal(
       await panel.evaluate(
@@ -164,9 +169,18 @@ test("memory, cross-session source navigation and daily records work in light, d
       ),
       true,
     );
+    assert.equal(
+      await panel.evaluate((node) => node.scrollWidth <= node.clientWidth),
+      true,
+    );
     await page.screenshot({ path: "test-results/memory-mobile.png" });
+    await close();
+    assert.equal(
+      await page.locator("#message").inputValue(),
+      "保存される下書き",
+    );
+    await openMemory();
     await page.setViewportSize({ width: 1280, height: 900 });
-    await panel.getByRole("button", { name: "記憶", exact: true }).click();
     await panel
       .getByRole("button", { name: "記憶を削除", exact: true })
       .click();
@@ -199,10 +213,15 @@ test("memory, cross-session source navigation and daily records work in light, d
     await panel.getByText("記憶はありません", { exact: true }).waitFor();
     await close();
     await page.reload();
-    await page.getByRole("button", { name: "記憶を開く", exact: true }).click();
+    await openMemory();
     await panel.getByText("記憶はありません", { exact: true }).waitFor();
-    await page.keyboard.press("Escape");
+    await close();
     await panel.waitFor({ state: "hidden" });
+    assert.equal(await page.getByRole("dialog").count(), 0);
+    assert.equal(
+      await page.getByRole("button", { name: /日次レポート/ }).count(),
+      0,
+    );
     assert.deepEqual(errors, []);
     assert.equal(f.faux.state.callCount, 1);
   } finally {

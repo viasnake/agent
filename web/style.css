@@ -2,11 +2,13 @@
   /* Use Bootstrap's palette with readable primary and secondary button text. */
   --bs-primary-bg: var(--bs-blue-600);
   --bs-secondary-fg: var(--bs-fg-2);
+  scrollbar-gutter: auto;
 }
 html,
 body,
 #root {
   height: 100%;
+  overflow: clip;
 }
 body {
   margin: 0;
@@ -42,25 +44,28 @@ button {
 .app-shell {
   display: flex;
   height: 100dvh;
-  overflow: hidden;
+  overflow: clip;
 }
 .sidebar {
   display: flex;
   flex-direction: column;
   flex: 0 0 272px;
   min-width: 0;
-  padding: 16px 12px 12px;
+  min-height: 0;
+  max-height: 100dvh;
+  overflow: clip;
+  padding: 12px;
   background: var(--bs-bg-1);
   border-right: 1px solid var(--bs-border-muted);
 }
 .new-conversation {
-  --bs-btn-bg: var(--bs-bg-body);
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: 10px;
   width: 100%;
-  padding: 11px 12px;
+  min-height: 40px;
+  padding: 8px 10px;
   border-radius: 10px;
 }
 .sidebar-label {
@@ -72,7 +77,13 @@ button {
 #conversations {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.sidebar > :not(#conversations) {
+  flex-shrink: 0;
 }
 .session-row {
   display: flex;
@@ -125,8 +136,11 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
   padding: 8px 10px;
-  margin-top: 16px;
+  margin: 0;
+  background: var(--bs-bg-body);
   color: var(--bs-fg-2);
   border: 1px solid var(--bs-border-muted);
   border-radius: 9px;
@@ -146,7 +160,7 @@ button {
   outline: none;
   background: transparent;
   color: var(--bs-fg-body);
-  font-size: 12px;
+  font-size: 13px;
 }
 .session-search input::placeholder {
   color: var(--bs-fg-2);
@@ -176,7 +190,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 12px 8px 0;
+  padding: 10px 2px 0;
   margin-top: 12px;
   border-top: 1px solid var(--bs-border-muted);
 }
@@ -192,10 +206,71 @@ button {
   flex: 1;
   background: var(--bs-bg-body);
 }
-.session-tabs {
-  width: fit-content;
-  margin: 10px 28px 0;
+.workspace-stack,
+.session-panels {
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.workspace-stack > *,
+.session-panels > * {
+  grid-area: 1 / 1;
+}
+/* Keep viewport dimensions while hiding a pane, so auto-follow does not reset. */
+.workspace[aria-hidden="true"],
+.session-panel[aria-hidden="true"] {
+  display: flex;
+  visibility: hidden;
+  pointer-events: none;
+}
+.content-tabs {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  border-bottom: 1px solid var(--bs-border-muted);
   flex-shrink: 0;
+}
+.content-tabs .nav-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  position: relative;
+  min-height: 44px;
+  padding: 10px 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--bs-fg-2);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.content-tabs .nav-link:hover,
+.content-tabs .nav-link:focus-visible,
+.content-tabs .nav-link[data-state="active"] {
+  color: var(--bs-fg-body);
+}
+.content-tabs .nav-link[data-state="active"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.content-tabs .nav-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.content-tabs svg {
+  width: 16px;
+  height: 16px;
+}
+.session-tabs {
+  padding: 0 28px;
 }
 .session-panel {
   display: flex;
@@ -203,9 +278,6 @@ button {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-}
-.session-panel[hidden] {
-  display: none;
 }
 #files-panel {
   overflow: auto;
@@ -258,13 +330,13 @@ button {
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  scroll-behavior: smooth;
+  overflow-anchor: none;
 }
 .thread-content {
   width: min(100%, 820px);
   min-height: 100%;
   margin: auto;
-  padding: 36px 32px 24px;
+  padding: 32px 32px 24px;
 }
 .empty-thread {
   min-height: 100%;
@@ -295,59 +367,38 @@ button {
   letter-spacing: -0.03em;
 }
 .message {
+  font-size: 15px;
   margin-bottom: 28px;
-  line-height: 1.85;
+  min-width: 0;
+  line-height: 1.8;
   overflow-wrap: anywhere;
-}
-.message-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--bs-fg-2);
-}
-.agent-avatar {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
-  background: var(--bs-primary-bg-subtle);
-  color: var(--bs-primary-fg);
-}
-.agent-avatar svg {
-  width: 15px;
-  height: 15px;
 }
 .user-message {
   display: flex;
   align-items: flex-end;
   flex-direction: column;
-  padding-left: 10%;
-}
-.user-message .message-label {
-  padding-right: 4px;
+  padding-left: 15%;
 }
 .user-bubble {
   max-width: 100%;
   padding: 12px 18px;
-  border-radius: 20px;
+  border-radius: 18px;
   background: var(--bs-bg-2);
 }
 .user-text {
   white-space: pre-wrap;
 }
-.assistant-message {
-  padding-right: 3%;
+.assistant-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.assistant-content > .tool-card {
+  margin: 0;
 }
 .message-actions {
-  margin-top: 6px;
-}
-.message-actions button {
-  padding: 2px 4px;
-  font-size: 11px;
+  margin-top: 8px;
 }
 .markdown > :last-child {
   margin-bottom: 0;
@@ -389,7 +440,7 @@ button {
   overflow: auto;
   padding: 16px;
   border: 1px solid var(--bs-border-muted);
-  border-radius: 10px;
+  border-radius: 0 0 10px 10px;
   background: var(--bs-bg-1);
   font-size: 12px;
   line-height: 1.7;
@@ -418,7 +469,9 @@ button {
 .tool-card {
   margin: 8px 0;
   border: 1px solid var(--bs-border-muted);
-  border-radius: 9px;
+  border-radius: 10px;
+  background: var(--bs-bg-1);
+  overflow: hidden;
   font-size: 12px;
 }
 .tool-card summary {
@@ -429,6 +482,15 @@ button {
   cursor: pointer;
   color: var(--bs-fg-1);
   list-style: none;
+}
+.tool-card summary:hover {
+  background: var(--bs-bg-2);
+}
+.tool-card summary:focus-visible {
+  outline-offset: -3px;
+}
+.tool-card summary::-webkit-details-marker {
+  display: none;
 }
 .tool-card summary::after {
   content: "⌄";
@@ -455,11 +517,18 @@ button {
 .tool-card pre {
   margin: 0;
   padding: 12px;
-  border-top: 1px solid var(--bs-border-muted);
+  max-height: 24rem;
+  overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 11px;
   line-height: 1.7;
+}
+.tool-detail-label {
+  padding: 10px 12px 0;
+  border-top: 1px solid var(--bs-border-muted);
+  color: var(--bs-fg-2);
+  font-size: 11px;
 }
 .live-status {
   display: flex;
@@ -492,13 +561,13 @@ button {
 .composer {
   overflow: hidden;
   border: 1px solid var(--bs-border-body);
-  border-radius: 22px;
+  border-radius: 18px;
   background: var(--bs-bg-body);
   box-shadow: var(--bs-box-shadow-sm);
 }
 .composer:focus-within {
   border-color: var(--bs-primary-border);
-  box-shadow: 0 0 0 2px var(--bs-primary-focus-ring);
+  box-shadow: 0 0 0 1px var(--bs-primary-border);
 }
 .composer-input {
   display: block;
@@ -649,7 +718,7 @@ button {
     opacity: 1;
   }
   .session-tabs {
-    margin: 4px 12px 0;
+    padding: 0 16px;
   }
   .mobile-only {
     display: inline-flex;
@@ -1003,9 +1072,6 @@ button {
 .assistant-message + .assistant-message {
   margin-top: -16px;
 }
-.assistant-message + .assistant-message > .message-label {
-  display: none;
-}
 .tool-name {
   min-width: 0;
   overflow: hidden;
@@ -1017,10 +1083,6 @@ button {
   white-space: nowrap;
 }
 
-.sidebar-close {
-  align-self: flex-end;
-  margin-bottom: 12px;
-}
 .settings-disclosure {
   border: 1px solid var(--bs-border-muted);
   border-radius: 12px;
@@ -1117,15 +1179,6 @@ button {
   width: 16px;
   height: 16px;
 }
-.session-tabs .nav-link {
-  font-size: 12px;
-  border-radius: 8px;
-}
-.session-tabs .nav-link.active {
-  --bs-nav-pills-link-active-color: var(--bs-fg-body);
-  --bs-nav-pills-link-active-bg: var(--bs-bg-body);
-  box-shadow: var(--bs-box-shadow-sm);
-}
 .session-popover {
   position: fixed;
   inset: auto;
@@ -1216,11 +1269,12 @@ button {
   display: flex;
   align-items: center;
   gap: 2px;
-  opacity: 1;
+  opacity: 0;
   min-height: 32px;
 }
 .message:hover .message-actions,
-.message:focus-within .message-actions {
+.message:focus-within .message-actions,
+.message-actions[data-last] {
   opacity: 1;
 }
 .message-actions .icon-button {
@@ -1241,16 +1295,23 @@ button {
   color: var(--bs-success-fg);
 }
 .code-block {
-  position: relative;
+  min-width: 0;
+  margin: 16px 0;
 }
-.code-block > button {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  --bs-btn-bg: var(--bs-bg-1);
+.code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px 4px 16px;
+  border: 1px solid var(--bs-border-muted);
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  background: var(--bs-bg-2);
+  color: var(--bs-fg-2);
+  font-size: 12px;
 }
 .code-block pre {
-  padding-top: 44px;
+  margin: 0;
 }
 .image-thumbnail {
   position: relative;
@@ -1290,8 +1351,7 @@ button {
   max-height: calc(100dvh - 100px);
   object-fit: contain;
 }
-.search-dialog header,
-.memory-dialog header {
+.conversation-search header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1372,15 +1432,6 @@ button {
     }
   }
 }
-.session-tabs .nav-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.session-tabs svg {
-  width: 15px;
-  height: 15px;
-}
 .markdown .hljs-keyword,
 .markdown .hljs-selector-tag,
 .markdown .hljs-built_in {
@@ -1405,15 +1456,12 @@ button {
   gap: 8px;
 }
 .sidebar-header .new-conversation {
-  order: 0;
   min-width: 0;
   font-size: 13px;
   padding: 10px 8px;
 }
 .sidebar-header .sidebar-close {
-  order: 1;
-  margin: 0;
-  align-self: center;
+  display: none;
 }
 .message-files {
   display: flex;
@@ -1458,11 +1506,9 @@ button {
 .session-list-controls {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 8px 0 12px;
-}
-.session-list-controls > span {
-  font-size: 11px;
+  gap: 4px;
+  padding: 0;
+  margin-top: 16px;
 }
 .session-list-controls + #conversations .sidebar-label:first-child {
   margin-top: 12px;
@@ -1482,24 +1528,10 @@ button {
   border-radius: 7px;
   text-decoration: none;
 }
-.memory-dialog {
-  width: min(48rem, calc(100vw - 2rem));
-  max-height: calc(100dvh - 2rem);
-  overflow-y: auto;
-}
-.memory-tabs,
-.memory-date,
 .memory-note footer {
   display: flex;
   gap: 0.5rem;
   align-items: center;
-}
-.memory-tabs {
-  margin-bottom: 1rem;
-}
-.memory-tabs [aria-pressed="true"] {
-  color: var(--bs-primary-fg-emphasis);
-  background: var(--bs-primary-bg-subtle);
 }
 .memory-notes {
   margin-top: 1rem;
@@ -1515,15 +1547,76 @@ button {
 .memory-note time {
   margin-right: auto;
 }
-.memory-result strong,
-.memory-result time,
-.memory-result span > span {
-  display: block;
+@media (max-width: 767px) {
+  .conversation-header .desktop-only {
+    display: none;
+  }
+  .sidebar-header .sidebar-close {
+    display: inline-flex;
+    order: 1;
+  }
+  .icon-button,
+  .composer-toolbar button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .message-actions {
+    flex-wrap: wrap;
+  }
 }
-.memory-result time {
-  font-size: 0.75rem;
+
+.memory-content {
+  max-width: 48rem;
+}
+.memory-content footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.conversation-search {
+  flex-shrink: 0;
+  max-height: 35dvh;
+  overflow: auto;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--bs-border-muted);
+  background: var(--bs-bg-1);
+}
+.conversation-search h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin: 0;
+}
+.conversation-search .search-results {
+  max-height: min(28dvh, 14rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.session-search-results .search-result {
+  padding: 10px 12px;
+  margin-bottom: 4px;
+}
+.session-search-results .search-result strong,
+.session-search-results .search-result span > span {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.session-search-results .search-result span > span {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
   color: var(--bs-fg-2);
 }
-.memory-date input {
-  max-width: 12rem;
+.session-search-error {
+  padding: 8px 12px;
+}
+@media (max-width: 767px) {
+  .conversation-search {
+    padding: 8px 12px;
+  }
 }

@@ -1,3 +1,5 @@
+import { SessionSearchResults } from "./search.js";
+import type { MemorySource } from "./memory.js";
 import {
   useEffect,
   useId,
@@ -17,6 +19,7 @@ export function SessionList({
   disabled,
   onSelect,
   onRename,
+  onOpenSource,
   onDelete,
   onUpdate,
 }: {
@@ -24,6 +27,7 @@ export function SessionList({
   selected: string | null;
   disabled: boolean;
   onSelect: (id: string) => void;
+  onOpenSource: (source: MemorySource) => Promise<void>;
   onRename: (session: Conversation, title: string) => Promise<void>;
   onDelete: (session: Conversation) => Promise<void>;
   onUpdate: (
@@ -61,7 +65,7 @@ export function SessionList({
       sessions
         .filter(
           (session) =>
-            !!session.archived === archived &&
+            (query.trim() || !!session.archived === archived) &&
             session.title
               .toLocaleLowerCase()
               .includes(query.trim().toLocaleLowerCase()),
@@ -102,37 +106,38 @@ export function SessionList({
     session.pinned ? "ピン留め" : group(session.updatedAt);
   return (
     <>
-      <label className="session-search">
-        <Icon name="search" />
-        <input
-          type="search"
-          aria-label="セッションを検索"
-          placeholder="セッションを検索"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-      </label>
       <div className="session-list-controls">
-        <span className="small fg-2">
-          {archived ? "アーカイブ" : "セッション"}
-        </span>
+        <label className="session-search">
+          <Icon name="search" />
+          <input
+            type="search"
+            aria-label="セッションを検索"
+            placeholder="セッションを検索"
+            maxLength={200}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
         <button
           className="btn-text theme-secondary btn-sm icon-button"
           aria-label={archived ? "通常のセッションを表示" : "アーカイブを表示"}
           title={archived ? "セッションに戻る" : "アーカイブ"}
           aria-pressed={archived}
+          disabled={!!query.trim()}
           onClick={() => setArchived(!archived)}
         >
           <Icon name="archive" />
         </button>
       </div>
       <nav id="conversations" aria-label="セッション一覧">
+        {!!query.trim() && <h2 className="sidebar-label">セッション名</h2>}
         {visible.map((session, index) => (
           <div key={session.id}>
-            {(!index ||
-              groupLabel(visible[index - 1]!) !== groupLabel(session)) && (
-              <h2 className="sidebar-label">{groupLabel(session)}</h2>
-            )}
+            {!query.trim() &&
+              (!index ||
+                groupLabel(visible[index - 1]!) !== groupLabel(session)) && (
+                <h2 className="sidebar-label">{groupLabel(session)}</h2>
+              )}
             <div
               className={`session-row ${session.id === selected ? "selected" : ""}`}
               data-session-id={session.id}
@@ -177,9 +182,18 @@ export function SessionList({
         {!visible.length && (
           <p className="session-list-empty">
             {query
-              ? "一致するセッションはありません"
+              ? "一致するセッション名はありません"
               : "セッションはありません"}
           </p>
+        )}
+        {!!query.trim() && (
+          <SessionSearchResults
+            query={query}
+            onSelect={async (source) => {
+              await onOpenSource(source);
+              setQuery("");
+            }}
+          />
         )}
       </nav>
       {createPortal(
@@ -195,7 +209,7 @@ export function SessionList({
               event.newState === "closed" &&
               document.activeElement === document.body
             )
-              trigger.current?.focus();
+              trigger.current?.focus({ preventScroll: true });
           }}
           style={position}
         >
@@ -259,8 +273,12 @@ export function SessionList({
           action={action}
           onClose={() => {
             setAction(null);
-            if (trigger.current?.isConnected) trigger.current.focus();
-            else document.getElementById("message")?.focus();
+            if (trigger.current?.isConnected)
+              trigger.current.focus({ preventScroll: true });
+            else
+              document
+                .getElementById("message")
+                ?.focus({ preventScroll: true });
           }}
           onSubmit={(title) =>
             action.kind === "rename"

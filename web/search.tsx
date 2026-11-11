@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { api } from "./api.js";
+import type { HistoryResults } from "./api.js";
+import type { MemorySource } from "./memory.js";
 import { Icon } from "./icons.js";
 
 type Results = {
@@ -16,20 +17,17 @@ export function ConversationSearch({
   onClose: () => void;
   onSelect: (entryId: number) => Promise<void>;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Results>({
     matches: [],
     cursor: null,
   });
   const [loading, setLoading] = useState(false);
+  const [selecting, setSelecting] = useState(false);
   const [error, setError] = useState("");
   const [version, setVersion] = useState(0);
   const request = useRef(0);
   const heading = useId();
-  useEffect(() => {
-    dialog.current?.showModal();
-  }, []);
   useEffect(() => {
     const current = ++request.current;
     setResults({ matches: [], cursor: null });
@@ -80,12 +78,16 @@ export function ConversationSearch({
       if (request.current === current) setLoading(false);
     }
   }
-  return createPortal(
-    <dialog
-      ref={dialog}
-      className="session-dialog search-dialog"
+  return (
+    <section
+      className="conversation-search"
       aria-labelledby={heading}
-      onClose={onClose}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          onClose();
+        }
+      }}
     >
       <header>
         <h2 id={heading}>
@@ -96,7 +98,7 @@ export function ConversationSearch({
           className="btn-text theme-secondary icon-button"
           aria-label="検索を閉じる"
           title="閉じる"
-          onClick={() => dialog.current?.close()}
+          onClick={onClose}
         >
           <Icon name="close" />
         </button>
@@ -110,24 +112,23 @@ export function ConversationSearch({
         autoFocus
         onChange={(event) => setQuery(event.target.value)}
       />
-      <div className="search-results" aria-busy={loading}>
+      <div className="search-results" aria-busy={loading || selecting}>
         {results.matches.map((match) => (
           <button
             key={`${match.entryId}-${match.role}`}
             className="search-result"
             onClick={async () => {
-              setLoading(true);
+              setSelecting(true);
               setError("");
               try {
                 await onSelect(match.entryId);
-                dialog.current?.close();
               } catch {
                 setError("該当する履歴を読み込めませんでした");
               } finally {
-                setLoading(false);
+                setSelecting(false);
               }
             }}
-            disabled={loading}
+            disabled={loading || selecting}
           >
             <Icon name={match.role === "user" ? "chat" : "agent"} />
             <span>{match.text}</span>
@@ -162,7 +163,124 @@ export function ConversationSearch({
           </button>
         )}
       </div>
-    </dialog>,
-    document.body,
+    </section>
+  );
+}
+
+export function SessionSearchResults({
+  query,
+  onSelect,
+}: {
+  query: string;
+  onSelect: (source: MemorySource) => Promise<void>;
+}) {
+  const [results, setResults] = useState<HistoryResults>({
+    matches: [],
+    cursor: null,
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [version, setVersion] = useState(0);
+  const request = useRef(0);
+  const path = `/api/history?query=${encodeURIComponent(query.trim())}`;
+  useEffect(() => {
+    const current = ++request.current;
+    setResults({ matches: [], cursor: null });
+    setError("");
+    setLoading(true);
+    const timer = setTimeout(() => {
+      void api<HistoryResults>(path)
+        .then((value) => {
+          if (current === request.current) setResults(value);
+        })
+        .catch(() => {
+          if (current === request.current)
+            setError("会話本文を検索できませんでした");
+        })
+        .finally(() => {
+          if (current === request.current) setLoading(false);
+        });
+    }, 200);
+    return () => {
+      clearTimeout(timer);
+      request.current++;
+    };
+  }, [path, version]);
+  async function more() {
+    const current = request.current;
+    setLoading(true);
+    setError("");
+    try {
+      const next = await api<HistoryResults>(
+        `${path}&cursor=${encodeURIComponent(results.cursor!)}`,
+      );
+      if (current === request.current)
+        setResults((old) => ({
+          matches: [...old.matches, ...next.matches],
+          cursor: next.cursor,
+        }));
+    } catch {
+      if (current === request.current)
+        setError("会話本文を検索できませんでした");
+    } finally {
+      if (current === request.current) setLoading(false);
+    }
+  }
+  return (
+    <section
+      className="session-search-results"
+      aria-label="会話本文の検索結果"
+      aria-busy={loading}
+    >
+      <h2 className="sidebar-label">会話本文</h2>
+      {results.matches.map((match) => (
+        <button
+          key={`${match.sessionId}-${match.entryId}`}
+          className="search-result"
+          disabled={loading}
+          onClick={async () => {
+            setError("");
+            try {
+              await onSelect(match);
+            } catch {
+              setError("該当する履歴を読み込めませんでした");
+            }
+          }}
+        >
+          <span>
+            <strong>{match.title}</strong>
+            <span>{match.text}</span>
+          </span>
+        </button>
+      ))}
+      {loading && (
+        <p role="status" className="session-list-empty">
+          検索中…
+        </p>
+      )}
+      {!loading && !error && !results.matches.length && (
+        <p className="session-list-empty">一致する本文はありません</p>
+      )}
+      {error && (
+        <div role="alert" className="session-search-error">
+          <p>{error}</p>
+          <button
+            className="btn-text theme-secondary btn-sm"
+            onClick={() => setVersion((value) => value + 1)}
+          >
+            再試行
+          </button>
+        </div>
+      )}
+      {results.cursor && (
+        <button
+          className="btn-text theme-secondary btn-sm"
+          disabled={loading}
+          onClick={() => void more()}
+        >
+          さらに検索
+        </button>
+      )}
+    </section>
   );
 }
