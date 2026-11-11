@@ -80,29 +80,19 @@ curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080
 
 ## Skills
 
-[Agent Skills](https://agentskills.io/specification) 形式の `SKILL.md` を、設定の `dataRoot` 配下の `skills/<name>/` に配置します。共有 Skills は全セッションで利用できます。設定画面の「Skills」で説明・互換性・検証エラーを確認できます。
+設定画面の「Skills」で [Agent Skills](https://agentskills.io/specification) 形式の Skill を追加・編集・削除できます。共有 Skills は全セッションで利用できます。
 
-追加・更新時はサービスを停止し、取得元と `SKILL.md`、参照資料、スクリプトの内容を管理者が確認してください。外部 Skills の指示は権限の付与にはなりません。
+- **追加**: 「Skill を追加」で `SKILL.md` を入力するか、ファイル・フォルダーを選択して「追加」を押します。フォルダーの直下には `SKILL.md` が必要です。参照資料やスクリプトも取り込まれます。
+- **編集**: 一覧の「編集」で `SKILL.md` を変更し、保存します。補助ファイルは保持されます。名前や補助ファイルを変更する場合は、手元に元のフォルダーを用意して削除・追加してください。
+- **削除**: 一覧の「削除」で確認すると、補助ファイルを含む Skill 全体が削除されます。
 
-```sh
-set -e
-sudo systemctl stop agent.service
-# /etc/agent/config.yaml の dataRoot に合わせる
-DATA_ROOT=/srv/agent-data
-# レビュー済みの新しい Skill を配置（同名の既存ディレクトリへ上書きしない）
-sudo test ! -e "$DATA_ROOT/skills/pdf-processing"
-sudo cp -R --no-preserve=ownership ./pdf-processing "$DATA_ROOT/skills/"
-sudo chown -R root:root "$DATA_ROOT/skills/pdf-processing"
-sudo find "$DATA_ROOT/skills/pdf-processing" -type d -exec chmod 755 {} +
-sudo find "$DATA_ROOT/skills/pdf-processing" -type f -exec chmod 644 {} +
-sudo systemctl start agent.service
-```
+変更は全セッションが停止している間だけ行えます。他の画面で変更された場合は再読み込みし、内容を確認して操作し直してください。取り込む前に取得元・本文・スクリプトを確認してください。外部 Skills の指示は権限の付与にはなりません。
 
-`skills/` と内容は root 所有とし、ディレクトリは 755、通常ファイルは 644（直接実行するスクリプトは 755）にします。シンボリックリンク・ハードリンク・特殊ファイル・書き込み可能な共有権限は拒否します。アプリ更新は内容を保持し、不正な既存権限を自動修正しません。不正な Skill は設定画面でエラー表示され、共有ルート自体が不正な場合は起動・読み込みを拒否します。
+保存先は `dataRoot/skills/<name>/` です。管理ユーザー `agent-control` が所有し、作業ユーザーは読み取り・実行だけが可能です。以前の root 所有の Skills は、サービス停止後のアプリ更新で安全な所有者・権限を検証し、内容を保ったまま管理ユーザーへ移管します。不正な既存権限は自動修正しません。直接ファイルを管理する場合もサービスを停止し、所有者を `agent-control`、ディレクトリを755、通常ファイルを644にしてください。取り込んだスクリプトは `python3 scripts/example.py` や `bash scripts/example.sh` のように実行します。
 
 一覧の再読み込みで検証でき、変更は次の新しい実行から反映されます。`/skill:pdf-processing PDF からテキストを抽出して` で明示指定でき、通常の依頼では AI が必要な Skill を読み込みます。実行中の明示指定は停止後に送信してください。スクリプトは既存 Shell 経由で `agent-work` として実行し、成果物はセッションの `outputs/` に保存します。依存コマンドは自動インストールしません。
 
-本文は 64 KiB、テキスト資料は 256 KiB、探索はルート直下128件・各 Skill 内256件・深さ8、本文の合計読み込みは1 MiB、有効化した本文・補助ファイル一覧の合計は256 KiBまでです。テキスト資料は UTF-8 に限ります。前の実行で検出した Skill が変更・削除されていると、「再開」は旧版から切り替えずエラーにします。内容と作業状態を確認し、新しい入力で続行してください。プロジェクト内の Skills は自動検出しません。
+取り込みは1 Skill あたり合計4 MiB・各補助ファイル256 KiBまでです。本文は 64 KiB、テキスト資料は 256 KiB、探索はルート直下128件・各 Skill 内256件・深さ8、本文の合計読み込みは1 MiB、有効化した本文・補助ファイル一覧の合計は256 KiBまでです。テキスト資料は UTF-8 に限ります。前の実行で検出した Skill が変更・削除されていると、「再開」は旧版から切り替えずエラーにします。内容と作業状態を確認し、新しい入力で続行してください。プロジェクト内の Skills は自動検出しません。
 
 ## テスト
 

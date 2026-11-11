@@ -95,11 +95,16 @@ on it. No direct master push, shared-history rewriting, merge or release without
 explicit authorization. Do not commit credentials, machine state, dependencies,
 generated output or live provider responses.
 
-Shared Skills live only in dataRoot/skills, with immutable root ownership and
-read/execute access for work. Discover only on idle admission, freeze versions,
+Shared Skills live only in dataRoot/skills, with control ownership, root-owned
+ancestors and read/execute access for work. Settings can import, edit SKILL.md and
+delete Skills only while all execution is idle, under the admission lock. Validate
+bounded imports before publishing and revision-check edits and deletion. The
+stopped-service installer migrates only validated legacy root-owned trees,
+preserving their contents. Never repair unsafe ownership or permissions.
+Discover only on idle admission, freeze versions,
 and keep activation request-only through public Pi hooks. Skills are reference
 instructions, never permission grants; allowed-tools cannot widen authority.
-Admin updates require a stopped service. Never execute Skill code on control,
+Manual filesystem updates require a stopped service. Never execute Skill code on control,
 auto-discover work-owned Skills, or replace a changed version during resume.
 
 ## Implementation boundaries

@@ -13,6 +13,13 @@ import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 import { memoryId, memoryInput, memoryEdit, historyInput } from "./memory.js";
 
+import {
+  skillName,
+  skillImport,
+  skillRevision,
+  SKILL_LIMITS,
+} from "./skills.js";
+
 const requestId = z.string().uuid();
 const identifier = z.object({ id: z.string().uuid() });
 type Session = { csrf: string; expires: number };
@@ -191,7 +198,36 @@ export async function createServer(
   app.get("/api/model-options", async () => service.conversationModelOptions());
   app.get("/api/skills", async (request) => {
     z.object({}).strict().parse(request.query);
-    return service.sanitize((await service.skills.discover()).view);
+    return service.skillsManagement();
+  });
+  app.post("/api/skills", { bodyLimit: 6 * 1024 * 1024 }, async (request) =>
+    service.changeSkill({
+      kind: "create",
+      input: skillImport.parse(request.body),
+    }),
+  );
+  app.get("/api/skills/:name", async (request) => {
+    const { name } = z.object({ name: skillName }).parse(request.params);
+    return service.skillDetail(name);
+  });
+  app.put("/api/skills/:name", { bodyLimit: 512 * 1024 }, async (request) => {
+    const { name } = z.object({ name: skillName }).parse(request.params);
+    const input = z
+      .object({
+        content: z.string().max(SKILL_LIMITS.fileBytes),
+        revision: skillRevision,
+      })
+      .strict()
+      .parse(request.body);
+    return service.changeSkill({ kind: "update", name, ...input });
+  });
+  app.delete("/api/skills/:name", async (request) => {
+    const { name } = z.object({ name: skillName }).parse(request.params);
+    const { revision } = z
+      .object({ revision: skillRevision })
+      .strict()
+      .parse(request.body);
+    return service.changeSkill({ kind: "delete", name, revision });
   });
   app.get("/api/settings", async () => service.management());
   app.put("/api/settings", async (request) =>
