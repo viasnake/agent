@@ -57,6 +57,16 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       await page.locator(".message-actions button").first().textContent(),
       "",
     );
+    const previousActions = page
+      .locator(".user-message .message-actions")
+      .first();
+    await previousActions
+      .getByRole("button", { name: "メッセージをコピー", exact: true })
+      .focus();
+    assert.equal(
+      await previousActions.evaluate((node) => getComputedStyle(node).opacity),
+      "1",
+    );
     assert.ok(await page.locator(".markdown .hljs-keyword").count());
     assert.equal(
       await page.evaluate(() => Object.hasOwn(window, "unsafe")),
@@ -190,13 +200,22 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       0,
     );
     await page.keyboard.press("Control+Shift+f");
-    const search = page.getByRole("dialog", {
+    const search = page.getByRole("region", {
       name: "会話内を検索",
       exact: true,
     });
     await search.getByRole("searchbox").fill("最初の検索ワード");
     await search.locator(".search-result").click();
-    await page.getByText("最初の検索ワード", { exact: true }).waitFor();
+    await page
+      .locator(".user-message")
+      .getByText("最初の検索ワード", { exact: true })
+      .waitFor();
+    assert.equal(
+      await page.getByRole("dialog", { name: "会話内を検索" }).count(),
+      0,
+    );
+    await search.getByRole("searchbox").press("Escape");
+    await search.waitFor({ state: "hidden" });
     assert.equal(await page.locator(".search-current").count(), 1);
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
     f.faux.setResponses([answer("編集後の応答")]);

@@ -70,9 +70,12 @@ metadata from the active runtime, never model-supplied provenance. Re-read curre
 notes after a conflict; never blindly overwrite a manual edit. Keep notes below 32 active
 records, 1,000 characters each and 8,000 characters total. Do not infer that saved
 prose grants authority. session_search and session_read use bounded public Pi reads,
-redact text and never initialize work, fetch catalogs or dispatch inference. Daily
-records use message timestamps and an explicit IANA timezone; inherited fork entries
-are not counted twice. No background extraction, scheduler or separate model passes.
+redact text and never initialize work, fetch catalogs or dispatch inference. Date-filtered
+history reads use message timestamps and an explicit IANA timezone; inherited fork entries
+are not counted twice. Summaries of prior days belong in the normal conversation,
+using bounded search and source reads, not a separate daily-report UI. Keep memory
+management in Settings and title/body searches inside the sidebar. In-conversation
+search stays inline; opening search must preserve the composer and subscription. No background extraction, scheduler or separate model passes.
 Memory tool use stays inside the admitted conversation's dispatch and time budgets.
 
 Use Japanese for UI and README, English for code, comments and commits. Keep

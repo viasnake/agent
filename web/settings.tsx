@@ -1,3 +1,5 @@
+import { MemoryNotes } from "./memory.js";
+import type { MemoryDraft, MemorySource } from "./memory.js";
 import { useNotify } from "./notifications.js";
 import { useEffect, useState } from "react";
 import type { ModelLogin } from "../src/model-auth.js";
@@ -7,7 +9,7 @@ import { api } from "./api.js";
 type PublicSettings = ReturnType<AgentService["management"]>;
 const secretMask = "••••••••";
 type EnvironmentRow = { name: string; value?: string };
-type Tab = "models" | "mcp" | "agent";
+type Tab = "models" | "mcp" | "agent" | "memory";
 function editable(s: PublicSettings): SettingsInput {
   return {
     revision: s.revision,
@@ -66,7 +68,15 @@ function editable(s: PublicSettings): SettingsInput {
     ),
   };
 }
-export function Settings({ onClose }: { onClose: () => void }) {
+export function Settings({
+  onClose,
+  memoryDraft,
+  onSelectSource,
+}: {
+  onClose: () => void;
+  memoryDraft?: MemoryDraft | null;
+  onSelectSource: (source: MemorySource) => Promise<void>;
+}) {
   const notify = useNotify();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   function toggle(id: string, open: boolean) {
@@ -84,9 +94,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [saved, setSaved] = useState<PublicSettings>();
   const [draft, setDraft] = useState<SettingsInput>();
   const [tab, setTab] = useState<Tab>(
-    new URLSearchParams(location.search).get("settings") === "mcp"
-      ? "mcp"
-      : "models",
+    memoryDraft
+      ? "memory"
+      : new URLSearchParams(location.search).get("settings") === "mcp"
+        ? "mcp"
+        : "models",
   );
   const [busy, setBusy] = useState(false),
     [dirty, setDirty] = useState(false);
@@ -245,6 +257,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             ["models", "モデル"],
             ["mcp", "MCP"],
             ["agent", "Agent 設定"],
+            ["memory", "記憶"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -331,7 +344,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
             )}
           </section>
         )}
-        {!draft ? (
+        {tab === "memory" ? (
+          <MemoryNotes
+            initial={memoryDraft ?? undefined}
+            onSelect={onSelectSource}
+          />
+        ) : !draft ? (
           <p>読み込み中…</p>
         ) : (
           <fieldset disabled={busy || loginPending} className="settings-fields">
@@ -1069,26 +1087,28 @@ export function Settings({ onClose }: { onClose: () => void }) {
           </fieldset>
         )}
       </div>
-      <footer className="settings-footer">
-        <button
-          className="btn-solid theme-primary"
-          disabled={busy || loginPending || !dirty}
-          onClick={() => void save()}
-        >
-          {busy ? "処理中…" : "保存"}
-        </button>
-        <button
-          className="btn-text theme-secondary"
-          disabled={busy}
-          onClick={() =>
-            void perform(async () =>
-              accept(await api<PublicSettings>("/api/settings")),
-            )
-          }
-        >
-          読み直す
-        </button>
-      </footer>
+      {tab !== "memory" && (
+        <footer className="settings-footer">
+          <button
+            className="btn-solid theme-primary"
+            disabled={busy || loginPending || !dirty}
+            onClick={() => void save()}
+          >
+            {busy ? "処理中…" : "保存"}
+          </button>
+          <button
+            className="btn-text theme-secondary"
+            disabled={busy}
+            onClick={() =>
+              void perform(async () =>
+                accept(await api<PublicSettings>("/api/settings")),
+              )
+            }
+          >
+            読み直す
+          </button>
+        </footer>
+      )}
     </section>
   );
 }

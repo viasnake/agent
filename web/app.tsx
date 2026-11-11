@@ -1,3 +1,5 @@
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
+import { useReadingPosition } from "./reading-position.js";
 import { NotificationProvider, useNotify } from "./notifications.js";
 import { ModelPicker } from "./model-picker.js";
 import { SessionList } from "./sessions.js";
@@ -5,8 +7,7 @@ import { MessageActions, MessageActionDialog } from "./message-actions.js";
 import type { MessageAction } from "./message-actions.js";
 import { readDraft, saveDraft } from "./drafts.js";
 import { ConversationSearch } from "./search.js";
-import { MemoryDialog } from "./memory.js";
-import type { MemoryPanel } from "./memory.js";
+import type { MemoryDraft, MemorySource } from "./memory.js";
 import type { ReactNode } from "react";
 import { Settings } from "./settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -91,6 +92,7 @@ function Chat({
   onRetry,
 }: ThreadProps) {
   const notify = useNotify();
+  const viewport = useReadingPosition();
   const draftFailure = useRef(false);
   const messages = useMemo(
     () => threadMessages(entries, view),
@@ -163,6 +165,7 @@ function Chat({
           }}
         >
           <ThreadPrimitive.Viewport
+            ref={viewport}
             className="thread-viewport"
             id="transcript"
             aria-label="会話の履歴"
@@ -192,14 +195,13 @@ function Chat({
                   <h2>何を始めますか？</h2>
                 </div>
               )}
-              {!!cursor && (
-                <ThreadPrimitive.LoadEarlier
-                  id="earlier"
-                  className="btn-text theme-secondary btn-sm mb-5"
-                >
-                  以前の記録
-                </ThreadPrimitive.LoadEarlier>
-              )}
+              {/* Keep the load control and prepended messages on the same runtime update. */}
+              <ThreadPrimitive.LoadEarlier
+                id="earlier"
+                className="btn-text theme-secondary btn-sm mb-5"
+              >
+                以前の記録
+              </ThreadPrimitive.LoadEarlier>
               <ThreadPrimitive.Messages>
                 {({ message }) =>
                   message.role === "user" ? (
@@ -386,8 +388,7 @@ function App() {
   );
   const [collapsed, setCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [memoryPanel, setMemoryPanel] = useState<MemoryPanel | null>(null);
-  const memoryOrigin = useRef<HTMLElement | null>(null);
+  const [memoryDraft, setMemoryDraft] = useState<MemoryDraft | null>(null);
   const memoryTarget = useRef<{ sessionId: string; entryId?: number } | null>(
     null,
   );
@@ -847,27 +848,53 @@ function App() {
       throw new Error("履歴の読み込み上限に達しました");
     setTab("chat");
     setActiveEntry(entryId);
-    requestAnimationFrame(() =>
-      document
-        .querySelector<HTMLElement>(`[data-entry-id="${entryId}"]`)
-        ?.scrollIntoView({
-          block: "center",
-          behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
-            ? "instant"
-            : "smooth",
-        }),
-    );
+    requestAnimationFrame(() => {
+      if (selectedRef.current !== id || selectionVersion.current !== version)
+        return;
+      const viewport = document.getElementById("transcript");
+      const target = viewport?.querySelector<HTMLElement>(
+        `[data-entry-id="${entryId}"]`,
+      );
+      if (viewport && target) {
+        const bounds = viewport.getBoundingClientRect();
+        const message = target.getBoundingClientRect();
+        // Only the transcript may scroll; scrollIntoView also moves clipped ancestors.
+        viewport.scrollTo({
+          top:
+            viewport.scrollTop +
+            message.top -
+            bounds.top -
+            Math.max(0, (viewport.clientHeight - message.height) / 2),
+          behavior: "instant",
+        });
+      }
+    });
   }
   useEffect(() => {
     const target = memoryTarget.current;
-    if (!target || view?.conversation.id !== target.sessionId) return;
+    if (settingsOpen || !target || view?.conversation.id !== target.sessionId)
+      return;
     memoryTarget.current = null;
     if (target.entryId) void jumpTo(target.entryId).catch(notice);
-  }, [view?.conversation.id]);
-  function openMemory(panel: MemoryPanel) {
-    memoryOrigin.current = document.activeElement as HTMLElement;
-    setMemoryPanel(panel);
+  }, [view?.conversation.id, settingsOpen]);
+  function openMemory(draft: MemoryDraft) {
+    setMemoryDraft(draft);
+    setSettingsOpen(true);
     setSidebar(false);
+  }
+  async function openSource(source: MemorySource) {
+    if (selectedRef.current === source.sessionId && !settingsOpen) {
+      if (source.entryId) await jumpTo(source.entryId);
+      setTab("chat");
+      setSidebar(false);
+    } else {
+      await api<View>(`/api/conversations/${source.sessionId}`);
+      memoryTarget.current = source;
+      setSettingsOpen(false);
+      setTab("chat");
+      setSidebar(false);
+      if (selectedRef.current !== source.sessionId) select(source.sessionId);
+    }
   }
   useEffect(() => {
     const shortcuts = (event: KeyboardEvent) => {
@@ -925,17 +952,13 @@ function App() {
             className="sidebar-close btn-text theme-secondary btn-sm icon-button"
             aria-label="セッション一覧を閉じる"
             title="一覧を閉じる"
-            onClick={() =>
-              matchMedia("(min-width: 768px)").matches
-                ? setCollapsed(true)
-                : setSidebar(false)
-            }
+            onClick={() => setSidebar(false)}
           >
             <Icon name="close" />
           </button>
           <button
             id="new-conversation"
-            className="btn-outline theme-secondary new-conversation"
+            className="btn-text theme-secondary new-conversation"
             disabled={sending || deleting}
             onClick={() => select(null)}
           >
@@ -950,6 +973,7 @@ function App() {
           selected={selected}
           disabled={sending || deleting}
           onSelect={select}
+          onOpenSource={openSource}
           onRename={renameSession}
           onDelete={deleteSession}
           onUpdate={(session, change) =>
@@ -958,24 +982,9 @@ function App() {
         />
         <div className="sidebar-footer">
           <button
-            className="btn-text theme-secondary btn-sm icon-button"
-            aria-label="記憶を開く"
-            title="記憶・検索"
-            onClick={() => openMemory({ tab: "notes" })}
-          >
-            <Icon name="memory" />
-          </button>
-          <button
-            className="btn-text theme-secondary btn-sm icon-button"
-            aria-label="日次レポートを開く"
-            title="日次レポート"
-            onClick={() => openMemory({ tab: "daily" })}
-          >
-            <Icon name="calendar" />
-          </button>
-          <button
             className="btn-text theme-secondary btn-sm"
             onClick={() => {
+              setMemoryDraft(null);
               setSettingsOpen(true);
               setSidebar(false);
             }}
@@ -983,315 +992,300 @@ function App() {
             <Icon name="settings" />
             設定
           </button>
-          <span id="connection" className="small fg-2" role="status">
-            <span
-              className={`status-dot ${connection === "接続中" ? "connected" : ""}`}
-            />
-            <span title={connection} aria-label={connection}>
-              <Icon name={connection === "接続中" ? "check" : "retry"} />
+          {connection !== "接続中" && (
+            <span id="connection" className="small fg-2" role="status">
+              {connection}
             </span>
-          </span>
+          )}
         </div>
       </aside>
-      {settingsOpen ? (
-        <Settings
-          onClose={() => {
-            setSettingsOpen(false);
-            history.replaceState(null, "", location.pathname);
-          }}
-        />
-      ) : (
-        <main className="workspace">
-          <header className="conversation-header">
-            {collapsed && (
+      <div className="workspace-stack">
+        {settingsOpen && (
+          <Settings
+            memoryDraft={memoryDraft}
+            onSelectSource={openSource}
+            onClose={() => {
+              setSettingsOpen(false);
+              setMemoryDraft(null);
+              history.replaceState(null, "", location.pathname);
+            }}
+          />
+        )}
+        <Tabs
+          value={tab}
+          onValueChange={(value) => setTab(value as typeof tab)}
+          asChild
+        >
+          <main
+            className="workspace"
+            aria-hidden={settingsOpen}
+            inert={settingsOpen}
+          >
+            <header className="conversation-header">
               <button
                 className="desktop-only btn-text theme-secondary btn-sm icon-button"
+                aria-label={
+                  collapsed ? "セッション一覧を開く" : "セッション一覧を閉じる"
+                }
+                title={collapsed ? "一覧を開く" : "一覧を閉じる"}
+                aria-expanded={!collapsed}
+                aria-controls="sidebar"
+                onClick={() => setCollapsed(!collapsed)}
+              >
+                <Icon name="sidebar" />
+              </button>
+              <button
+                className="mobile-only btn-text theme-secondary btn-sm"
                 aria-label="セッション一覧を開く"
-                title="一覧を開く"
-                onClick={() => setCollapsed(false)}
+                aria-expanded={sidebar}
+                aria-controls="sidebar"
+                onClick={() => setSidebar(!sidebar)}
               >
                 <Icon name="menu" />
               </button>
-            )}
-            <button
-              className="mobile-only btn-text theme-secondary btn-sm"
-              aria-label="セッション一覧を開く"
-              aria-expanded={sidebar}
-              aria-controls="sidebar"
-              onClick={() => setSidebar(!sidebar)}
-            >
-              <Icon name="menu" />
-            </button>
-            <h1 id="title">{view?.conversation.title ?? "新しいセッション"}</h1>
-            {view?.conversation.parentId && (
-              <button
-                className="btn-text theme-secondary btn-sm icon-button"
-                aria-label="元のセッションを開く"
-                title="元のセッション"
-                onClick={() => select(view.conversation.parentId!)}
-              >
-                <Icon name="fork" />
-              </button>
-            )}
-            {view && (
-              <span
-                id="state"
-                className={`badge badge-subtle ${currentStatus === "running" ? "theme-primary" : "theme-secondary"}`}
-              >
-                {statuses[currentStatus!] ?? currentStatus}
-              </span>
-            )}
-            <div id="actions" className="ms-auto">
-              {selected && (
+              <h1 id="title">
+                {view?.conversation.title ?? "新しいセッション"}
+              </h1>
+              {view?.conversation.parentId && (
                 <button
                   className="btn-text theme-secondary btn-sm icon-button"
-                  aria-label="会話内を検索"
-                  title="会話内を検索（Ctrl / ⌘ + Shift + F）"
-                  onClick={() => {
-                    setTab("chat");
-                    setSearchOpen(true);
-                  }}
+                  aria-label="元のセッションを開く"
+                  title="元のセッション"
+                  onClick={() => select(view.conversation.parentId!)}
                 >
-                  <Icon name="search" />
+                  <Icon name="fork" />
                 </button>
               )}
-              {(currentStatus === "running" ||
-                currentStatus === "interrupted") && (
-                <button
-                  className="btn-outline theme-secondary btn-sm icon-button"
-                  aria-label={currentStatus === "running" ? "停止" : "再開"}
-                  title={currentStatus === "running" ? "停止" : "再開"}
-                  disabled={acting || deleting}
-                  onClick={() => void action()}
+              {view && (
+                <span
+                  id="state"
+                  className={`badge badge-subtle ${currentStatus === "running" ? "theme-primary" : "theme-secondary"}`}
                 >
-                  <Icon name={currentStatus === "running" ? "stop" : "retry"} />
-                </button>
+                  {statuses[currentStatus!] ?? currentStatus}
+                </span>
               )}
-            </div>
-          </header>
-          <div
-            className="nav nav-pills session-tabs"
-            role="tablist"
-            aria-label="セッションの内容"
-          >
-            {(
-              [
-                ["chat", "会話"],
-                ["files", "ファイル"],
-              ] as const
-            ).map(([name, label]) => (
-              <button
-                key={name}
-                id={`${name}-tab`}
-                role="tab"
-                className={`nav-link ${tab === name ? "active" : ""}`}
-                aria-selected={tab === name}
-                aria-controls={`${name}-panel`}
-                tabIndex={tab === name ? 0 : -1}
-                onClick={() => setTab(name)}
-                onKeyDown={(event) => {
-                  if (
-                    !["ArrowLeft", "ArrowRight", "Home", "End"].includes(
-                      event.key,
-                    )
-                  )
-                    return;
-                  event.preventDefault();
-                  const next =
-                    event.key === "Home"
-                      ? "chat"
-                      : event.key === "End"
-                        ? "files"
-                        : name === "chat"
-                          ? "files"
-                          : "chat";
-                  setTab(next);
-                  document.getElementById(`${next}-tab`)?.focus();
-                }}
-              >
-                <Icon name={name === "chat" ? "chat" : "file"} />
-                {label}
-              </button>
-            ))}
-          </div>
-          <section
-            id="files-panel"
-            role="tabpanel"
-            aria-labelledby="files-tab"
-            hidden={tab !== "files"}
-            className="session-panel"
-            tabIndex={0}
-          >
-            <section
-              id="files-section"
-              className="output-files"
-              aria-label="生成ファイル"
-            >
-              <div className="output-label">
-                <Icon name="file" />
-                <span>ファイル</span>
-                <button
-                  id="refresh-files"
-                  className="btn-text theme-secondary btn-sm icon-button"
-                  aria-label="更新"
-                  title="更新"
-                  disabled={!selected || filesLoading}
-                  onClick={() => selected && void refreshFiles(selected)}
-                >
-                  <Icon name="retry" />
-                </button>
-              </div>
-              {filesLoading && <p role="status">読み込み中…</p>}
-              {filesError && <p role="alert">{filesError}</p>}
-              {!filesLoading && !filesError && !files.files.length && (
-                <p className="files-empty">ファイルはありません</p>
-              )}
-              <div id="files">
-                {files.files.map((file) => (
-                  <a
-                    key={file.path}
-                    className="output-file"
-                    href={`/api/conversations/${selected}/download?path=${encodeURIComponent(file.path)}`}
+              <div id="actions" className="ms-auto">
+                {selected && (
+                  <button
+                    className="btn-text theme-secondary btn-sm icon-button"
+                    aria-label="会話内を検索"
+                    title="会話内を検索（Ctrl / ⌘ + Shift + F）"
+                    onClick={() => {
+                      setTab("chat");
+                      setSearchOpen(true);
+                    }}
                   >
-                    <Icon name="down" />
-                    <span>{file.path.slice(8)}</span>
-                    <small>{fileSize(file.size)}</small>
-                  </a>
-                ))}
-                {files.truncated && (
-                  <span className="small fg-2">表示上限に達しました</span>
+                    <Icon name="search" />
+                  </button>
+                )}
+                {(currentStatus === "running" ||
+                  currentStatus === "interrupted") && (
+                  <button
+                    className="btn-outline theme-secondary btn-sm icon-button"
+                    aria-label={currentStatus === "running" ? "停止" : "再開"}
+                    title={currentStatus === "running" ? "停止" : "再開"}
+                    disabled={acting || deleting}
+                    onClick={() => void action()}
+                  >
+                    <Icon
+                      name={currentStatus === "running" ? "stop" : "retry"}
+                    />
+                  </button>
                 )}
               </div>
-            </section>
-          </section>
-          <section
-            id="chat-panel"
-            role="tabpanel"
-            aria-labelledby="chat-tab"
-            hidden={tab !== "chat"}
-            className="session-panel"
-          >
-            <MessageActions.Provider
-              value={{
-                disabled:
-                  sending ||
-                  changingModel ||
-                  acting ||
-                  deleting ||
-                  currentStatus === "running" ||
-                  currentStatus === "stopping",
-                activeEntry,
-                onRemember: (entryId, text) => {
-                  if (selected)
-                    openMemory({
-                      tab: "notes",
-                      text,
-                      source: { sessionId: selected, entryId },
-                    });
-                },
-                onAction: (action) => {
-                  messageActionOrigin.current =
-                    document.activeElement as HTMLElement;
-                  setMessageAction(action);
-                },
-              }}
-            >
-              <Chat
-                draftId={selected}
-                key={threadKey}
-                view={view}
-                entries={entries}
-                cursor={cursor}
-                sending={
-                  sending ||
-                  deleting ||
-                  changingModel ||
-                  (selected !== null && !view)
-                }
-                loading={selected !== null && !view && !loadError}
-                loadError={loadError}
-                onRetry={() => {
-                  setLoadError("");
-                  setReload((value) => value + 1);
-                }}
-                modelPicker={
-                  <ModelPicker
-                    label="セッションのモデル"
-                    compact
-                    value={
-                      view?.conversation.modelConfigId
-                        ? JSON.stringify([
-                            view.conversation.modelConfigId,
-                            view.conversation.model ??
-                              modelOptions.models.find(
-                                (m) => m.id === view.conversation.modelConfigId,
-                              )?.model,
-                          ])
-                        : draftModel
-                    }
-                    models={choices}
-                    disabled={
+            </header>
+            <TabsList className="session-tabs" aria-label="セッションの内容">
+              <TabsTrigger
+                value="chat"
+                id="chat-tab"
+                aria-controls="chat-panel"
+              >
+                <Icon name="chat" />
+                会話
+              </TabsTrigger>
+              <TabsTrigger
+                value="files"
+                id="files-tab"
+                aria-controls="files-panel"
+              >
+                <Icon name="file" />
+                ファイル
+              </TabsTrigger>
+            </TabsList>
+            <div className="session-panels">
+              <TabsContent
+                value="files"
+                forceMount
+                id="files-panel"
+                aria-labelledby="files-tab"
+                aria-hidden={tab !== "files"}
+                inert={tab !== "files"}
+                className="session-panel"
+                tabIndex={0}
+              >
+                <section
+                  id="files-section"
+                  className="output-files"
+                  aria-label="生成ファイル"
+                >
+                  <div className="output-label">
+                    <Icon name="file" />
+                    <span>ファイル</span>
+                    <button
+                      id="refresh-files"
+                      className="btn-text theme-secondary btn-sm icon-button"
+                      aria-label="更新"
+                      title="更新"
+                      disabled={!selected || filesLoading}
+                      onClick={() => selected && void refreshFiles(selected)}
+                    >
+                      <Icon name="retry" />
+                    </button>
+                  </div>
+                  {filesLoading && <p role="status">読み込み中…</p>}
+                  {filesError && <p role="alert">{filesError}</p>}
+                  {!filesLoading && !filesError && !files.files.length && (
+                    <p className="files-empty">ファイルはありません</p>
+                  )}
+                  <div id="files">
+                    {files.files.map((file) => (
+                      <a
+                        key={file.path}
+                        className="output-file"
+                        href={`/api/conversations/${selected}/download?path=${encodeURIComponent(file.path)}`}
+                      >
+                        <Icon name="down" />
+                        <span>{file.path.slice(8)}</span>
+                        <small>{fileSize(file.size)}</small>
+                      </a>
+                    ))}
+                    {files.truncated && (
+                      <span className="small fg-2">表示上限に達しました</span>
+                    )}
+                  </div>
+                </section>
+              </TabsContent>
+              <TabsContent
+                value="chat"
+                forceMount
+                id="chat-panel"
+                aria-labelledby="chat-tab"
+                aria-hidden={tab !== "chat"}
+                inert={tab !== "chat"}
+                className="session-panel"
+              >
+                {searchOpen && selected && (
+                  <ConversationSearch
+                    id={selected}
+                    onClose={() => {
+                      setSearchOpen(false);
+                      document
+                        .getElementById("message")
+                        ?.focus({ preventScroll: true });
+                    }}
+                    onSelect={jumpTo}
+                  />
+                )}
+                <MessageActions.Provider
+                  value={{
+                    disabled:
+                      sending ||
+                      changingModel ||
+                      acting ||
+                      deleting ||
+                      currentStatus === "running" ||
+                      currentStatus === "stopping",
+                    activeEntry,
+                    onRemember: (entryId, text) => {
+                      if (selected)
+                        openMemory({
+                          text,
+                          source: { sessionId: selected, entryId },
+                        });
+                    },
+                    onAction: (action) => {
+                      messageActionOrigin.current =
+                        document.activeElement as HTMLElement;
+                      setMessageAction(action);
+                    },
+                  }}
+                >
+                  <Chat
+                    draftId={selected}
+                    key={threadKey}
+                    view={view}
+                    entries={entries}
+                    cursor={cursor}
+                    sending={
                       sending ||
                       deleting ||
                       changingModel ||
-                      (selected !== null && !view) ||
-                      currentStatus === "running" ||
-                      currentStatus === "stopping"
+                      (selected !== null && !view)
                     }
-                    onChange={(id) => void changeModel(id)}
-                    onManage={() => {
-                      setSettingsOpen(true);
+                    loading={selected !== null && !view && !loadError}
+                    loadError={loadError}
+                    onRetry={() => {
+                      setLoadError("");
+                      setReload((value) => value + 1);
                     }}
+                    modelPicker={
+                      <ModelPicker
+                        label="セッションのモデル"
+                        compact
+                        value={
+                          view?.conversation.modelConfigId
+                            ? JSON.stringify([
+                                view.conversation.modelConfigId,
+                                view.conversation.model ??
+                                  modelOptions.models.find(
+                                    (m) =>
+                                      m.id === view.conversation.modelConfigId,
+                                  )?.model,
+                              ])
+                            : draftModel
+                        }
+                        models={choices}
+                        disabled={
+                          sending ||
+                          deleting ||
+                          changingModel ||
+                          (selected !== null && !view) ||
+                          currentStatus === "running" ||
+                          currentStatus === "stopping"
+                        }
+                        onChange={(id) => void changeModel(id)}
+                        onManage={() => {
+                          setMemoryDraft(null);
+                          setSettingsOpen(true);
+                        }}
+                      />
+                    }
+                    attachments={attachments}
+                    setAttachments={setAttachments}
+                    onSend={send}
+                    onEarlier={earlier}
                   />
-                }
-                attachments={attachments}
-                setAttachments={setAttachments}
-                onSend={send}
-                onEarlier={earlier}
+                </MessageActions.Provider>
+              </TabsContent>
+            </div>
+            {messageAction && (
+              <MessageActionDialog
+                action={messageAction}
+                onClose={() => {
+                  setMessageAction(null);
+                  if (messageActionOrigin.current?.isConnected)
+                    messageActionOrigin.current.focus({ preventScroll: true });
+                  else
+                    document
+                      .getElementById("message")
+                      ?.focus({ preventScroll: true });
+                }}
+                onSubmit={branchMessage}
               />
-            </MessageActions.Provider>
-          </section>
-          {messageAction && (
-            <MessageActionDialog
-              action={messageAction}
-              onClose={() => {
-                setMessageAction(null);
-                if (messageActionOrigin.current?.isConnected)
-                  messageActionOrigin.current.focus();
-                else document.getElementById("message")?.focus();
-              }}
-              onSubmit={branchMessage}
-            />
-          )}
-          {searchOpen && selected && (
-            <ConversationSearch
-              id={selected}
-              onClose={() => setSearchOpen(false)}
-              onSelect={jumpTo}
-            />
-          )}
-        </main>
-      )}
-      {memoryPanel && (
-        <MemoryDialog
-          initial={memoryPanel}
-          onClose={() => {
-            setMemoryPanel(null);
-            if (memoryOrigin.current?.isConnected) memoryOrigin.current.focus();
-            else document.getElementById("message")?.focus();
-          }}
-          onSelect={async (source) => {
-            if (selectedRef.current === source.sessionId) {
-              if (source.entryId) await jumpTo(source.entryId);
-              setTab("chat");
-            } else {
-              await api<View>(`/api/conversations/${source.sessionId}`);
-              memoryTarget.current = source;
-              select(source.sessionId);
-            }
-          }}
-        />
-      )}
+            )}
+          </main>
+        </Tabs>
+      </div>
     </div>
   );
 }

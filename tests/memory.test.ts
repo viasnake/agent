@@ -564,3 +564,135 @@ test("memory HTTP endpoints require local sessions and CSRF, enforce bounds, and
     await f.service.close();
   }
 });
+
+test("a conversational recap can search two local dates and read their original sources within one admitted run", async () => {
+  const f = await fixture([
+    fauxAssistantMessage("設定変更を実施し接続を確認しました", {
+      timestamp: Date.parse("2026-11-08T15:05:00Z"),
+    }),
+    fauxAssistantMessage("移行案を提案しました。実施はしていません", {
+      timestamp: Date.parse("2026-11-07T15:05:00Z"),
+    }),
+  ]);
+  try {
+    const yesterday = await f.service.create(randomUUID(), "設定変更");
+    const before = await f.service.create(randomUUID(), "移行案");
+    for (const session of [yesterday, before]) {
+      await f.service.send(session.id, randomUUID(), "作業を確認して");
+      await until(
+        async () =>
+          (await f.service.conversation(session.id)).status === "idle",
+      );
+    }
+    const recap = await f.service.create(randomUUID(), "過去の作業の振り返り");
+    f.faux.setResponses([
+      (context) => {
+        const system = JSON.stringify(
+          context.messages.filter((message) => message.role === "system"),
+        );
+        assert.match(system, /Current UTC timestamp: \d{4}-\d{2}-\d{2}T/);
+        return fauxAssistantMessage(
+          fauxToolCall("session_search", {
+            date: "2026-11-09",
+            timezone: "Asia/Tokyo",
+          }),
+          { stopReason: "toolUse" },
+        );
+      },
+      (context) => {
+        const result = context.messages
+          .filter((message) => message.role === "toolResult")
+          .at(-1)!;
+        assert.equal(result.role, "toolResult");
+        const page = JSON.parse(
+          result.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join(""),
+        );
+        const match = page.matches.find(
+          (row: { sessionId: string }) => row.sessionId === yesterday.id,
+        );
+        assert.ok(match);
+        assert.equal(page.cursor, null);
+        return fauxAssistantMessage(
+          fauxToolCall("session_read", {
+            sessionId: match.sessionId,
+            entryId: match.entryId,
+          }),
+          { stopReason: "toolUse" },
+        );
+      },
+      (context) => {
+        assert.match(
+          JSON.stringify(
+            context.messages
+              .filter((message) => message.role === "toolResult")
+              .at(-1),
+          ),
+          /設定変更を実施し接続を確認/,
+        );
+        return fauxAssistantMessage(
+          fauxToolCall("session_search", {
+            date: "2026-11-08",
+            timezone: "Asia/Tokyo",
+          }),
+          { stopReason: "toolUse" },
+        );
+      },
+      (context) => {
+        const result = context.messages
+          .filter((message) => message.role === "toolResult")
+          .at(-1)!;
+        assert.equal(result.role, "toolResult");
+        const page = JSON.parse(
+          result.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join(""),
+        );
+        const match = page.matches.find(
+          (row: { sessionId: string }) => row.sessionId === before.id,
+        );
+        assert.ok(match);
+        assert.equal(page.cursor, null);
+        return fauxAssistantMessage(
+          fauxToolCall("session_read", {
+            sessionId: match.sessionId,
+            entryId: match.entryId,
+          }),
+          { stopReason: "toolUse" },
+        );
+      },
+      (context) => {
+        assert.match(
+          JSON.stringify(
+            context.messages
+              .filter((message) => message.role === "toolResult")
+              .at(-1),
+          ),
+          /実施はしていません/,
+        );
+        return fauxAssistantMessage(
+          "11月9日は設定変更と接続確認、11月8日は移行の提案です（Asia/Tokyo）。",
+        );
+      },
+    ]);
+    await f.service.send(
+      recap.id,
+      randomUUID(),
+      "今日は2026年11月10日、Asia/Tokyoです。昨日とおととい何をしたか教えて。",
+    );
+    await until(
+      async () => (await f.service.conversation(recap.id)).status === "idle",
+    );
+    assert.match(
+      JSON.stringify(await f.service.view(recap.id)),
+      /11月9日は設定変更と接続確認/,
+    );
+    assert.equal(f.faux.state.callCount, 7);
+    assert.deepEqual(await f.service.memory.list(), []);
+  } finally {
+    await f.service.close();
+  }
+});
