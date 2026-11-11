@@ -1,3 +1,4 @@
+import type { SkillVersions } from "./skills.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { ConversationId } from "@earendil-works/pi-durable";
 
@@ -16,6 +17,7 @@ export type Conversation = {
   workspaceCreated?: boolean;
   modelConfigId?: string;
   model?: string;
+  skills?: SkillVersions;
   requests: number;
   deadlineAt: number | null;
 };

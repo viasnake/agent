@@ -1,3 +1,4 @@
+import { Skills } from "./skills.js";
 import { MemoryNotes } from "./memory.js";
 import type { MemoryDraft, MemorySource } from "./memory.js";
 import { useNotify } from "./notifications.js";
@@ -9,7 +10,7 @@ import { api } from "./api.js";
 type PublicSettings = ReturnType<AgentService["management"]>;
 const secretMask = "••••••••";
 type EnvironmentRow = { name: string; value?: string };
-type Tab = "models" | "mcp" | "agent" | "memory";
+type Tab = "models" | "mcp" | "agent" | "memory" | "skills";
 function editable(s: PublicSettings): SettingsInput {
   return {
     revision: s.revision,
@@ -260,6 +261,7 @@ export function Settings({
             ["mcp", "MCP"],
             ["agent", "Agent 設定"],
             ["memory", "記憶"],
+            ["skills", "Skills"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -366,7 +368,9 @@ export function Settings({
             )}
           </section>
         )}
-        {tab === "memory" ? (
+        {tab === "skills" ? (
+          <Skills />
+        ) : tab === "memory" ? (
           <MemoryNotes
             initial={memoryDraft ?? undefined}
             onSelect={onSelectSource}
@@ -1146,7 +1150,7 @@ export function Settings({
           </fieldset>
         )}
       </div>
-      {tab !== "memory" && (
+      {tab !== "memory" && tab !== "skills" && (
         <footer className="settings-footer">
           <button
             className="btn-solid theme-primary"

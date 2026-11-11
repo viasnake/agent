@@ -85,12 +85,34 @@ class SystemChecks(unittest.TestCase):
                 side_effect=lambda name: control if name == "agent-control" else work,
             ),
             patch.object(system, "private_directory"),
+            patch.object(system, "skills_directory"),
             patch.object(os, "geteuid", return_value=0),
         ):
             self.assertEqual(system.check(record), record)
             for key in ["controlUid", "workUid", "controlGid", "workGid"]:
                 with self.assertRaisesRegex(RuntimeError, "identities|groups"):
                     system.check({**record, key: 5678})
+
+    def test_skills_root_is_preserved_and_unsafe_permissions_are_not_repaired(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "skills"
+            with patch.object(system, "trusted"), patch.object(os, "chown") as chown:
+                system.skills_directory(path, create=True)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o755)
+                chown.assert_called_once_with(path, 0, 0)
+                chown.reset_mock()
+                skill = path / "SKILL.md"
+                skill.write_bytes(b"unchanged administrator content")
+                system.skills_directory(path, create=True)
+                chown.assert_not_called()
+                path.chmod(0o700)
+                with self.assertRaisesRegex(RuntimeError, "readable"):
+                    system.skills_directory(path, create=True)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(skill.read_bytes(), b"unchanged administrator content")
+            path.chmod(0o777)
+            with self.assertRaisesRegex(RuntimeError, "immutable"):
+                system.skills_directory(path, create=True)
 
     def test_existing_private_data_is_never_reowned_or_erased(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -391,6 +413,7 @@ download_runtime https://example.test/runtime "$2" "$3"
             stack.enter_context(
                 patch.object(installer, "RECORD", paths["ETC"] / "installation.json")
             )
+            stack.enter_context(patch.object(system, "trusted"))
             for name in ["require_host", "inactive", "trusted"]:
                 stack.enter_context(patch.object(installer, name))
             stack.enter_context(patch.object(installer, "storage", return_value=MOUNT))
@@ -469,6 +492,7 @@ download_runtime https://example.test/runtime "$2" "$3"
                 data / "control/settings-v1.json": b"fixture private settings",
                 data / "control/conversations-v1.sqlite": b"fixture database",
                 data / "work/conversations/output.txt": b"user file",
+                data / "skills/SKILL.md": b"administrator skill bytes",
                 paths["ETC"] / "protected-cidrs.nft": b"custom policy",
             }
             for path, content in retained.items():

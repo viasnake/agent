@@ -109,6 +109,21 @@ def private_directory(path, uid, create=False, gid=None):
         raise RuntimeError("Unsafe existing data directory: " + str(path))
 
 
+def skills_directory(path, create=False):
+    """Preserve administrator-managed contents; never repair existing ownership."""
+    path = Path(path)
+    if not os.path.lexists(path):
+        if not create:
+            # Older installations may not have any Skills yet.
+            return
+        path.mkdir(mode=0o755)
+        os.chown(path, 0, 0)
+    trusted(path)
+    info = path.lstat()
+    if not path.is_dir() or info.st_mode & 0o7000 or info.st_mode & 0o005 != 0o005:
+        raise RuntimeError("Skills root must be a readable root-owned directory")
+
+
 def load_record():
     if not RECORD.exists():
         raise RuntimeError(
@@ -144,6 +159,7 @@ def check(value):
         raise RuntimeError("Storage checks require the control identity")
     for name in ["control", "control/secrets"]:
         private_directory(root / name, control.pw_uid)
+    skills_directory(root / "skills")
     private_directory(root / "work", work.pw_uid)
     if os.geteuid() == 0:
         for name in ["work/conversations", "work/home", "work/tmp"]:
