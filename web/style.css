@@ -1636,3 +1636,11 @@ button {
     padding: 8px 12px;
   }
 }
+
+.skill-source {
+  font-family: var(--bs-font-monospace);
+  resize: vertical;
+}
+.skills-list li {
+  overflow-wrap: anywhere;
+}

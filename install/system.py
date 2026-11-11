@@ -7,6 +7,7 @@ import json
 import os
 import pwd
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -109,19 +110,60 @@ def private_directory(path, uid, create=False, gid=None):
         raise RuntimeError("Unsafe existing data directory: " + str(path))
 
 
-def skills_directory(path, create=False):
-    """Preserve administrator-managed contents; never repair existing ownership."""
+def skills_directory(path, uid, create=False, gid=None):
+    """Keep work read-only; migrate a validated legacy tree only during installation."""
     path = Path(path)
+    trusted(path.parent)
     if not os.path.lexists(path):
         if not create:
-            # Older installations may not have any Skills yet.
             return
         path.mkdir(mode=0o755)
-        os.chown(path, 0, 0)
-    trusted(path)
+        path.chmod(0o755)
+        os.chown(path, uid, gid)
     info = path.lstat()
-    if not path.is_dir() or info.st_mode & 0o7000 or info.st_mode & 0o005 != 0o005:
-        raise RuntimeError("Skills root must be a readable root-owned directory")
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid not in (0, uid)
+        or info.st_mode & 0o7022
+        or info.st_mode & 0o005 != 0o005
+    ):
+        raise RuntimeError(
+            "Skills root must be readable and writable only by control or root"
+        )
+    if info.st_uid != 0 or not create or uid == 0:
+        return
+    # The installer has stopped both service identities. Validate the entire
+    # legacy tree before changing any owner; never repair unsafe shared content.
+    paths = []
+
+    def visit(current, depth):
+        if depth > 10 or len(paths) >= 33000:
+            raise RuntimeError("Legacy Skills tree exceeds migration limits")
+        entry = current.lstat()
+        directory = stat.S_ISDIR(entry.st_mode)
+        if (
+            entry.st_uid not in (0, uid)
+            or entry.st_mode & 0o7022
+            or (directory and entry.st_mode & 0o005 != 0o005)
+            or (
+                not directory
+                and (
+                    not stat.S_ISREG(entry.st_mode)
+                    or entry.st_nlink != 1
+                    or not entry.st_mode & 0o004
+                )
+            )
+        ):
+            raise RuntimeError("Unsafe legacy Skills entry: " + str(current))
+        paths.append(current)
+        if directory:
+            for child in current.iterdir():
+                visit(child, depth + 1)
+
+    visit(path, 0)
+    # Reown the root last so a failed migration remains detectable and retryable.
+    for entry in reversed(paths):
+        os.chown(entry, uid, gid, follow_symlinks=False)
 
 
 def load_record():
@@ -159,7 +201,7 @@ def check(value):
         raise RuntimeError("Storage checks require the control identity")
     for name in ["control", "control/secrets"]:
         private_directory(root / name, control.pw_uid)
-    skills_directory(root / "skills")
+    skills_directory(root / "skills", control.pw_uid)
     private_directory(root / "work", work.pw_uid)
     if os.geteuid() == 0:
         for name in ["work/conversations", "work/home", "work/tmp"]:

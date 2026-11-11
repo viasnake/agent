@@ -66,6 +66,7 @@ import {
   explicitSkill,
   skillVersions,
   type SkillVersions,
+  type SkillImport,
 } from "./skills.js";
 import { skillsTools } from "./skills-tools.js";
 
@@ -648,6 +649,49 @@ export class AgentService {
     const result = this.serial.then(operation);
     this.serial = result.catch(() => {});
     return result;
+  }
+  async skillsManagement() {
+    return this.exclusive(() => this.skillsView());
+  }
+  private async skillsView() {
+    this.assertHealthy();
+    return this.sanitize({
+      ...(await this.skills.discover()).view,
+      writable: await this.skills.writable(),
+      busy: !!this.active,
+    });
+  }
+  async skillDetail(name: string) {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      const detail = await this.skills.detail(name);
+      if (this.redact(detail.content) !== detail.content)
+        throw new AppError(
+          409,
+          "秘密情報を含む Skill は管理者がファイルを確認してください",
+        );
+      return detail;
+    });
+  }
+  async changeSkill(
+    change:
+      | { kind: "create"; input: SkillImport }
+      | { kind: "update"; name: string; content: string; revision: string }
+      | { kind: "delete"; name: string; revision: string },
+  ) {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      if (this.active)
+        throw new AppError(
+          409,
+          "実行中のセッションを停止してから Skills を変更してください",
+        );
+      if (change.kind === "create") await this.skills.create(change.input);
+      else if (change.kind === "update")
+        await this.skills.update(change.name, change.content, change.revision);
+      else await this.skills.remove(change.name, change.revision);
+      return this.skillsView();
+    });
   }
   healthy(): boolean {
     return !this.fatal && !this.closing && !this.reopening;
