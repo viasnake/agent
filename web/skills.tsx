@@ -23,7 +23,7 @@ export function Skills() {
     };
   }, [revision]);
   return (
-    <section aria-label="Skills 一覧">
+    <section className="skills-list" aria-label="Skills 一覧">
       <button
         type="button"
         className="btn btn-outline-secondary"
