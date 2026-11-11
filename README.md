@@ -78,6 +78,32 @@ curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080
 
 起動しない場合は `sudo systemctl status agent.service agent-egress.service --no-pager` と `sudo journalctl -u agent.service -u agent-egress.service -n 100 --no-pager` で確認します。マウント・所有者・nftables・DNS の検査に失敗した場合は、表示された原因を修正してから `sudo systemctl restart agent.service` を実行してください。
 
+## Skills
+
+[Agent Skills](https://agentskills.io/specification) 形式の `SKILL.md` を、設定の `dataRoot` 配下の `skills/<name>/` に配置します。共有 Skills は全セッションで利用できます。設定画面の「Skills」で説明・互換性・検証エラーを確認できます。
+
+追加・更新時はサービスを停止し、取得元と `SKILL.md`、参照資料、スクリプトの内容を管理者が確認してください。外部 Skills の指示は権限の付与にはなりません。
+
+```sh
+set -e
+sudo systemctl stop agent.service
+# /etc/agent/config.yaml の dataRoot に合わせる
+DATA_ROOT=/srv/agent-data
+# レビュー済みの新しい Skill を配置（同名の既存ディレクトリへ上書きしない）
+sudo test ! -e "$DATA_ROOT/skills/pdf-processing"
+sudo cp -R --no-preserve=ownership ./pdf-processing "$DATA_ROOT/skills/"
+sudo chown -R root:root "$DATA_ROOT/skills/pdf-processing"
+sudo find "$DATA_ROOT/skills/pdf-processing" -type d -exec chmod 755 {} +
+sudo find "$DATA_ROOT/skills/pdf-processing" -type f -exec chmod 644 {} +
+sudo systemctl start agent.service
+```
+
+`skills/` と内容は root 所有とし、ディレクトリは 755、通常ファイルは 644（直接実行するスクリプトは 755）にします。シンボリックリンク・ハードリンク・特殊ファイル・書き込み可能な共有権限は拒否します。アプリ更新は内容を保持し、不正な既存権限を自動修正しません。不正な Skill は設定画面でエラー表示され、共有ルート自体が不正な場合は起動・読み込みを拒否します。
+
+一覧の再読み込みで検証でき、変更は次の新しい実行から反映されます。`/skill:pdf-processing PDF からテキストを抽出して` で明示指定でき、通常の依頼では AI が必要な Skill を読み込みます。実行中の明示指定は停止後に送信してください。スクリプトは既存 Shell 経由で `agent-work` として実行し、成果物はセッションの `outputs/` に保存します。依存コマンドは自動インストールしません。
+
+本文は 64 KiB、テキスト資料は 256 KiB、探索はルート直下128件・各 Skill 内256件・深さ8、本文の合計読み込みは1 MiB、有効化した本文・補助ファイル一覧の合計は256 KiBまでです。テキスト資料は UTF-8 に限ります。前の実行で検出した Skill が変更・削除されていると、「再開」は旧版から切り替えずエラーにします。内容と作業状態を確認し、新しい入力で続行してください。プロジェクト内の Skills は自動検出しません。
+
 ## テスト
 
 `bash install/install.sh --build-only` は sudo を使わず、ランタイムの取得・検証とビルドだけを行います。全検証は導入済みランタイムを使い、ソースのリポジトリで実行します。

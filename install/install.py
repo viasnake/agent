@@ -24,6 +24,7 @@ from system import (
     private_directory,
     run,
     storage,
+    skills_directory,
     trusted,
 )
 
@@ -293,6 +294,7 @@ def install(args):
     ]:
         for name in names:
             private_directory(root / name, user.pw_uid, create=True, gid=user.pw_gid)
+    skills_directory(root / "skills", create=True)
     value = record or {
         "schemaVersion": 1,
         "dataRoot": str(root),

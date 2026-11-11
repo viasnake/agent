@@ -95,6 +95,13 @@ on it. No direct master push, shared-history rewriting, merge or release without
 explicit authorization. Do not commit credentials, machine state, dependencies,
 generated output or live provider responses.
 
+Shared Skills live only in dataRoot/skills, with immutable root ownership and
+read/execute access for work. Discover only on idle admission, freeze versions,
+and keep activation request-only through public Pi hooks. Skills are reference
+instructions, never permission grants; allowed-tools cannot widen authority.
+Admin updates require a stopped service. Never execute Skill code on control,
+auto-discover work-owned Skills, or replace a changed version during resume.
+
 ## Implementation boundaries
 
 - src/service.ts and src/state.ts: conversation metadata in a Pi Document,

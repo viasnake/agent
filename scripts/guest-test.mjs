@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   writeFile,
+  mkdir,
   chown,
+  chmod,
   unlink,
   lstat,
   readdir,
@@ -19,6 +21,7 @@ const ids = [
   "guest-cli",
   "guest-cgroup",
   "guest-lock",
+  "guest-skills",
 ];
 function blocked(reason) {
   console.log(JSON.stringify({ result: "blocked", ids, reason }));
@@ -105,7 +108,8 @@ const runner = new WorkerClient(),
   id = randomUUID(),
   secret = `${dataRoot}/control/secrets/guest-test-${id}`,
   probePath = `/run/agent-cgroup-probe-${id}.mjs`,
-  unit = `agent-cgroup-probe-${id}`;
+  unit = `agent-cgroup-probe-${id}`,
+  skillDirectory = `${dataRoot}/skills/guest-${id}`;
 const privateServer = createServer((_request, response) =>
   response.end("control fixture"),
 );
@@ -173,6 +177,43 @@ try {
   };
   await shell(
     `test "$(id -u)" = ${workUid} && ! cat '${secret}' >/dev/null 2>&1 && ! cat /proc/${controlPid}/environ >/dev/null 2>&1 && ! ls /proc/${controlPid}/fd >/dev/null 2>&1 && test -z "\${OPENAI_API_KEY-}\${GH_TOKEN-}\${SSH_AUTH_SOCK-}\${NODE_OPTIONS-}\${LD_PRELOAD-}\${AGENT_GUEST_SENTINEL-}" && ! sudo -n -u root /usr/bin/true >/dev/null 2>&1`,
+  );
+  await mkdir(skillDirectory, { mode: 0o755 });
+  await chmod(skillDirectory, 0o755);
+  const skillScript = `${skillDirectory}/check.py`;
+  await writeFile(
+    skillScript,
+    `import os
+from pathlib import Path
+assert os.getuid() == ${workUid}
+for path in [${JSON.stringify(secret)}, ${JSON.stringify(skillScript)}]:
+    try:
+        with open(path, "r" if path == ${JSON.stringify(secret)} else "a"):
+            pass
+    except PermissionError:
+        continue
+    raise RuntimeError("Skill crossed the UID boundary")
+Path("outputs/skill-check.txt").write_text("work UID only")
+`,
+    { mode: 0o644, flag: "wx" },
+  );
+  await chmod(skillScript, 0o644);
+  for (const user of ["agent-control", "agent-work"]) {
+    assert.equal(
+      spawnSync("sudo", ["-u", user, "test", "-r", skillScript]).status,
+      0,
+    );
+    assert.notEqual(
+      spawnSync("sudo", ["-u", user, "test", "-w", skillDirectory]).status,
+      0,
+    );
+    assert.notEqual(
+      spawnSync("sudo", ["-u", user, "test", "-w", skillScript]).status,
+      0,
+    );
+  }
+  await shell(
+    `python3 '${skillScript}' && test "$(cat outputs/skill-check.txt)" = 'work UID only'`,
   );
   await shell(
     "! curl --connect-timeout 2 -fsS http://127.0.0.1:8080/ && ! curl --connect-timeout 2 -fsS http://192.0.2.1/ && ! curl --connect-timeout 2 -fsS http://169.254.169.254/ && ! curl -g --connect-timeout 2 -fsS 'http://[::1]:3098/' && ! curl -g --connect-timeout 2 -fsS 'http://[::ffff:127.0.0.1]:8080/'",
@@ -250,6 +291,7 @@ try {
     }),
   );
 } finally {
+  await rm(skillDirectory, { recursive: true, force: true });
   await runner.close().catch(() => undefined);
   controller?.kill();
   privateServer.closeAllConnections();
