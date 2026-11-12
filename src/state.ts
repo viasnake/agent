@@ -18,6 +18,7 @@ export type Conversation = {
   archived?: boolean;
   workspaceCreated?: boolean;
   modelConfigId?: string;
+  credentialIds?: string[];
   model?: string;
   skills?: SkillVersions;
   requests: number;

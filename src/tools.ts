@@ -12,20 +12,12 @@ export function agentTools(service: AgentService) {
       ...tool,
       replay: "unsafe" as const,
       execute: async (args, api, context) => {
-        const id = await service.toolConversation(api.conversationId);
-        const result = await service.runner.call(
-          id,
-          "tool",
-          {
-            name: tool.name,
-            args,
-            commandSeconds: service.config.limits.commandSeconds,
-            commandBytes: service.config.limits.commandBytes,
-          },
+        return service.callTool(
+          api.conversationId,
+          tool.name,
+          args,
           context.abortSignal,
         );
-        if (!result.result) throw new Error("Missing worker result");
-        return service.sanitize(result.result);
       },
     })),
   });

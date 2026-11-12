@@ -1040,6 +1040,10 @@ button {
   margin-left: auto;
   width: 16px;
 }
+.composer-toolbar .credential-trigger {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 .composer-toolbar .model-trigger {
   max-width: min(48vw, 280px);
 }

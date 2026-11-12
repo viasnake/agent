@@ -71,6 +71,9 @@ import {
   type SkillImport,
 } from "./skills.js";
 import { skillsTools } from "./skills-tools.js";
+import { selectCredentials } from "./work-credentials.js";
+import { openSshAgent } from "./ssh-agent.js";
+import { readInstallation } from "./installation.js";
 
 export type ServiceOptions = {
   skills?: SkillsLoader;
@@ -83,7 +86,13 @@ export type ServiceOptions = {
   modelTest?: (model: string, key: string) => Promise<void>;
   modelCatalog?: (model: ModelConfig, signal: AbortSignal) => Promise<string[]>;
 };
-type Active = { id: string; version: number; timer: NodeJS.Timeout };
+type Active = {
+  id: string;
+  version: number;
+  timer: NodeJS.Timeout;
+  credentials: ReturnType<typeof selectCredentials>;
+  controller: AbortController;
+};
 const interrupted =
   "実行を中断しました。Shell・CLI・外部更新は完了した可能性があります。履歴と作業ファイルを確認し、通常の CLI/API で状態を調べてから続けてください。判断できない場合は利用者に確認し、同じ更新を無条件に再送しないでください。";
 export class AgentService {
@@ -118,6 +127,7 @@ export class AgentService {
   readonly notifications = new Set<() => void>();
   private registry: Registry = createRegistry();
   private active?: Active;
+  private signers = new Set<Awaited<ReturnType<typeof openSshAgent>>>();
   private serial: Promise<unknown> = Promise.resolve();
   private closing = false;
   private reopening = false;
@@ -717,7 +727,17 @@ export class AgentService {
   }
   redact(text: string): string {
     for (const secret of [...this.secrets, ...(this.settings?.secrets() ?? [])])
-      if (secret) text = text.split(secret).join("[REDACTED]");
+      if (secret) {
+        // Short environment values must not corrupt UUIDs or identifiers in API projections.
+        const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        text =
+          secret.length < 8
+            ? text.replace(
+                new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`, "g"),
+                "[REDACTED]",
+              )
+            : text.split(secret).join("[REDACTED]");
+      }
     return text.replace(
       /(authorization|cookie)(\s*[:=]\s*)[^\r\n]+/gi,
       "$1$2[REDACTED]",
@@ -749,6 +769,7 @@ export class AgentService {
     title: string,
     modelId?: string,
     model?: string,
+    credentialIds: string[] = [],
   ): Promise<{ id: string }> {
     return this.exclusive(async () => {
       this.assertHealthy();
@@ -756,6 +777,7 @@ export class AgentService {
         title,
         ...(modelId ? { modelId } : {}),
         ...(model ? { model } : {}),
+        ...(credentialIds.length ? { credentialIds } : {}),
       });
       const result = await this.harness.commit(async (tx) => {
         const state = await tx.doc(ConversationsDoc),
@@ -782,6 +804,10 @@ export class AgentService {
           Object.keys(state.receipts).length >= 10000
         )
           throw new AppError(413, "保存上限に達しました");
+        selectCredentials(
+          this.settings.snapshot().workCredentials,
+          credentialIds,
+        );
         const pi = await tx.createConversation({
             ownership: { kind: "ownerless" },
           }),
@@ -794,6 +820,7 @@ export class AgentService {
           detail: "",
           updatedAt: Date.now(),
           workspaceCreated: false,
+          credentialIds: [...credentialIds],
           ...(modelId || this.modelOptions().initialModel
             ? { modelConfigId: modelId ?? this.modelOptions().initialModel! }
             : {}),
@@ -945,6 +972,7 @@ export class AgentService {
           detail: "",
           updatedAt: Date.now(),
           workspaceCreated: false,
+          credentialIds: [...(parent.credentialIds ?? [])],
           ...(parent.modelConfigId
             ? { modelConfigId: parent.modelConfigId }
             : {}),
@@ -998,6 +1026,80 @@ export class AgentService {
       this.notify();
       return { id };
     });
+  }
+  async selectCredentials(id: string, ids: string[]) {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      const conversation = await this.conversation(id);
+      if (["running", "stopping"].includes(conversation.status))
+        throw new AppError(
+          409,
+          "応答が終わってからクレデンシャルを変更してください",
+        );
+      selectCredentials(this.settings.snapshot().workCredentials, ids);
+      await this.harness.commit(async (tx) => {
+        const record = (await tx.doc(ConversationsDoc)).conversations.find(
+          (c) => c.id === id,
+        )!;
+        record.credentialIds = [...ids];
+        record.updatedAt = Date.now();
+      }, ctx);
+      this.notify();
+      return this.view(id);
+    });
+  }
+  async callTool(
+    piId: ConversationId,
+    name: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ) {
+    const id = await this.toolConversation(piId);
+    const credentials = this.active!.credentials;
+    signal = AbortSignal.any([
+      ...(signal ? [signal] : []),
+      this.active!.controller.signal,
+      AbortSignal.timeout(this.config.limits.commandSeconds * 1000),
+    ]);
+    let signer: Awaited<ReturnType<typeof openSshAgent>> | undefined;
+    try {
+      if (name === "bash" && credentials.keys.length) {
+        const workUid = this.options.runner
+          ? process.getuid!()
+          : (await readInstallation()).workUid;
+        signer = await openSshAgent(credentials.keys, workUid, signal);
+        this.signers.add(signer);
+      }
+      signal?.throwIfAborted();
+      await this.toolConversation(piId);
+      const result = await this.runner.call(
+        id,
+        "tool",
+        {
+          name,
+          args,
+          ...(name === "bash"
+            ? { environment: credentials.env, sshSocket: signer?.socket }
+            : {}),
+          commandSeconds: this.config.limits.commandSeconds,
+          commandBytes: this.config.limits.commandBytes,
+        },
+        signal,
+      );
+      if (!result.result) throw new Error("Missing worker result");
+      return this.sanitize(result.result);
+    } finally {
+      if (signer) {
+        try {
+          await signer.close();
+        } catch (error) {
+          this.fatal = true;
+          throw error;
+        } finally {
+          this.signers.delete(signer);
+        }
+      }
+    }
   }
   async selectModel(id: string, modelId: string, model?: string) {
     return this.exclusive(async () => {
@@ -1099,6 +1201,13 @@ export class AgentService {
         throw new AppError(409, "別のセッションが実行中です（busy）");
       if (conversation.status === "stopping")
         throw new AppError(409, "停止を確認しています");
+      const starting = !this.active;
+      const admittedCredentials = starting
+        ? selectCredentials(
+            this.settings.snapshot().workCredentials,
+            conversation.credentialIds ?? [],
+          )
+        : this.active!.credentials;
       if (!this.active)
         await this.applySettings(
           conversation.modelConfigId,
@@ -1111,7 +1220,6 @@ export class AgentService {
         );
       if (!this.models.getModel(this.providerId, this.modelId))
         throw new AppError(409, "モデルを選び直してください");
-      const starting = !this.active;
       if (starting && this.providerId === "github-copilot") {
         try {
           const available = await copilotAccountModels(
@@ -1236,7 +1344,9 @@ export class AgentService {
         await pi.configure(
           {
             model: { provider: this.providerId, modelId: this.modelId },
-            instructions: this.instructions(id, skillSnapshot?.catalog()),
+            instructions:
+              this.instructions(id, skillSnapshot?.catalog()) +
+              `\nAvailable credential environment variable names: ${Object.keys(admittedCredentials.env).join(", ") || "none"}. SSH authentication: ${admittedCredentials.keys.length ? "available automatically through SSH_AUTH_SOCK" : "not configured"}. Use these credentials without printing their values.`,
             maxTurns: this.config.limits.modelRequests,
           },
           ctx,
@@ -1245,6 +1355,8 @@ export class AgentService {
         this.active = {
           id,
           version: 0,
+          credentials: admittedCredentials,
+          controller: new AbortController(),
           timer: setTimeout(() => {
             void this.stop(id, "実行時間の上限に達しました").catch(() => {
               this.fatal = true;
@@ -1395,6 +1507,8 @@ export class AgentService {
       }, ctx);
       if (active) clearTimeout(active.timer);
       this.notify();
+      active?.controller.abort();
+      for (const signer of this.signers) await signer.close();
       await this.abortRetainingInput(await this.pi(conversation));
       await this.runner.ready();
       if (!(await this.runner.call(id, "cleanup", {})).cleanup) {
@@ -1725,6 +1839,8 @@ export class AgentService {
     if (this.closing) return;
     if (this.active && !this.fatal) await this.stop(this.active.id);
     this.closing = true;
+    this.active?.controller.abort();
+    for (const signer of this.signers) await signer.close();
     await this.modelAuth.close();
     if (this.active) clearTimeout(this.active.timer);
     this.notify();

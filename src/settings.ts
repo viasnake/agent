@@ -23,6 +23,13 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
+import {
+  workCredentialInput,
+  workEnvironment,
+  type WorkCredential,
+} from "./work-credentials.js";
+import { generateSshKey, sshPublicKey } from "./ssh-agent.js";
+
 const secret = z.string().max(16384);
 const identifier = z.string().uuid();
 export const modelInput = z
@@ -168,6 +175,7 @@ export const settingsInput = z
     models: z.array(modelInput).max(10),
     defaultModel: identifier.nullable(),
     mcp: z.array(mcpInput).max(10),
+    workCredentials: z.array(workCredentialInput).max(32).optional(),
     instructions: z.string().max(16000),
     limits: z
       .object({
@@ -190,6 +198,8 @@ export const settingsInput = z
     if (
       new Set(s.models.map((m) => m.id)).size !== s.models.length ||
       new Set(s.mcp.map((m) => m.id)).size !== s.mcp.length ||
+      new Set(s.workCredentials?.map((c) => c.id)).size !==
+        (s.workCredentials?.length ?? 0) ||
       (s.defaultModel && !s.models.some((m) => m.id === s.defaultModel))
     )
       ctx.addIssue({
@@ -233,10 +243,14 @@ export function modelCredential(model: ModelConfig): Credential | undefined {
       ? { type: "api_key", key: model.key }
       : undefined;
 }
-export type Settings = Omit<SettingsInput, "mcp" | "models"> & {
+export type Settings = Omit<
+  SettingsInput,
+  "mcp" | "models" | "workCredentials"
+> & {
   models: ModelConfig[];
   hostId: string;
   schemaVersion: 1;
+  workCredentials: WorkCredential[];
   mcp: McpConfig[];
 };
 export function connectionIdentity(s: McpConfig): string {
@@ -280,10 +294,18 @@ export class SettingsStore {
         ...savedInput,
         models: saved.models.map(({ oauth: _, authVersion: __, ...s }) => s),
         mcp: saved.mcp.map(({ oauth: _, authVersion: __, ...s }) => s),
+        workCredentials: saved.workCredentials?.map((c) =>
+          c.kind === "ssh"
+            ? { id: c.id, name: c.name, kind: c.kind, privateKey: c.privateKey }
+            : c,
+        ),
       });
       store.value = {
         ...parsed,
         schemaVersion: 1,
+        workCredentials: await store.mergeCredentials(
+          parsed.workCredentials ?? [],
+        ),
         hostId: saved.hostId ? identifier.parse(saved.hostId) : randomUUID(),
         models: parsed.models.map((s) => ({
           ...s,
@@ -310,6 +332,7 @@ export class SettingsStore {
         schemaVersion: 1,
         hostId: randomUUID(),
         revision: 0,
+        workCredentials: [],
         models: config.model
           ? [{ id: modelId!, provider: "openai", model: config.model.id, key }]
           : [],
@@ -343,6 +366,16 @@ export class SettingsStore {
     return {
       ...s,
       schemaVersion: undefined,
+      workCredentials: s.workCredentials.map((c) =>
+        c.kind === "env"
+          ? {
+              id: c.id,
+              name: c.name,
+              kind: c.kind,
+              envNames: Object.keys(c.env),
+            }
+          : { id: c.id, name: c.name, kind: c.kind, publicKey: c.publicKey },
+      ),
       models: s.models.map(({ key, oauth, authVersion: _, ...m }) => ({
         ...m,
         hasKey: !!key,
@@ -362,6 +395,16 @@ export class SettingsStore {
   secrets(): string[] {
     return [
       ...this.retainedSecrets,
+      ...this.value.workCredentials.flatMap((c) =>
+        c.kind === "env"
+          ? Object.values(c.env)
+          : [
+              c.privateKey,
+              ...c.privateKey
+                .split("\n")
+                .filter((line) => line && !line.startsWith("-----")),
+            ],
+      ),
       ...this.value.models.flatMap((m) => [
         m.key ?? "",
         m.oauth?.access ?? "",
@@ -382,6 +425,63 @@ export class SettingsStore {
     this.serial = result.catch(() => {});
     return result;
   }
+  private async mergeCredentials(
+    input: NonNullable<SettingsInput["workCredentials"]>,
+  ): Promise<WorkCredential[]> {
+    const result: WorkCredential[] = [];
+    for (const c of input) {
+      const old = this.value?.workCredentials.find(
+        (entry) => entry.id === c.id,
+      );
+      if (old && old.kind !== c.kind)
+        throw new AppError(409, "クレデンシャルの種類は変更できません");
+      if (c.kind === "env") {
+        const previous = old?.kind === "env" ? old.env : {};
+        if (c.envKeep?.some((name) => !Object.hasOwn(previous, name)))
+          throw new AppError(
+            409,
+            "保存済みの環境変数がありません。設定を読み直してください",
+          );
+        const env =
+          c.envKeep === undefined
+            ? (c.env ?? previous)
+            : {
+                ...Object.fromEntries(
+                  c.envKeep.map((name) => [name, previous[name]!]),
+                ),
+                ...c.env,
+              };
+        workEnvironment.parse(env);
+        if (!Object.keys(env).length)
+          throw new AppError(400, "環境変数を追加してください");
+        result.push({ id: c.id, name: c.name, kind: c.kind, env });
+      } else {
+        if (c.generateKey && (old || c.privateKey))
+          throw new AppError(
+            409,
+            "鍵の生成は新しい SSH クレデンシャルで行ってください",
+          );
+        const privateKey = c.generateKey
+          ? await generateSshKey()
+          : (c.privateKey ??
+            (old?.kind === "ssh" ? old.privateKey : undefined));
+        if (!privateKey)
+          throw new AppError(400, "SSH 秘密鍵を登録してください");
+        const publicKey =
+          old?.kind === "ssh" && old.privateKey === privateKey
+            ? old.publicKey
+            : await sshPublicKey(privateKey);
+        result.push({
+          id: c.id,
+          name: c.name,
+          kind: c.kind,
+          privateKey,
+          publicKey,
+        });
+      }
+    }
+    return result;
+  }
   async save(input: unknown): Promise<void> {
     const parsed = settingsInput.parse(input);
     return this.exclusive(async () => {
@@ -392,6 +492,10 @@ export class SettingsStore {
         schemaVersion: 1,
         hostId: this.value.hostId,
         revision: parsed.revision + 1,
+        workCredentials:
+          parsed.workCredentials === undefined
+            ? this.value.workCredentials
+            : await this.mergeCredentials(parsed.workCredentials),
         models: parsed.models.map((m) => {
           const old = this.value.models.find((v) => v.id === m.id);
           const same =

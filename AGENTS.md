@@ -174,6 +174,22 @@ environment; never inherit control credentials, host homes or SSH agents.
 Never silently fall back when mount/UUID, UID, firewall or cleanup is unavailable.
 Retain systemd control-group cleanup and bounded tool duration/output.
 
+Work credentials are centrally managed in the private settings store. Sessions
+persist only selected credential IDs, including on forks. Resolve and freeze
+values at idle admission; reject deleted selections and conflicting environment
+names. Inject selected environment values only into standard bash execution;
+these values are readable by work code. Never treat masking as an isolation
+boundary. Preserve unedited secrets server-side and revision-check changes.
+SSH imports use passphrase-free keys for automatic use. New entries can generate
+Ed25519 keys on control; return only the public key. Keep keys and OpenSSH
+signers under the control UID; expose only bounded list/sign requests through a
+work-UID ACL socket for the command lifetime. Reject agent mutation and provider
+loading requests. Close existing socket connections and the signer on completion,
+interruption or failure. Never forward host agents implicitly. Use trusted OS
+OpenSSH/ACL utilities, not project executables, on control. SSH adds public TCP 22
+to work egress; retain private/protected-address restrictions and ordinary SSH host
+key verification. Do not add per-key destination restrictions.
+
 Explicitly configured work-side CLI/MCP credentials delegate their authority to
 the agent. Do not claim prompt restrictions or UI approval completely constrain
 a freely callable authenticated shell. Do not infer credentials, billing,
