@@ -11,13 +11,13 @@ import { join } from "node:path";
 test("local endpoint configuration rejects public origins and work preview ports", async () => {
   const directory = await mkdtemp(join(tmpdir(), "agent-local-config-"));
   const path = join(directory, "config.yaml");
-  async function config(origin: string, port = 8080) {
+  async function config(origin: string, port = 8080, host?: string) {
     await writeFile(
       path,
       JSON.stringify({
         schemaVersion: 2,
         dataRoot: "/mnt/persistent/agent",
-        server: { origins: [origin], port },
+        server: { origins: [origin], port, host },
       }),
     );
     return loadConfig(path);
@@ -25,8 +25,12 @@ test("local endpoint configuration rejects public origins and work preview ports
   try {
     const standalone = await config("http://localhost:8080");
     assert.equal(standalone.dataRoot, "/mnt/persistent/agent");
-    assert.equal(standalone.server.host, "127.0.0.1");
-    assert.deepEqual(standalone.server.trustedPeers, []);
+    assert.equal(standalone.server.host, "0.0.0.0");
+    assert.equal(
+      (await config("http://localhost:8080", 8080, "127.0.0.1")).server.host,
+      "127.0.0.1",
+      "An explicit existing listen address is preserved",
+    );
     for (const origin of [
       "http://localhost:8080",
       "http://127.0.0.1:8080",
@@ -73,19 +77,6 @@ test("local automatic session, Host/Origin/CSRF, idempotent requests, attachment
       ).statusCode,
       403,
     );
-    for (const remoteAddress of ["192.168.1.4", "203.0.113.1"]) {
-      const response = await app.inject({
-        method: "GET",
-        url: "/api/session",
-        remoteAddress,
-        headers: { ...headers, "x-forwarded-for": "127.0.0.1" },
-      });
-      assert.equal(
-        response.statusCode,
-        403,
-        "Proxy headers cannot grant local access",
-      );
-    }
     for (const site of ["cross-site", "same-site"]) {
       assert.equal(
         (
@@ -357,28 +348,46 @@ test("local automatic session, Host/Origin/CSRF, idempotent requests, attachment
   }
 });
 
-test("forwarding peers require explicit grants and do not bypass browser protections", async () => {
+test("VM forwarding accepts socket peers without registration and preserves browser protections", async () => {
   const f = await fixture();
-  f.config.server.trustedPeers = ["192.168.64.1"];
+  f.config.server.host = "0.0.0.0";
   const app = await createServer(f.service);
   try {
+    await app.listen({ host: f.config.server.host, port: 0 });
+    const address = app.server.address();
+    assert.ok(address && typeof address === "object");
+    assert.equal(address.address, "0.0.0.0");
+    const health = await fetch(`http://127.0.0.1:${address.port}/healthz`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { ok: true });
     const headers = { host: "127.0.0.1:8080", origin: "http://127.0.0.1:8080" };
+    for (const remoteAddress of [
+      "10.0.2.2",
+      "::ffff:10.0.2.2",
+      "192.168.64.1",
+      "203.0.113.1",
+    ])
+      assert.equal(
+        (
+          await app.inject({
+            url: "/api/session",
+            headers,
+            remoteAddress,
+          })
+        ).statusCode,
+        200,
+      );
     assert.equal(
       (
         await app.inject({
           url: "/api/session",
-          headers,
-          remoteAddress: "192.168.64.1",
-        })
-      ).statusCode,
-      200,
-    );
-    assert.equal(
-      (
-        await app.inject({
-          url: "/api/session",
-          headers,
-          remoteAddress: "192.168.64.2",
+          headers: {
+            ...headers,
+            host: "evil.invalid",
+            "x-forwarded-host": headers.host,
+            "x-forwarded-for": "127.0.0.1",
+          },
+          remoteAddress: "10.0.2.2",
         })
       ).statusCode,
       403,
@@ -388,7 +397,7 @@ test("forwarding peers require explicit grants and do not bypass browser protect
         await app.inject({
           url: "/api/session",
           headers: { ...headers, origin: "https://evil.invalid" },
-          remoteAddress: "192.168.64.1",
+          remoteAddress: "10.0.2.2",
         })
       ).statusCode,
       403,
@@ -398,7 +407,7 @@ test("forwarding peers require explicit grants and do not bypass browser protect
         await app.inject({
           url: "/api/session",
           headers: { ...headers, "sec-fetch-site": "cross-site" },
-          remoteAddress: "192.168.64.1",
+          remoteAddress: "10.0.2.2",
         })
       ).statusCode,
       403,
@@ -410,11 +419,34 @@ test("forwarding peers require explicit grants and do not bypass browser protect
           method: "POST",
           payload: { requestId: randomUUID(), title: "blocked" },
           headers,
-          remoteAddress: "192.168.64.1",
+          remoteAddress: "10.0.2.2",
         })
       ).statusCode,
       401,
     );
+    const session = await app.inject({
+      url: "/api/session",
+      headers,
+      remoteAddress: "10.0.2.2",
+    });
+    const cookie = session.headers["set-cookie"]!.toString().split(";")[0]!;
+    const payload = { requestId: randomUUID(), title: "forwarded session" };
+    const missingCsrf = await app.inject({
+      method: "POST",
+      url: "/api/conversations",
+      headers: { ...headers, cookie },
+      payload,
+      remoteAddress: "10.0.2.2",
+    });
+    assert.equal(missingCsrf.statusCode, 403);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/conversations",
+      headers: { ...headers, cookie, "x-csrf-token": session.json().csrf },
+      payload,
+      remoteAddress: "10.0.2.2",
+    });
+    assert.equal(created.statusCode, 201);
   } finally {
     await app.close();
     await f.service.close();

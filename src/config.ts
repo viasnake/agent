@@ -32,11 +32,7 @@ const schema = z
       host: z
         .string()
         .refine((value) => isIP(value) !== 0)
-        .default("127.0.0.1"),
-      trustedPeers: z
-        .array(z.string().refine((value) => isIP(value) !== 0))
-        .max(16)
-        .default([]),
+        .default("0.0.0.0"),
       // Work-side preview servers may use loopback ports 3000-3999.
       port: z
         .number()
