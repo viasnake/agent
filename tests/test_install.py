@@ -93,26 +93,59 @@ class SystemChecks(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "identities|groups"):
                     system.check({**record, key: 5678})
 
-    def test_skills_root_is_preserved_and_unsafe_permissions_are_not_repaired(self):
+    def test_skills_root_is_control_owned_and_unsafe_permissions_are_not_repaired(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "skills"
+            uid, gid = os.getuid(), os.getgid()
             with patch.object(system, "trusted"), patch.object(os, "chown") as chown:
-                system.skills_directory(path, create=True)
+                system.skills_directory(path, uid, create=True, gid=gid)
                 self.assertEqual(path.stat().st_mode & 0o777, 0o755)
-                chown.assert_called_once_with(path, 0, 0)
+                chown.assert_called_once_with(path, uid, gid)
                 chown.reset_mock()
                 skill = path / "SKILL.md"
                 skill.write_bytes(b"unchanged administrator content")
-                system.skills_directory(path, create=True)
+                system.skills_directory(path, uid, create=True, gid=gid)
                 chown.assert_not_called()
-                path.chmod(0o700)
-                with self.assertRaisesRegex(RuntimeError, "readable"):
-                    system.skills_directory(path, create=True)
-                self.assertEqual(path.stat().st_mode & 0o777, 0o700)
-                self.assertEqual(skill.read_bytes(), b"unchanged administrator content")
-            path.chmod(0o777)
-            with self.assertRaisesRegex(RuntimeError, "immutable"):
-                system.skills_directory(path, create=True)
+                for mode in [0o700, 0o777]:
+                    path.chmod(mode)
+                    with self.assertRaisesRegex(RuntimeError, "readable"):
+                        system.skills_directory(path, uid, create=True, gid=gid)
+                    self.assertEqual(path.stat().st_mode & 0o777, mode)
+                    self.assertEqual(skill.read_bytes(), b"unchanged administrator content")
+                chown.assert_not_called()
+
+    def test_legacy_skills_migration_validates_before_reowning_and_preserves_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "skills"
+            path.mkdir(mode=0o755)
+            directory = path / "sample"
+            directory.mkdir(mode=0o755)
+            skill = directory / "SKILL.md"
+            skill.write_bytes(b"unchanged skill")
+            skill.chmod(0o644)
+            original = Path.lstat
+            def legacy_info(current):
+                info = original(current)
+                return os.stat_result((info.st_mode, info.st_ino, info.st_dev,
+                    info.st_nlink, 0, 0, info.st_size, info.st_atime, info.st_mtime, info.st_ctime))
+            with patch.object(system, "trusted"), patch.object(Path, "lstat", legacy_info), patch.object(os, "chown") as chown:
+                system.skills_directory(path, 1234, create=False)
+                chown.assert_not_called()
+                skill.chmod(0o666)
+                with self.assertRaisesRegex(RuntimeError, "Unsafe legacy"):
+                    system.skills_directory(path, 1234, create=True, gid=1234)
+                chown.assert_not_called()
+                skill.chmod(0o644)
+                link = directory / "link"
+                link.symlink_to(skill)
+                with self.assertRaisesRegex(RuntimeError, "Unsafe legacy"):
+                    system.skills_directory(path, 1234, create=True, gid=1234)
+                chown.assert_not_called()
+                link.unlink()
+                system.skills_directory(path, 1234, create=True, gid=1234)
+                self.assertEqual(chown.call_count, 3)
+                chown.assert_called_with(path, 1234, 1234, follow_symlinks=False)
+                self.assertEqual(skill.read_bytes(), b"unchanged skill")
 
     def test_existing_private_data_is_never_reowned_or_erased(self):
         with tempfile.TemporaryDirectory() as temporary:
