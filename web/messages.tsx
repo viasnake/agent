@@ -12,6 +12,7 @@ import {
   ActionBarPrimitive,
   MessagePrimitive,
   MessagePartPrimitive,
+  groupPartByType,
   useAuiState,
   useAui,
 } from "@assistant-ui/react";
@@ -25,6 +26,7 @@ import remarkGfm from "remark-gfm";
 import type { Entry, View } from "./api.js";
 import { Icon } from "./icons.js";
 import { MessageActions } from "./message-actions.js";
+import { MessageBranches, MessageControlScope } from "./message-controls.js";
 import { useNotify } from "./notifications.js";
 
 export const ConversationId = createContext<string | null>(null);
@@ -66,6 +68,8 @@ export function threadMessages(
         isError: message.isError,
       });
     } else {
+      if (message.reasoning?.trim())
+        content.push({ type: "reasoning", text: message.reasoning });
       if (message.content.trim())
         content.push({ type: "text", text: message.content });
       for (const image of message.images ?? [])
@@ -94,11 +98,18 @@ export function threadMessages(
         content,
       });
   }
-  if (view?.progress.partial)
+  if (view?.progress.partial || view?.progress.reasoning)
     converted.push({
       id: "streaming",
       role: "assistant",
-      content: view.progress.partial,
+      content: [
+        ...(view.progress.reasoning
+          ? [{ type: "reasoning" as const, text: view.progress.reasoning }]
+          : []),
+        ...(view.progress.partial
+          ? [{ type: "text" as const, text: view.progress.partial }]
+          : []),
+      ],
       status: { type: "running" },
     });
   return converted;
@@ -107,7 +118,7 @@ export function threadMessages(
 export function MarkdownText({ text }: Pick<TextMessagePartProps, "text">) {
   const id = useContext(ConversationId);
   return (
-    <div className="markdown">
+    <div className="markdown" data-aui-quote-selectable="">
       <Markdown
         remarkPlugins={[remarkGfm]}
         skipHtml
@@ -210,7 +221,10 @@ function ToolResult({
 }: ToolCallMessagePartProps) {
   const running = useAuiState((state) => state.thread.isRunning);
   return (
-    <details className={`tool-card ${isError ? "tool-error" : ""}`}>
+    <details
+      className={`tool-card ${isError ? "tool-error" : ""}`}
+      data-aui-quote-selectable="false"
+    >
       <summary>
         <Icon name="terminal" />
         <span className="tool-name">{toolLabel(toolName)}</span>
@@ -261,7 +275,7 @@ export function UserMessage() {
           }}
         </MessagePrimitive.Parts>
       </div>
-      <MessageToolbar user />
+      <MessageFooter user />
     </MessagePrimitive.Root>
   );
 }
@@ -269,10 +283,18 @@ function UserText({ text }: { text: string }) {
   const attachments = text.match(
     /\n\n添付：\n((?:attachments\/[0-9a-f-]{36}-[^\n/]+\n?)+)$/i,
   );
-  if (!attachments) return <MessagePartPrimitive.Text className="user-text" />;
+  if (!attachments)
+    return (
+      <MessagePartPrimitive.Text
+        className="user-text"
+        data-aui-quote-selectable=""
+      />
+    );
   return (
     <>
-      <span className="user-text">{text.slice(0, attachments.index)}</span>
+      <span className="user-text" data-aui-quote-selectable="">
+        {text.slice(0, attachments.index)}
+      </span>
       <span className="message-files">
         {attachments[1]!
           .trim()
@@ -302,22 +324,87 @@ export function AssistantMessage() {
     >
       <div className="visually-hidden">アシスタント</div>
       <div className="assistant-content">
-        <MessagePrimitive.Parts>
-          {({ part }) => {
+        <MessagePrimitive.GroupedParts
+          groupBy={groupPartByType({
+            reasoning: ["group-thinking"],
+            "tool-call": ["group-thinking"],
+          })}
+          indicator="never"
+        >
+          {({ part, children }) => {
+            if (part.type === "group-thinking")
+              return (
+                <ChainOfThought indices={part.indices}>
+                  {children}
+                </ChainOfThought>
+              );
+            if (part.type === "reasoning")
+              return (
+                <div
+                  className="reasoning-text"
+                  data-aui-quote-selectable="false"
+                >
+                  {part.text}
+                </div>
+              );
             if (part.type === "text") return <MarkdownText text={part.text} />;
             if (part.type === "tool-call") return <ToolResult {...part} />;
             return null;
           }}
-        </MessagePrimitive.Parts>
+        </MessagePrimitive.GroupedParts>
       </div>
-      {hasText && <MessageToolbar />}
+      {hasText && <MessageFooter />}
     </MessagePrimitive.Root>
+  );
+}
+
+function ChainOfThought({
+  children,
+  indices,
+}: {
+  children: import("react").ReactNode;
+  indices: readonly number[];
+}) {
+  const running = useAuiState(
+    (state) =>
+      state.message.status?.type === "running" ||
+      (state.thread.isRunning &&
+        indices.some((index) => {
+          const part = state.message.parts[index];
+          return part?.type === "tool-call" && part.result === undefined;
+        })),
+  );
+  const failed = useAuiState((state) =>
+    indices.some((index) => {
+      const part = state.message.parts[index];
+      return part?.type === "tool-call" && part.isError;
+    }),
+  );
+  return (
+    <details className="chain-of-thought" data-aui-quote-selectable="false">
+      <summary>
+        <Icon name="chevron" />
+        <span>{running ? "思考中…" : "思考・ツール"}</span>
+        {failed && <span className="thinking-error">ツール失敗</span>}
+      </summary>
+      <div className="thinking-parts">{children}</div>
+    </details>
+  );
+}
+
+function MessageFooter({ user = false }: { user?: boolean }) {
+  return (
+    <div className="message-footer" data-aui-quote-selectable="false">
+      <MessageBranches />
+      <MessageControlScope>
+        <MessageToolbar user={user} />
+      </MessageControlScope>
+    </div>
   );
 }
 
 function MessageToolbar({ user = false }: { user?: boolean }) {
   const aui = useAui();
-  const notify = useNotify();
   const message = useAuiState((state) => state.message);
   const { disabled, onAction, onRemember } = useContext(MessageActions);
   const entryId = Number(message.id.split("-")[0]);
@@ -351,18 +438,9 @@ function MessageToolbar({ user = false }: { user?: boolean }) {
         className="btn-text theme-secondary btn-sm icon-button"
         aria-label="引用して返信"
         title="引用して返信"
+        disabled={!text || message.status?.type === "running"}
         onClick={() => {
-          const current = aui.thread().composer().getState().text;
-          const quote = `${current}${current ? "\n\n" : ""}${text
-            .split("\n")
-            .map((line) => `> ${line}`)
-            .join("\n")}\n\n`;
-          if (quote.length > 64000) {
-            notify("入力の上限を超えています", true);
-            return;
-          }
-          aui.thread().composer().setText(quote);
-          document.getElementById("message")?.focus({ preventScroll: true });
+          aui.thread().composer().setQuote({ text, messageId: message.id });
         }}
       >
         <Icon name="quote" />
@@ -378,22 +456,15 @@ function MessageToolbar({ user = false }: { user?: boolean }) {
           >
             <Icon name="memory" />
           </button>
-          <button
+          <MessageEditOrReload
+            user={user}
             className="btn-text theme-secondary btn-sm icon-button"
             aria-label={user ? "メッセージを編集" : "回答を再生成"}
             title={user ? "編集" : "再生成"}
             disabled={disabled}
-            onClick={() =>
-              onAction({
-                kind: user ? "edit" : "regenerate",
-                entryId,
-                text,
-                images: message.parts.some((part) => part.type === "image"),
-              })
-            }
           >
             <Icon name={user ? "edit" : "retry"} />
-          </button>
+          </MessageEditOrReload>
           <button
             className="btn-text theme-secondary btn-sm icon-button"
             aria-label="ここから分岐"
@@ -422,6 +493,19 @@ function MessageToolbar({ user = false }: { user?: boolean }) {
   );
 }
 
+function MessageEditOrReload({
+  user,
+  ...props
+}: { user: boolean } & import("react").ComponentProps<
+  typeof ActionBarPrimitive.Edit
+>) {
+  return user ? (
+    <ActionBarPrimitive.Edit {...props} />
+  ) : (
+    <ActionBarPrimitive.Reload {...props} />
+  );
+}
+
 function CodeBlock({ children }: { children?: import("react").ReactNode }) {
   const block = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
@@ -433,7 +517,7 @@ function CodeBlock({ children }: { children?: import("react").ReactNode }) {
   }, [copied]);
   return (
     <div className="code-block">
-      <div className="code-header">
+      <div className="code-header" data-aui-quote-selectable="false">
         <span>コード</span>
         <button
           className="btn-text theme-secondary btn-sm icon-button"

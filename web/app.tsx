@@ -4,6 +4,7 @@ import { NotificationProvider, useNotify } from "./notifications.js";
 import { ModelPicker } from "./model-picker.js";
 import { SessionList } from "./sessions.js";
 import { MessageActions, MessageActionDialog } from "./message-actions.js";
+import { SelectionToolbar, SessionBranches } from "./message-controls.js";
 import type { MessageAction } from "./message-actions.js";
 import { readDraft, saveDraft } from "./drafts.js";
 import { ConversationSearch } from "./search.js";
@@ -229,6 +230,7 @@ function Chat({
               )}
             </div>
           </ThreadPrimitive.Viewport>
+          <SelectionToolbar disabled={sending} />
           <div className="composer-dock">
             <ThreadPrimitive.ScrollToBottom
               className="scroll-bottom btn-outline theme-secondary btn-sm"
@@ -1198,86 +1200,95 @@ function App() {
                     onSelect={jumpTo}
                   />
                 )}
-                <MessageActions.Provider
+                <SessionBranches.Provider
                   value={{
-                    disabled:
-                      sending ||
-                      changingModel ||
-                      acting ||
-                      deleting ||
-                      currentStatus === "running" ||
-                      currentStatus === "stopping",
-                    activeEntry,
-                    onRemember: (entryId, text) => {
-                      if (selected)
-                        openMemory({
-                          text,
-                          source: { sessionId: selected, entryId },
-                        });
-                    },
-                    onAction: (action) => {
-                      messageActionOrigin.current =
-                        document.activeElement as HTMLElement;
-                      setMessageAction(action);
-                    },
+                    current: view?.conversation ?? null,
+                    sessions: conversations,
+                    onSelect: select,
                   }}
                 >
-                  <Chat
-                    draftId={selected}
-                    key={threadKey}
-                    view={view}
-                    entries={entries}
-                    cursor={cursor}
-                    sending={
-                      sending ||
-                      deleting ||
-                      changingModel ||
-                      (selected !== null && !view)
-                    }
-                    loading={selected !== null && !view && !loadError}
-                    loadError={loadError}
-                    onRetry={() => {
-                      setLoadError("");
-                      setReload((value) => value + 1);
+                  <MessageActions.Provider
+                    value={{
+                      disabled:
+                        sending ||
+                        changingModel ||
+                        acting ||
+                        deleting ||
+                        currentStatus === "running" ||
+                        currentStatus === "stopping",
+                      activeEntry,
+                      onRemember: (entryId, text) => {
+                        if (selected)
+                          openMemory({
+                            text,
+                            source: { sessionId: selected, entryId },
+                          });
+                      },
+                      onAction: (action) => {
+                        messageActionOrigin.current =
+                          document.activeElement as HTMLElement;
+                        setMessageAction(action);
+                      },
                     }}
-                    modelPicker={
-                      <ModelPicker
-                        label="セッションのモデル"
-                        compact
-                        value={
-                          view?.conversation.modelConfigId
-                            ? JSON.stringify([
-                                view.conversation.modelConfigId,
-                                view.conversation.model ??
-                                  modelOptions.models.find(
-                                    (m) =>
-                                      m.id === view.conversation.modelConfigId,
-                                  )?.model,
-                              ])
-                            : draftModel
-                        }
-                        models={choices}
-                        disabled={
-                          sending ||
-                          deleting ||
-                          changingModel ||
-                          (selected !== null && !view) ||
-                          currentStatus === "running" ||
-                          currentStatus === "stopping"
-                        }
-                        onChange={(id) => void changeModel(id)}
-                        onManage={() => {
-                          setMemoryDraft(null);
-                          setSettingsOpen(true);
-                        }}
-                      />
-                    }
-                    attachments={attachments}
-                    setAttachments={setAttachments}
-                    onSend={send}
-                    onEarlier={earlier}
-                  />
-                </MessageActions.Provider>
+                  >
+                    <Chat
+                      draftId={selected}
+                      key={threadKey}
+                      view={view}
+                      entries={entries}
+                      cursor={cursor}
+                      sending={
+                        sending ||
+                        deleting ||
+                        changingModel ||
+                        (selected !== null && !view)
+                      }
+                      loading={selected !== null && !view && !loadError}
+                      loadError={loadError}
+                      onRetry={() => {
+                        setLoadError("");
+                        setReload((value) => value + 1);
+                      }}
+                      modelPicker={
+                        <ModelPicker
+                          label="セッションのモデル"
+                          compact
+                          value={
+                            view?.conversation.modelConfigId
+                              ? JSON.stringify([
+                                  view.conversation.modelConfigId,
+                                  view.conversation.model ??
+                                    modelOptions.models.find(
+                                      (m) =>
+                                        m.id ===
+                                        view.conversation.modelConfigId,
+                                    )?.model,
+                                ])
+                              : draftModel
+                          }
+                          models={choices}
+                          disabled={
+                            sending ||
+                            deleting ||
+                            changingModel ||
+                            (selected !== null && !view) ||
+                            currentStatus === "running" ||
+                            currentStatus === "stopping"
+                          }
+                          onChange={(id) => void changeModel(id)}
+                          onManage={() => {
+                            setMemoryDraft(null);
+                            setSettingsOpen(true);
+                          }}
+                        />
+                      }
+                      attachments={attachments}
+                      setAttachments={setAttachments}
+                      onSend={send}
+                      onEarlier={earlier}
+                    />
+                  </MessageActions.Provider>
+                </SessionBranches.Provider>
               </TabsContent>
             </div>
             {messageAction && (

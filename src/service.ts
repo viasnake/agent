@@ -937,6 +937,7 @@ export class AgentService {
           piId: fork.id,
           title: `${parent.title.slice(0, 185)} · 分岐`,
           parentId: id,
+          branchSource: { entryId, mode },
           ...(anchor === undefined ? {} : { forkEntry: anchor }),
           status: "idle",
           detail: "",
@@ -1614,6 +1615,19 @@ export class AgentService {
           isError: message.role === "toolResult" ? message.isError : false,
           toolName: message.role === "toolResult" ? message.toolName : null,
           toolCallId: message.role === "toolResult" ? message.toolCallId : null,
+          reasoning:
+            message.role === "assistant"
+              ? this.redact(
+                  message.content
+                    .flatMap((block) =>
+                      block.type === "thinking" && !block.redacted
+                        ? [block.thinking]
+                        : [],
+                    )
+                    .join("\n")
+                    .slice(-16000),
+                )
+              : "",
           toolCalls:
             message.role === "assistant"
               ? message.content
@@ -1673,6 +1687,16 @@ export class AgentService {
         inbox?.items.filter((item) => "content" in item).length ?? 0,
       progress: {
         generating: !!live?.generation,
+        reasoning: this.redact(
+          live?.generation?.message?.content
+            .flatMap((block) =>
+              block.type === "thinking" && !block.redacted
+                ? [block.thinking]
+                : [],
+            )
+            .join("\n")
+            .slice(-16000) ?? "",
+        ),
         partial: this.redact(
           live?.generation?.message?.content
             .filter((block) => block.type === "text")

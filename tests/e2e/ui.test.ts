@@ -8,6 +8,11 @@ import { chromium, type Locator } from "playwright";
 import { fixture, answer, call, until } from "../support.js";
 import { createServer } from "../../src/server.js";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
+import {
+  fauxAssistantMessage,
+  fauxThinking,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
 // Rasterize computed CSS colors to sRGB, including Bootstrap's light-dark/OKLCH
 // values and transparent surfaces. Check actual contrast, not token names.
 async function assertReadable(locator: Locator, pseudo?: string) {
@@ -66,10 +71,16 @@ async function assertReadable(locator: Locator, pseudo?: string) {
 
 test("real browser conversation: no category, attachments, response-loss retry, reconnect, CSV download and continuation without a new job", async () => {
   const f = await fixture([
-    call("bash", {
-      command:
-        "test -f attachments/*-input.csv && mkdir -p outputs && printf 'name,total\\nAlice,12\\n' > outputs/clean.csv",
-    }),
+    fauxAssistantMessage(
+      [
+        fauxThinking("添付 CSV を確認します。"),
+        fauxToolCall("bash", {
+          command:
+            "test -f attachments/*-input.csv && mkdir -p outputs && printf 'name,total\\nAlice,12\\n' > outputs/clean.csv",
+        }),
+      ],
+      { stopReason: "toolUse" },
+    ),
     answer(
       "## CSV の整形\n\n**保存しました。**\n\n| 名前 | 合計 |\n| --- | --- |\n| Alice | 12 |\n\n```sh\ncat outputs/clean.csv\n```\n\n![外部画像](https://evil.invalid/track)\n\n[不正なリンク](javascript:alert(1))\n\n<script>window.pwned=1</script><img src=https://evil.invalid/track>",
     ),
@@ -189,6 +200,17 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     );
     assert.equal(await page.locator(".markdown img").count(), 0);
     const tool = page.locator(".tool-card").first();
+    const thinking = page.locator(".chain-of-thought").first();
+    assert.equal(
+      await thinking.evaluate((node) => (node as HTMLDetailsElement).open),
+      false,
+    );
+    await thinking.locator(":scope > summary").focus();
+    await page.keyboard.press("Enter");
+    assert.equal(
+      await thinking.locator(".reasoning-text").innerText(),
+      "添付 CSV を確認します。",
+    );
     assert.equal(
       await tool.evaluate((node) => (node as HTMLDetailsElement).open),
       false,
@@ -198,6 +220,9 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await tool.locator("summary").click();
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
+      await assertReadable(
+        page.locator(".chain-of-thought > summary, .reasoning-text"),
+      );
       await page.getByRole("tab", { name: "ファイル", exact: true }).click();
       await assertReadable(
         page.locator(
