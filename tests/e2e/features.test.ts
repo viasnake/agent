@@ -42,6 +42,10 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
   });
   const page = await context.newPage();
   const errors: string[] = [];
+  let subscriptions = 0;
+  page.on("request", (request) => {
+    if (request.url().endsWith("/events")) subscriptions++;
+  });
   page.on("pageerror", (error) => errors.push(error.message));
   const row = (id: string) => page.locator(`[data-session-id="${id}"]`);
   const more = (id: string) => row(id).locator(".session-more").click();
@@ -157,7 +161,59 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       mimeType: "text/plain",
       buffer: Buffer.from("draft"),
     });
+    const subscribed = subscriptions;
+    const composer = await page.locator("#message").elementHandle();
+    await page.getByRole("tab", { name: "使用量", exact: true }).click();
+    const beforeUsage = (await f.service.view(a.id)).usage;
+    assert.equal(
+      await page.locator(".usage-summary dd").last().textContent(),
+      "N/A",
+    );
+    assert.equal(
+      await page
+        .locator(".usage-table tbody tr")
+        .first()
+        .locator("td")
+        .last()
+        .textContent(),
+      "N/A",
+    );
+    assert.equal(
+      await page.locator(".usage-table tfoot td").last().textContent(),
+      "N/A",
+    );
+    assert.equal(
+      await page.locator(".usage-summary dd").first().textContent(),
+      beforeUsage.total.totalTokens.toLocaleString("ja-JP"),
+    );
+    f.faux.setResponses([answer("使用量の更新")]);
+    await f.service.send(a.id, randomUUID(), "続き");
+    await until(
+      async () => (await f.service.conversation(a.id)).status === "idle",
+    );
+    const afterUsage = (await f.service.view(a.id)).usage;
+    assert.ok(afterUsage.total.totalTokens > beforeUsage.total.totalTokens);
+    await page.waitForFunction(
+      (value) =>
+        document.querySelector(".usage-summary dd")?.textContent === value,
+      afterUsage.total.totalTokens.toLocaleString("ja-JP"),
+    );
+    await page.getByRole("tab", { name: "会話", exact: true }).click();
+    assert.equal(await composer!.evaluate((node) => node.isConnected), true);
+    assert.equal(await page.locator("#message").inputValue(), "A の下書き");
+    assert.equal(await page.locator(".attachment-chip").count(), 1);
+    assert.equal(subscriptions, subscribed);
     await row(b.id).locator(".conversation-item").click();
+    await page.getByRole("tab", { name: "使用量", exact: true }).click();
+    assert.equal(
+      await page.locator(".usage-summary dd").first().textContent(),
+      "0",
+    );
+    assert.equal(
+      await page.locator(".usage-summary dd").last().textContent(),
+      "$0.000000",
+    );
+    await page.getByRole("tab", { name: "会話", exact: true }).click();
     await page.locator("#message").fill("B の下書き");
     await row(a.id).locator(".conversation-item").click();
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");

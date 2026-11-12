@@ -1,4 +1,5 @@
 const paths = {
+  usage: "M4 3v18h17M8 17v-4M13 17V9M18 17V5",
   sidebar: "M3 4h18v16H3zM9 4v16",
   memory:
     "M4 3h6a3 3 0 0 1 3 3v15a3 3 0 0 0-3-3H4zM13 6a3 3 0 0 1 3-3h5v15h-5a3 3 0 0 0-3 3",

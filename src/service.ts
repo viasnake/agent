@@ -31,6 +31,7 @@ import {
   ProviderDoc,
   LiveDoc,
   InboxDoc,
+  UsageDoc,
 } from "@earendil-works/pi-durable";
 import type {
   Conversation as PiConversation,
@@ -53,6 +54,7 @@ import { AppError, hash, safeRelative } from "./security.js";
 import { WorkerClient } from "./execution/client.js";
 import type { Runner } from "./execution/protocol.js";
 import { guardedProvider } from "./provider.js";
+import { conversationUsage } from "./usage.js";
 import { agentTools, mcpTools } from "./tools.js";
 import {
   conversationDatabase,
@@ -1674,6 +1676,9 @@ export class AgentService {
     return {
       conversation,
       transcript,
+      usage: conversationUsage(
+        await this.harness.snapshot(UsageDoc, conversation.piId, ctx),
+      ),
       cursor: entries.next ?? null,
       modelConfigured:
         !!this.options.provider ||
