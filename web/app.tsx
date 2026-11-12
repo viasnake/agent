@@ -1,3 +1,5 @@
+import { CredentialPicker } from "./credentials.js";
+import type { CredentialOption } from "./api.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
 import { NotificationProvider, useNotify } from "./notifications.js";
@@ -386,6 +388,11 @@ function App() {
   const choices = useMemo(() => modelChoices(modelOptions), [modelOptions]);
   const [draftModel, setDraftModel] = useState("");
   const [changingModel, setChangingModel] = useState(false);
+  const [credentialOptions, setCredentialOptions] = useState<
+    CredentialOption[]
+  >([]);
+  const [draftCredentials, setDraftCredentials] = useState<string[]>([]);
+  const [changingCredentials, setChangingCredentials] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(
     new URLSearchParams(location.search).has("settings"),
   );
@@ -514,6 +521,11 @@ function App() {
   useEffect(() => {
     if (!ready || settingsOpen) return;
     let active = true;
+    void api<CredentialOption[]>("/api/credential-options")
+      .then((options) => {
+        if (active) setCredentialOptions(options);
+      })
+      .catch(notice);
     void api<ModelOptions>("/api/model-options")
       .then((options) => {
         if (!active) return;
@@ -541,6 +553,27 @@ function App() {
       active = false;
     };
   }, [ready, settingsOpen, notice, notify]);
+  async function changeCredentials(ids: string[]): Promise<boolean> {
+    const id = selectedRef.current;
+    if (!id) {
+      setDraftCredentials(ids);
+      return true;
+    }
+    setChangingCredentials(true);
+    try {
+      merge(
+        await api<View>(`/api/conversations/${id}/credentials`, "PUT", {
+          credentialIds: ids,
+        }),
+      );
+      return true;
+    } catch (error) {
+      notice(error);
+      return false;
+    } finally {
+      setChangingCredentials(false);
+    }
+  }
   async function changeModel(choiceId: string) {
     const choice = choices.find((m) => m.id === choiceId);
     if (!choice) return;
@@ -644,9 +677,12 @@ function App() {
       if (!id) {
         const title = text.slice(0, 80);
         const choice = choices.find((m) => m.id === draftModel);
-        const selection = choice
-          ? { modelId: choice.connectionId, model: choice.model }
-          : {};
+        const selection = {
+          ...(choice
+            ? { modelId: choice.connectionId, model: choice.model }
+            : {}),
+          credentialIds: draftCredentials,
+        };
         const created = await api<{ id: string }>(
           "/api/conversations",
           "POST",
@@ -660,6 +696,7 @@ function App() {
           },
         );
         id = created.id;
+        setDraftCredentials([]);
         saveDraft(null, "");
         attachmentDrafts.current.delete("new");
         // Keep the composer mounted so a rejected/lost response can restore its draft.
@@ -1263,6 +1300,7 @@ function App() {
                         sending ||
                         deleting ||
                         changingModel ||
+                        changingCredentials ||
                         (selected !== null && !view)
                       }
                       loading={selected !== null && !view && !loadError}
@@ -1272,37 +1310,57 @@ function App() {
                         setReload((value) => value + 1);
                       }}
                       modelPicker={
-                        <ModelPicker
-                          label="セッションのモデル"
-                          compact
-                          value={
-                            view?.conversation.modelConfigId
-                              ? JSON.stringify([
-                                  view.conversation.modelConfigId,
-                                  view.conversation.model ??
-                                    modelOptions.models.find(
-                                      (m) =>
-                                        m.id ===
-                                        view.conversation.modelConfigId,
-                                    )?.model,
-                                ])
-                              : draftModel
-                          }
-                          models={choices}
-                          disabled={
-                            sending ||
-                            deleting ||
-                            changingModel ||
-                            (selected !== null && !view) ||
-                            currentStatus === "running" ||
-                            currentStatus === "stopping"
-                          }
-                          onChange={(id) => void changeModel(id)}
-                          onManage={() => {
-                            setMemoryDraft(null);
-                            setSettingsOpen(true);
-                          }}
-                        />
+                        <>
+                          <CredentialPicker
+                            key={selected ?? "new"}
+                            options={credentialOptions}
+                            value={
+                              selected
+                                ? (view?.conversation.credentialIds ?? [])
+                                : draftCredentials
+                            }
+                            disabled={
+                              sending ||
+                              deleting ||
+                              changingCredentials ||
+                              (selected !== null && !view) ||
+                              currentStatus === "running" ||
+                              currentStatus === "stopping"
+                            }
+                            onChange={changeCredentials}
+                          />
+                          <ModelPicker
+                            label="セッションのモデル"
+                            compact
+                            value={
+                              view?.conversation.modelConfigId
+                                ? JSON.stringify([
+                                    view.conversation.modelConfigId,
+                                    view.conversation.model ??
+                                      modelOptions.models.find(
+                                        (m) =>
+                                          m.id ===
+                                          view.conversation.modelConfigId,
+                                      )?.model,
+                                  ])
+                                : draftModel
+                            }
+                            models={choices}
+                            disabled={
+                              sending ||
+                              deleting ||
+                              changingModel ||
+                              (selected !== null && !view) ||
+                              currentStatus === "running" ||
+                              currentStatus === "stopping"
+                            }
+                            onChange={(id) => void changeModel(id)}
+                            onManage={() => {
+                              setMemoryDraft(null);
+                              setSettingsOpen(true);
+                            }}
+                          />
+                        </>
                       }
                       attachments={attachments}
                       setAttachments={setAttachments}

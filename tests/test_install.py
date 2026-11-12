@@ -33,6 +33,23 @@ def user(name, uid, gid, home="/nonexistent"):
 
 
 class SystemChecks(unittest.TestCase):
+    def test_network_update_migrates_only_the_old_stock_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            etc = Path(temporary)
+            template = (INSTALL / "egress.nft").read_text()
+            old = template.replace("tcp dport { 22, 80, 443 }", "tcp dport { 80, 443 }")
+            policy = etc / "egress.nft"
+            protected = etc / "protected-cidrs.nft"
+            protected.write_text("custom protected networks")
+            with patch.object(installer, "ETC", etc), patch.object(installer, "trusted"):
+                policy.write_text(old)
+                installer.install_network_policy(INSTALL)
+                self.assertEqual(policy.read_text(), template)
+                policy.write_text(old + "# administrator policy\n")
+                installer.install_network_policy(INSTALL)
+                self.assertEqual(policy.read_text(), old + "# administrator policy\n")
+                self.assertEqual(protected.read_text(), "custom protected networks")
+
     def test_mount_accepts_root_or_dedicated_storage_without_disk_labels(self):
         for target in ["/", "/mnt/persistent"]:
             mount = {**MOUNT, "target": target}

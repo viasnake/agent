@@ -68,7 +68,7 @@ if [[ "$build_only" == 0 ]]; then
     exit 1
   fi
   sudo /usr/bin/apt-get update
-  sudo /usr/bin/apt-get install -y ca-certificates curl xz-utils openssl nftables sudo util-linux procps
+  sudo /usr/bin/apt-get install -y ca-certificates curl xz-utils openssl nftables sudo util-linux procps openssh-client acl
 fi
 for binary in curl tar xz sha256sum; do
   command -v "$binary" >/dev/null || { echo "Missing dependency: $binary" >&2; exit 1; }

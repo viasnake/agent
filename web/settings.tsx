@@ -1,3 +1,4 @@
+import { CredentialSettings } from "./credentials.js";
 import { Skills } from "./skills.js";
 import { MemoryNotes } from "./memory.js";
 import type { MemoryDraft, MemorySource } from "./memory.js";
@@ -10,13 +11,18 @@ import { api } from "./api.js";
 type PublicSettings = ReturnType<AgentService["management"]>;
 const secretMask = "••••••••";
 type EnvironmentRow = { name: string; value?: string };
-type Tab = "models" | "mcp" | "agent" | "memory" | "skills";
+type Tab = "models" | "mcp" | "agent" | "memory" | "skills" | "credentials";
 function editable(s: PublicSettings): SettingsInput {
   return {
     revision: s.revision,
     defaultModel: s.defaultModel,
     instructions: s.instructions,
     limits: s.limits,
+    workCredentials: s.workCredentials.map(({ id, name, kind }) => ({
+      id,
+      name,
+      kind,
+    })),
     models: s.models.map(
       ({
         id,
@@ -175,7 +181,10 @@ export function Settings({
   }
   async function persist(value: SettingsInput) {
     const input = structuredClone(value);
-    for (const server of input.mcp)
+    for (const server of [
+      ...input.mcp,
+      ...(input.workCredentials ?? []).filter((c) => c.kind === "env"),
+    ])
       if (environments[server.id] !== undefined) {
         const rows = environments[server.id]!;
         if (
@@ -259,6 +268,7 @@ export function Settings({
           [
             ["models", "モデル"],
             ["mcp", "MCP"],
+            ["credentials", "クレデンシャル"],
             ["agent", "Agent 設定"],
             ["memory", "記憶"],
             ["skills", "Skills"],
@@ -720,6 +730,21 @@ export function Settings({
                   接続を追加
                 </button>
               </>
+            )}
+            {tab === "credentials" && (
+              <CredentialSettings
+                entries={draft.workCredentials ?? []}
+                saved={saved?.workCredentials ?? []}
+                environments={environments}
+                onEnvironments={(id, rows) => {
+                  setEnvironments((old) => ({ ...old, [id]: rows }));
+                  setDirty(true);
+                }}
+                onChange={(workCredentials) =>
+                  change((s) => ({ ...s, workCredentials }))
+                }
+                onError={(message) => notify(message, true)}
+              />
             )}
             {tab === "mcp" && (
               <>

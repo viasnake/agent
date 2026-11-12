@@ -1,3 +1,4 @@
+import { workEnvironment } from "../work-credentials.js";
 import { constants } from "node:fs";
 import {
   lstat,
@@ -218,10 +219,19 @@ export class Worker {
         .positive()
         .max(10485760)
         .parse(args.commandBytes);
+    const environment = {
+      ...this.env(),
+      ...workEnvironment.parse(args.environment ?? {}),
+    };
+    if (args.sshSocket !== undefined)
+      environment.SSH_AUTH_SOCK = z
+        .string()
+        .regex(/^\/tmp\/agent-ssh-[A-Za-z0-9]+\/socket$/)
+        .parse(args.sshSocket);
     const env = new NodeExecutionEnv({
       cwd: this.workspace(id),
       shellPath: "/bin/bash",
-      shellEnv: this.env(),
+      shellEnv: environment,
     });
     this.environments.add(env);
     const context = withAbortSignal(
@@ -242,7 +252,7 @@ export class Worker {
         {
           ...options,
           inheritEnv: false,
-          env: { ...this.env(), ...options?.env },
+          env: { ...environment, ...options?.env },
           timeout: Math.min(options?.timeout ?? seconds, seconds),
           onOutput: (text, ctx, info) => {
             bytes += Buffer.byteLength(text);

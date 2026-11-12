@@ -38,6 +38,24 @@ LIBEXEC = Path("/usr/local/libexec")
 SUDOERS = Path("/etc/sudoers.d/agent-work")
 
 
+def install_network_policy(source):
+    template = (source / "egress.nft").read_text()
+    destination = ETC / "egress.nft"
+    if os.path.lexists(destination):
+        trusted(destination)
+        previous = template.replace(
+            "tcp dport { 22, 80, 443 }", "tcp dport { 80, 443 }"
+        )
+        # Upgrade only the shipped policy; administrator rules remain authoritative.
+        if destination.read_text() == previous:
+            atomic_write(destination, template)
+    else:
+        atomic_write(destination, template)
+    protected = ETC / "protected-cidrs.nft"
+    if not os.path.lexists(protected):
+        atomic_write(protected, (source / "protected-cidrs.nft").read_text())
+
+
 def copy_tree(source, destination):
     # Copy only regular files/directories and links contained in the reviewed input.
     if source.is_symlink():
@@ -355,9 +373,7 @@ def install(args):
             0o755,
         )
     atomic_write(SUDOERS, sudoers, 0o440)
-    for name in ["egress.nft", "protected-cidrs.nft"]:
-        if not (ETC / name).exists():
-            atomic_write(ETC / name, (APP / "install" / name).read_text())
+    install_network_policy(APP / "install")
     for name in ["agent.service", "agent-egress.service"]:
         atomic_write(
             UNITS / name,

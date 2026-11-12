@@ -22,6 +22,7 @@ const ids = [
   "guest-cgroup",
   "guest-lock",
   "guest-skills",
+  "guest-ssh-credentials",
 ];
 function blocked(reason) {
   console.log(JSON.stringify({ result: "blocked", ids, reason }));
@@ -118,7 +119,7 @@ const previewServer = createServer((_request, response) =>
     "<!doctype html><meta charset=utf-8><title>preview fixture</title><p>preview</p>",
   ),
 );
-let controller;
+let controller, keyController;
 try {
   await writeFile(secret, "synthetic-guest-secret", {
     flag: "wx",
@@ -178,6 +179,93 @@ try {
   await shell(
     `test "$(id -u)" = ${workUid} && ! cat '${secret}' >/dev/null 2>&1 && ! cat /proc/${controlPid}/environ >/dev/null 2>&1 && ! ls /proc/${controlPid}/fd >/dev/null 2>&1 && test -z "\${OPENAI_API_KEY-}\${GH_TOKEN-}\${SSH_AUTH_SOCK-}\${NODE_OPTIONS-}\${LD_PRELOAD-}\${AGENT_GUEST_SENTINEL-}" && ! sudo -n -u root /usr/bin/true >/dev/null 2>&1`,
   );
+  // Exercise the actual control/work UID and ACL boundary with a disposable key.
+  keyController = spawn(
+    "sudo",
+    [
+      "-u",
+      "agent-control",
+      "/opt/agent-node/bin/node",
+      "--input-type=module",
+      "-e",
+      `
+    import { execFileSync } from "node:child_process";
+    import { mkdtemp, readFile, rm } from "node:fs/promises";
+    import { once } from "node:events";
+    import { openSshAgent } from "/opt/agent/dist/src/ssh-agent.js";
+    const dir = await mkdtemp("/tmp/agent-guest-key-");
+    let agent;
+    try {
+      execFileSync("/usr/bin/ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", dir + "/key"]);
+      agent = await openSshAgent([await readFile(dir + "/key", "utf8")], ${workUid});
+      console.log(JSON.stringify({ socket: agent.socket, dir, publicKey: await readFile(dir + "/key.pub", "utf8") }));
+      process.stdin.resume();
+      await once(process.stdin, "end");
+    } finally {
+      await agent?.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  `,
+    ],
+    { stdio: ["pipe", "pipe", "inherit"] },
+  );
+  const keyInfo = await new Promise((resolve, reject) => {
+    let text = "";
+    const timer = setTimeout(
+      () => reject(new Error("SSH credential fixture timed out")),
+      10000,
+    );
+    keyController.stdout.on("data", (data) => {
+      text += data.toString();
+      if (text.includes("\n")) {
+        clearTimeout(timer);
+        resolve(JSON.parse(text.split("\n")[0]));
+      }
+    });
+    keyController.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    keyController.once("exit", () => {
+      clearTimeout(timer);
+      reject(new Error("SSH credential fixture exited"));
+    });
+  });
+  await runner.call(id, "tool", {
+    name: "write",
+    args: { path: "outputs/ssh.pub", content: keyInfo.publicKey },
+    commandSeconds: 15,
+    commandBytes: 1048576,
+  });
+  const signed = await runner.call(id, "tool", {
+    name: "bash",
+    sshSocket: keyInfo.socket,
+    environment: { AGENT_GUEST_PAT: "synthetic-selected-pat" },
+    args: {
+      command: `test "$AGENT_GUEST_PAT" = synthetic-selected-pat && ssh-add -T outputs/ssh.pub && ! ssh-add -D >/dev/null 2>&1 && ! cat '${keyInfo.dir}/key' >/dev/null 2>&1 && ! ls '${keyInfo.socket.slice(0, -7)}/private' >/dev/null 2>&1`,
+    },
+    commandSeconds: 15,
+    commandBytes: 1048576,
+  });
+  assert.equal(signed.result?.isError, undefined);
+  const signerExit = new Promise((resolve, reject) => {
+    if (keyController.exitCode !== null) {
+      reject(new Error("SSH signer exited early"));
+      return;
+    }
+    const timer = setTimeout(
+      () => reject(new Error("SSH signer did not stop")),
+      10000,
+    );
+    keyController.once("exit", (code) => {
+      clearTimeout(timer);
+      code === 0 ? resolve() : reject(new Error("SSH signer failed"));
+    });
+  });
+  keyController.stdin.end();
+  await signerExit;
+  assert.equal(existsSync(keyInfo.socket), false);
+  await shell('test -z "${AGENT_GUEST_PAT-}${SSH_AUTH_SOCK-}"');
   await mkdir(skillDirectory, { mode: 0o755 });
   await chmod(skillDirectory, 0o755);
   const skillScript = `${skillDirectory}/check.py`;
@@ -294,6 +382,7 @@ Path("outputs/skill-check.txt").write_text("work UID only")
   await rm(skillDirectory, { recursive: true, force: true });
   await runner.close().catch(() => undefined);
   controller?.kill();
+  keyController?.stdin.end();
   privateServer.closeAllConnections();
   previewServer.closeAllConnections();
   privateServer.close();

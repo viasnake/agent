@@ -16,7 +16,7 @@ table inet agent_work {
     ip daddr 127.0.0.1 tcp dport 3000-3999 accept
     ip daddr @blocked_v4 reject
     ip daddr $protected_cidrs reject
-    tcp dport { 80, 443 } accept
+    tcp dport { 22, 80, 443 } accept
     reject
   }
 }
