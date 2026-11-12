@@ -400,6 +400,96 @@ button {
 .message-actions {
   margin-top: 8px;
 }
+.message-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.message-footer .message-actions {
+  margin-top: 0;
+}
+.branch-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--bs-fg-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.branch-picker .icon-button {
+  padding: 6px;
+}
+.chain-of-thought {
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 10px;
+  background: var(--bs-bg-1);
+}
+.chain-of-thought > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--bs-fg-2);
+  border-radius: inherit;
+  list-style: none;
+}
+.chain-of-thought > summary::-webkit-details-marker {
+  display: none;
+}
+.chain-of-thought > summary:hover {
+  background: var(--bs-bg-2);
+  color: var(--bs-fg-1);
+}
+.chain-of-thought > summary:focus-visible {
+  outline: 2px solid var(--bs-primary-border);
+  outline-offset: 2px;
+}
+.chain-of-thought > summary svg {
+  width: 16px;
+  height: 16px;
+  transform: rotate(-90deg);
+}
+.chain-of-thought[open] > summary svg {
+  transform: none;
+}
+.thinking-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+.thinking-parts .tool-card {
+  margin: 0;
+}
+.reasoning-text {
+  white-space: pre-wrap;
+  font-size: 13px;
+  color: var(--bs-fg-2);
+  max-height: 320px;
+  overflow: auto;
+}
+.thinking-error {
+  color: var(--bs-danger-fg);
+  margin-left: auto;
+}
+.selection-toolbar {
+  padding: 4px;
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 10px;
+  background: var(--bs-bg-1);
+  color: var(--bs-fg-1);
+  box-shadow: var(--bs-box-shadow);
+  max-width: calc(100vw - 16px);
+}
+.selection-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .markdown > :last-child {
   margin-bottom: 0;
 }

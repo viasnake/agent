@@ -13,6 +13,7 @@ export type Conversation = {
   purgedAt?: number;
   parentId?: string;
   forkEntry?: number;
+  branchSource?: { entryId: number; mode: "fork" | "edit" | "regenerate" };
   pinned?: boolean;
   archived?: boolean;
   workspaceCreated?: boolean;

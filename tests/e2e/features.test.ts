@@ -98,6 +98,54 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       await page.locator("#message").inputValue(),
       /^> 保存済みの応答/,
     );
+    await page.locator("#message").fill("引用前の下書き");
+    await page
+      .locator(".markdown p")
+      .first()
+      .evaluate((node) => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const selection = window.getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+      });
+    const selection = page.getByRole("toolbar", {
+      name: "選択したテキストの操作",
+    });
+    await selection
+      .getByRole("button", { name: "引用して返信", exact: true })
+      .click();
+    await page.waitForFunction(
+      () =>
+        (document.querySelector("#message") as HTMLTextAreaElement).value ===
+        "引用前の下書き\n\n> 保存済みの応答\n\n",
+    );
+    assert.equal(
+      await page
+        .locator("#message")
+        .evaluate((node) => node === document.activeElement),
+      true,
+    );
+    await selection.waitFor({ state: "hidden" });
+    // Controls and selections spanning multiple messages are not quotable.
+    await page.locator(".code-header").evaluate((node) => {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+    });
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    assert.equal(await selection.count(), 0);
+    await page.evaluate(() => {
+      const range = document.createRange();
+      range.setStart(document.querySelector(".user-text")!.firstChild!, 0);
+      range.setEndAfter(document.querySelector(".markdown p")!);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+    });
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    assert.equal(await selection.count(), 0);
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
     await more(a.id);
     const saved = page.waitForEvent("download");
     await page.getByRole("link", { name: "会話を保存", exact: true }).click();
@@ -253,6 +301,40 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       /最初の検索ワード/,
     );
 
+    // Branch navigation preserves drafts and attachments and never starts work.
+    await page.locator("#message").fill("分岐側の下書き");
+    const requestCounts = (await f.service.list()).map((session) => [
+      session.id,
+      session.requests,
+    ]);
+    await page.getByRole("button", { name: "前の分岐", exact: true }).click();
+    await page.waitForFunction(
+      () =>
+        (document.querySelector("#message") as HTMLTextAreaElement).value ===
+        "A の下書き",
+    );
+    await page.keyboard.press("Control+Shift+f");
+    await search.getByRole("searchbox").fill("最初の検索ワード");
+    await search.locator(".search-result").click();
+    await search.getByRole("searchbox").press("Escape");
+    const nextBranch = page.getByRole("button", {
+      name: "次の分岐",
+      exact: true,
+    });
+    await nextBranch.click();
+    await page.getByText("編集後の応答", { exact: true }).waitFor();
+    assert.equal(await page.locator("#message").inputValue(), "分岐側の下書き");
+    assert.deepEqual(
+      (await f.service.list()).map((session) => [session.id, session.requests]),
+      requestCounts,
+    );
+    assert.equal(
+      await page
+        .getByRole("button", { name: "次の分岐", exact: true })
+        .isDisabled(),
+      true,
+    );
+
     f.faux.setResponses([answer("再生成した応答")]);
     let lost = false;
     await page.route("**/api/conversations/*/continue", async (route) => {
@@ -289,6 +371,13 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     );
     assert.equal(regenerated.length, 1);
     assert.equal(regenerated[0]!.requests, 1);
+    await page.getByRole("button", { name: "前の分岐", exact: true }).click();
+    await page.getByText("編集後の応答", { exact: true }).waitFor();
+    await page
+      .locator(".assistant-message")
+      .getByRole("button", { name: "次の分岐", exact: true })
+      .click();
+    await page.getByText("再生成した応答", { exact: true }).waitFor();
     await page.unrouteAll({ behavior: "wait" });
     await page
       .locator(".assistant-message")
@@ -307,6 +396,18 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     )!;
     assert.equal(fork.requests, 0);
     assert.equal(fork.workspaceCreated, false);
+    await page.getByRole("button", { name: "前の分岐", exact: true }).click();
+    await page.waitForFunction(
+      (id) =>
+        document
+          .querySelector(".session-row.selected")
+          ?.getAttribute("data-session-id") === id,
+      regenerated[0]!.id,
+    );
+    assert.equal(
+      (await f.service.conversation(fork.id)).workspaceCreated,
+      false,
+    );
     // Returning to a new-session draft retains its files; an accepted send clears
     // that draft so the next new session cannot inherit old attachments.
     await page.locator("#new-conversation").click();

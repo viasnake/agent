@@ -1,6 +1,7 @@
 export type Message = {
   role: string;
   content: string;
+  reasoning?: string;
   toolName: string | null;
   toolCallId: string | null;
   toolCalls: { id: string; name: string; argsText: string }[];
@@ -19,6 +20,7 @@ export type Conversation = {
   model?: string;
   parentId?: string;
   forkEntry?: number;
+  branchSource?: { entryId: number; mode: "fork" | "edit" | "regenerate" };
   pinned?: boolean;
   archived?: boolean;
 };
@@ -31,6 +33,7 @@ export type View = {
   progress: {
     generating: boolean;
     partial: string;
+    reasoning?: string;
     tools: { name: string; status: string; output: string }[];
   };
 };

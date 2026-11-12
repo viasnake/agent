@@ -19,6 +19,8 @@ const paths = {
   fork: "M7 3v12a5 5 0 0 0 5 5h5M7 10h6a4 4 0 0 0 4-4V3M4 6l3-3 3 3M14 6l3-3 3 3",
   retry: "M20 7v5h-5M20 12a8 8 0 1 0-2 6",
   chevron: "m7 10 5 5 5-5",
+  left: "m14 6-6 6 6 6",
+  right: "m10 6 6 6-6 6",
   check: "m5 12 4 4L19 6",
   agent: "M12 3v3M8 3h8M5 8h14v12H5zM8 12h.01M16 12h.01M9 16h6M2 12v4M22 12v4",
   plus: "M12 5v14M5 12h14",
