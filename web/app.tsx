@@ -3,6 +3,7 @@ import { useReadingPosition } from "./reading-position.js";
 import { NotificationProvider, useNotify } from "./notifications.js";
 import { ModelPicker } from "./model-picker.js";
 import { SessionList } from "./sessions.js";
+import { SessionUsage } from "./usage.js";
 import { MessageActions, MessageActionDialog } from "./message-actions.js";
 import type { MessageAction } from "./message-actions.js";
 import { readDraft, saveDraft } from "./drafts.js";
@@ -409,7 +410,7 @@ function App() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<unknown>(null);
   const [files, setFiles] = useState<Files>({ files: [] });
-  const [tab, setTab] = useState<"chat" | "files">("chat");
+  const [tab, setTab] = useState<"chat" | "files" | "usage">("chat");
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
   const filesVersion = useRef(0);
@@ -1111,8 +1112,29 @@ function App() {
                 <Icon name="file" />
                 ファイル
               </TabsTrigger>
+              <TabsTrigger
+                value="usage"
+                id="usage-tab"
+                aria-controls="usage-panel"
+                disabled={!view}
+              >
+                <Icon name="usage" />
+                使用量
+              </TabsTrigger>
             </TabsList>
             <div className="session-panels">
+              <TabsContent
+                value="usage"
+                forceMount
+                id="usage-panel"
+                aria-labelledby="usage-tab"
+                aria-hidden={tab !== "usage"}
+                inert={tab !== "usage"}
+                className="session-panel"
+                tabIndex={0}
+              >
+                {view && <SessionUsage usage={view.usage} />}
+              </TabsContent>
               <TabsContent
                 value="files"
                 forceMount

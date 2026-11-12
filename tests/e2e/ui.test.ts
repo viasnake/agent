@@ -207,6 +207,33 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       await page.screenshot({
         path: `test-results/session-files-${colorScheme}.png`,
       });
+      await page.getByRole("tab", { name: "使用量", exact: true }).click();
+      await page.locator("#usage-panel .usage-table tbody tr").waitFor();
+      await assertReadable(
+        page.locator(
+          "#usage-panel dt, #usage-panel dd, #usage-panel th, #usage-panel td, #usage-panel p",
+        ),
+      );
+      await page.screenshot({
+        path: `test-results/session-usage-${colorScheme}.png`,
+      });
+      await page.setViewportSize({ width: 390, height: 844 });
+      assert.equal(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth > innerWidth,
+        ),
+        false,
+      );
+      assert.equal(
+        await page
+          .locator("#usage-panel .table-responsive")
+          .evaluate((node) => node.scrollWidth > node.clientWidth),
+        true,
+      );
+      await page.screenshot({
+        path: `test-results/session-usage-mobile-${colorScheme}.png`,
+      });
+      await page.setViewportSize({ width: 1440, height: 1000 });
       await page.getByRole("tab", { name: "会話", exact: true }).click();
       await assertReadable(
         page.locator(

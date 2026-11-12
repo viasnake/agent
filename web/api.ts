@@ -1,3 +1,5 @@
+import type { ConversationUsage } from "../src/usage.js";
+
 export type Message = {
   role: string;
   content: string;
@@ -25,6 +27,7 @@ export type Conversation = {
 export type View = {
   conversation: Conversation;
   transcript: Entry[];
+  usage: ConversationUsage;
   cursor: unknown;
   modelConfigured: boolean;
   pendingInputs: number;

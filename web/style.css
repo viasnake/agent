@@ -279,8 +279,42 @@ button {
   min-height: 0;
   min-width: 0;
 }
-#files-panel {
+#files-panel,
+#usage-panel {
   overflow: auto;
+}
+.session-usage {
+  padding: 24px;
+}
+.usage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px 48px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-summary dt {
+  font-size: 13px;
+  color: var(--bs-fg-2);
+  font-weight: 500;
+}
+.usage-summary dd {
+  margin: 4px 0 0;
+  font-size: 24px;
+}
+.usage-table {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-table th,
+.usage-table td {
+  text-align: right;
+  white-space: nowrap;
+}
+.usage-table th:first-child {
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 160px;
 }
 #actions {
   display: flex;
