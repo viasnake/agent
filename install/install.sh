@@ -8,9 +8,8 @@ usage() {
   cat <<'EOF'
 Usage: bash install/install.sh [options]
   --data-dir PATH     Persistent data directory (default: /srv/agent-data)
-  --listen IP         Listen address (default: 127.0.0.1)
+  --listen IP         Listen address (default: 0.0.0.0)
   --origin URL        Exact loopback browser origin; repeat as needed
-  --trusted-peer IP   Explicit forwarding peer; repeat as needed
   --update            Update a stopped installation, preserving settings and data
   --build-only        Download runtimes and build without sudo or installation
   -h, --help          Show this help without downloading or changing anything
@@ -29,7 +28,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     --build-only) build_only=1; shift ;;
     --update) update=1; install_args+=("$1"); shift ;;
-    --data-dir|--listen|--origin|--trusted-peer)
+    --data-dir|--listen|--origin)
       if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
         echo "Missing value for $1" >&2
         exit 64

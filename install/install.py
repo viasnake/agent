@@ -159,8 +159,6 @@ def require_host():
 def install(args):
     require_host()
     inactive()
-    if len(args.trusted_peer or []) > 16:
-        raise RuntimeError("At most 16 forwarding peers are supported")
     source, node, python = (
         Path(args.source).resolve(strict=True),
         Path(args.node).resolve(strict=True),
@@ -198,7 +196,7 @@ def install(args):
     record = None
     if args.update:
         record = check(load_record())
-        if args.data_dir or args.listen or args.origin or args.trusted_peer:
+        if args.data_dir or args.listen or args.origin:
             raise RuntimeError(
                 "Update preserves installation settings; edit config.yaml separately"
             )
@@ -337,11 +335,10 @@ def install(args):
             "schemaVersion": 2,
             "dataRoot": str(root),
             "server": {
-                "host": args.listen or "127.0.0.1",
+                "host": args.listen or "0.0.0.0",
                 "port": 8080,
                 "origins": args.origin
                 or ["http://127.0.0.1:8080", "http://localhost:8080"],
-                "trustedPeers": args.trusted_peer or [],
             },
             "model": None,
             "mcp": [],
@@ -386,18 +383,12 @@ if __name__ == "__main__":
         "--data-dir",
         help="directory on mounted persistent storage (default: /srv/agent-data)",
     )
-    parser.add_argument("--listen", type=address, help="listen IP (default: 127.0.0.1)")
+    parser.add_argument("--listen", type=address, help="listen IP (default: 0.0.0.0)")
     parser.add_argument(
         "--origin",
         type=origin,
         action="append",
         help="exact browser origin; repeat for multiple origins",
-    )
-    parser.add_argument(
-        "--trusted-peer",
-        type=address,
-        action="append",
-        help="explicitly trusted forwarding peer IP; repeat as needed",
     )
     parser.add_argument(
         "--update",

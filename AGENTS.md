@@ -250,11 +250,12 @@ Vertex ADC and AWS credential chains are explicit control-side authentication
 choices; never pass their files or environment to the worker.
 
 There is no UI password or login screen. Establish a
-CSRF session automatically for local browsers. Keep socket-peer, loopback Host,
-Origin, Fetch Metadata and CSRF checks; never trust forwarded headers. Listen
-on loopback by default. Forwarding peers require explicit exact-IP grants in
-server.trustedPeers; never discover or trust a LAN automatically. Browser origins
-remain exact configured loopback URLs. Forwarding itself is outside Agent.
+CSRF session automatically for local browsers. Keep loopback Host, Origin,
+Fetch Metadata and CSRF checks; never trust forwarded headers. Listen on 0.0.0.0
+by default for VM port forwarding without filtering socket-peer IPs. The VM network
+and host-loopback forwarding provide the network access boundary; do not expose
+the unauthenticated service directly to other networks. Browser origins remain
+exact configured loopback URLs. Forwarding itself is outside Agent.
 Keep the control HTTP port outside work-side preview ports 3000-3999 and retain
 worker egress restrictions. Model API credentials remain control-only. Preserve
 legacy UI password files without reading, migrating or deleting them.

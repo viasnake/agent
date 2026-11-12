@@ -305,7 +305,7 @@ class Installation(unittest.TestCase):
             check=True,
         )
         self.assertIn("--update", result.stdout)
-        self.assertIn("--trusted-peer", result.stdout)
+        self.assertIn("--listen", result.stdout)
         self.assertIn("--build-only", result.stdout)
 
     def test_invalid_setup_arguments_do_not_download_or_request_sudo(self):
@@ -501,7 +501,6 @@ download_runtime https://example.test/runtime "$2" "$3"
                 data_dir=str(data),
                 listen=None,
                 origin=None,
-                trusted_peer=None,
             )
             for path in [
                 paths["APP"], paths["NODE"] / "data",
@@ -520,7 +519,7 @@ download_runtime https://example.test/runtime "$2" "$3"
             self.assertEqual((data / "control").stat().st_mode & 0o777, 0o700)
             config_path = paths["ETC"] / "config.yaml"
             config = config_path.read_bytes()
-            self.assertEqual(json.loads(config)["server"]["trustedPeers"], [])
+            self.assertEqual(json.loads(config)["server"]["host"], "0.0.0.0")
             retained = {
                 data / "control/settings-v1.json": b"fixture private settings",
                 data / "control/conversations-v1.sqlite": b"fixture database",
