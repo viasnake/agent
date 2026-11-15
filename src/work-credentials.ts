@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { AppError } from "./security.js";
 
-// These belong to the fixed launcher, not to a session's credential selection.
+// These variables belong to the fixed launcher, not to configured work credentials.
 const reserved = new Set([
   "PATH",
   "HOME",
@@ -72,30 +72,15 @@ export type WorkCredential =
       privateKey: string;
       publicKey: string;
     };
-export const credentialIds = z
-  .array(z.string().uuid())
-  .max(32)
-  .refine((ids) => new Set(ids).size === ids.length, "Duplicate credential");
-
-export function selectCredentials(
-  credentials: WorkCredential[],
-  ids: string[],
-) {
-  credentialIds.parse(ids);
+export function sharedCredentials(credentials: WorkCredential[]) {
   const env: Record<string, string> = Object.create(null);
   const keys: string[] = [];
-  for (const id of ids) {
-    const credential = credentials.find((c) => c.id === id);
-    if (!credential)
-      throw new AppError(409, "クレデンシャルを選び直してください");
+  for (const credential of credentials) {
     if (credential.kind === "ssh") keys.push(credential.privateKey);
     else
       for (const [name, value] of Object.entries(credential.env)) {
         if (Object.hasOwn(env, name))
-          throw new AppError(
-            409,
-            "選択したクレデンシャルの環境変数名が重複しています",
-          );
+          throw new AppError(409, "クレデンシャルの環境変数名が重複しています");
         env[name] = value;
       }
   }

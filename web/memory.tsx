@@ -9,8 +9,10 @@ export type MemorySource = NonNullable<MemoryNote["source"]>;
 export function MemoryNotes({
   initial = {},
   onSelect,
+  onDirtyChange,
 }: {
   initial?: MemoryDraft;
+  onDirtyChange?: (dirty: boolean) => void;
   onSelect: (source: MemorySource) => Promise<void>;
 }) {
   const [notes, setNotes] = useState<MemoryNote[]>([]);
@@ -21,6 +23,9 @@ export function MemoryNotes({
   const [loading, setLoading] = useState(false);
   const [acting, setActing] = useState(false);
   const busy = loading || acting;
+  useEffect(() => {
+    onDirtyChange?.(creating || !!editing);
+  }, [creating, editing, onDirtyChange]);
   const [error, setError] = useState("");
   const [version, setVersion] = useState(0);
   const request = useRef(0);
@@ -73,6 +78,7 @@ export function MemoryNotes({
     <section className="memory-content" aria-label="記憶">
       {creating || editing ? (
         <form
+          className="settings-card"
           onSubmit={async (event) => {
             event.preventDefault();
             if (busy || !text.trim()) return;

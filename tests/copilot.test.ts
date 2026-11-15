@@ -19,7 +19,7 @@ function edit(f: Awaited<ReturnType<typeof fixture>>) {
   return settingsInput.parse({
     ...value,
     models: value.models.map(
-      ({ hasKey: _, authorized: __, status: ___, ...m }) => m,
+      ({ hasKey: _, authorized: __, status: ___, oauth: ____, ...m }) => m,
     ),
   });
 }
@@ -272,10 +272,9 @@ test("Copilot SDK device login, account models, rotation, restart and ordinary t
     assert.deepEqual(dispatched, [first, first, second]);
     const view = await f.service.view(conversation.id);
     assert.match(JSON.stringify(view.transcript), /Copilot fixture OK/);
+    assert.ok(!JSON.stringify([view, options]).includes("private-"));
     assert.ok(
-      !JSON.stringify([view, options, f.service.management()]).includes(
-        "private-",
-      ),
+      JSON.stringify(f.service.management()).includes("private-copilot-secret"),
     );
     // The connection test must pick an allowed model, not the first bundled model.
     let config = f.service.settings.snapshot().models[0]!;
@@ -471,7 +470,12 @@ test("Copilot test failures classify SDK errors without leaking provider respons
         const result = await f.service.testModel(id);
         assert.equal(result.models[0]!.status, failure.expected);
         assert.equal(requests, before + 1, "never retry a rejected inference");
-        assert.ok(!JSON.stringify(result).includes("private-"));
+        assert.ok(
+          !JSON.stringify(result.models.map((m) => m.status)).includes(
+            "private-",
+          ),
+        );
+        assert.ok(JSON.stringify(result).includes("private-copilot-secret"));
       }
     }
   } finally {

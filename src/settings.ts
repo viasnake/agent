@@ -24,6 +24,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 import {
+  sharedCredentials,
   workCredentialInput,
   workEnvironment,
   type WorkCredential,
@@ -366,30 +367,19 @@ export class SettingsStore {
     return {
       ...s,
       schemaVersion: undefined,
-      workCredentials: s.workCredentials.map((c) =>
-        c.kind === "env"
-          ? {
-              id: c.id,
-              name: c.name,
-              kind: c.kind,
-              envNames: Object.keys(c.env),
-            }
-          : { id: c.id, name: c.name, kind: c.kind, publicKey: c.publicKey },
-      ),
-      models: s.models.map(({ key, oauth, authVersion: _, ...m }) => ({
+      workCredentials: s.workCredentials,
+      models: s.models.map(({ authVersion: _, ...m }) => ({
         ...m,
-        hasKey: !!key,
-        authorized: !!oauth,
+        hasKey: !!m.key,
+        authorized: !!m.oauth,
       })),
-      mcp: s.mcp.map(
-        ({ env, bearer, clientSecret, oauth, authVersion: _, ...m }) => ({
-          ...m,
-          envNames: Object.keys(env ?? {}),
-          hasBearer: !!bearer,
-          hasClientSecret: !!clientSecret,
-          authorized: !!oauth?.tokens,
-        }),
-      ),
+      mcp: s.mcp.map(({ authVersion: _, ...m }) => ({
+        ...m,
+        envNames: Object.keys(m.env ?? {}),
+        hasBearer: !!m.bearer,
+        hasClientSecret: !!m.clientSecret,
+        authorized: !!m.oauth?.tokens,
+      })),
     };
   }
   secrets(): string[] {
@@ -555,6 +545,7 @@ export class SettingsStore {
           };
         }),
       };
+      sharedCredentials(next.workCredentials);
       await this.write(next);
       this.value = next;
     });

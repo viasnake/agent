@@ -396,8 +396,17 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     assert.equal(await page.locator("#sidebar").isVisible(), false);
     await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await context.clearCookies();
+    const renewed = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/session" &&
+        response.status() === 200,
+    );
     await page.getByRole("button", { name: "更新", exact: true }).click();
-    await page.getByRole("button", { name: "再接続", exact: true }).click();
+    await renewed;
+    assert.equal(
+      await page.getByRole("button", { name: "再接続", exact: true }).count(),
+      0,
+    );
     await page.getByRole("link", { name: /note.md/ }).waitFor();
     assert.equal((await f.service.list()).length, 1);
     assert.equal((await f.service.conversation(id)).status, "idle");

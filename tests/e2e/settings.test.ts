@@ -15,7 +15,7 @@ async function saveSettings(page: Page) {
       response.request().method() === "PUT" &&
       new URL(response.url()).pathname === "/api/settings",
   );
-  await page.getByRole("button", { name: "保存", exact: true }).click();
+  await page.getByRole("button", { name: "設定を保存", exact: true }).click();
   assert.equal((await response).status(), 200);
   await page
     .locator(".notification")
@@ -116,6 +116,31 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await page.getByRole("button", { name: "設定", exact: true }).click();
     assert.equal(await page.locator(".brand").count(), 0);
     await page.getByRole("button", { name: "接続を追加", exact: true }).click();
+    for (const width of [1600, 1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      const boxes = await page
+        .locator(
+          ".settings-section-heading, .settings-fields, .settings-footer-content",
+        )
+        .evaluateAll((nodes) =>
+          nodes.map((node) => {
+            const { x, width } = node.getBoundingClientRect();
+            return { x, width };
+          }),
+        );
+      assert.equal(boxes.length, 3);
+      for (const box of boxes.slice(1)) {
+        assert.ok(
+          Math.abs(box.x - boxes[0]!.x) < 1,
+          `Left edges must align at ${width}px`,
+        );
+        assert.ok(
+          Math.abs(box.width - boxes[0]!.width) < 1,
+          `Content widths must match at ${width}px`,
+        );
+      }
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
     assert.equal(
       await page.getByRole("button", { name: "設定するモデル" }).count(),
       0,
@@ -127,7 +152,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     await saveSettings(page);
     assert.equal(
       await page.getByLabel("API キー", { exact: true }).inputValue(),
-      "••••••••",
+      "browser-dummy-key",
     );
     await page.getByLabel("API キー", { exact: true }).fill("");
     await saveSettings(page);
@@ -179,8 +204,16 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     assert.ok(toast && toast.x > 800 && toast.y > 700);
     await page.getByRole("button", { name: "通知を閉じる" }).click();
     await page.locator(".notification").waitFor({ state: "hidden" });
-    assert.ok(!(await page.content()).includes("browser-access-secret"));
-    assert.ok(!(await page.content()).includes("browser-refresh-secret"));
+    assert.ok(
+      (await page.getByLabel("モデル OAuth 認証情報").inputValue()).includes(
+        "browser-access-secret",
+      ),
+    );
+    assert.ok(
+      (await page.getByLabel("モデル OAuth 認証情報").inputValue()).includes(
+        "browser-refresh-secret",
+      ),
+    );
     await mkdir("test-results", { recursive: true });
     await assertDropdowns(page);
     await page.screenshot({
@@ -189,6 +222,14 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     });
     await page.emulateMedia({ colorScheme: "dark" });
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(() => {
+      const nav = document.querySelector(".settings-navigation")!;
+      const active = nav
+        .querySelector('[aria-pressed="true"]')!
+        .getBoundingClientRect();
+      const bounds = nav.getBoundingClientRect();
+      return active.left >= bounds.left && active.right <= bounds.right;
+    });
     assert.equal(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -275,7 +316,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     );
     assert.equal(
       await page.getByLabel("環境変数の値 1", { exact: true }).inputValue(),
-      "••••••••",
+      "browser-stdio-secret",
     );
     await page
       .getByRole("button", { name: "環境変数を追加", exact: true })
@@ -309,6 +350,55 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .fill("Keep replies short.");
     await page.getByLabel("モデル呼び出し上限").fill("5");
     await saveSettings(page);
+    await page
+      .getByLabel("共通指示", { exact: true })
+      .fill("Keep replies concise.");
+    await page.getByRole("button", { name: "記憶", exact: true }).click();
+    const memory = page.getByRole("region", { name: "記憶", exact: true });
+    await memory.getByRole("button", { name: "記憶を追加" }).click();
+    await memory.getByLabel("記憶の内容").fill("Unsubmitted memory draft");
+    await saveSettings(page);
+    assert.equal(f.service.management().instructions, "Keep replies concise.");
+    assert.equal(
+      await memory.getByLabel("記憶の内容").inputValue(),
+      "Unsubmitted memory draft",
+    );
+    await page.getByRole("button", { name: "Agent 設定", exact: true }).click();
+    page.once("dialog", (dialog) => void dialog.dismiss());
+    await page
+      .getByRole("button", { name: "セッションに戻る", exact: true })
+      .click();
+    await page.getByRole("button", { name: "記憶", exact: true }).click();
+    assert.equal(
+      await memory.getByLabel("記憶の内容").inputValue(),
+      "Unsubmitted memory draft",
+    );
+    await memory
+      .getByRole("button", { name: "キャンセル", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Agent 設定", exact: true }).click();
+    await page.getByLabel("共通指示", { exact: true }).fill("Unsaved settings");
+    page.once("dialog", (dialog) => void dialog.dismiss());
+    await page
+      .getByRole("button", { name: "新しいセッション", exact: true })
+      .click();
+    assert.equal(
+      await page.getByLabel("共通指示", { exact: true }).inputValue(),
+      "Unsaved settings",
+    );
+    page.once("dialog", (dialog) => void dialog.dismiss());
+    await page.getByRole("button", { name: "変更を破棄", exact: true }).click();
+    assert.equal(
+      await page.getByLabel("共通指示", { exact: true }).inputValue(),
+      "Unsaved settings",
+    );
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.getByRole("button", { name: "変更を破棄", exact: true }).click();
+    await page.waitForFunction(
+      () =>
+        (document.querySelector("textarea") as HTMLTextAreaElement)?.value ===
+        "Keep replies concise.",
+    );
     await mkdir("test-results", { recursive: true });
     await page.screenshot({ path: "test-results/settings-light.png" });
     await page.emulateMedia({ colorScheme: "dark" });
@@ -321,6 +411,16 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       true,
     );
     await page.screenshot({ path: "test-results/settings-mobile.png" });
+    await page
+      .getByRole("button", { name: "セッション一覧を開く", exact: true })
+      .click();
+    await page.locator(".sidebar-close").click();
+    assert.equal(
+      await page
+        .getByRole("heading", { name: "Agent 設定", exact: true })
+        .isVisible(),
+      true,
+    );
     const mcp = f.service.management().mcp[0]!;
     f.faux.setResponses([
       call(mcpToolName(mcp.id, "greet"), { name: "Browser" }),
@@ -395,9 +495,14 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .waitFor();
     await page.getByText("完了しました", { exact: true }).waitFor();
 
-    assert.equal(f.service.management().instructions, "Keep replies short.");
+    assert.equal(f.service.management().instructions, "Keep replies concise.");
     assert.equal(f.service.management().pending, false);
     assert.deepEqual(errors, []);
+  } catch (error) {
+    await mkdir("test-results", { recursive: true });
+    await page.screenshot({ path: "test-results/settings-failure.png" });
+    console.error("Browser errors:", errors);
+    throw error;
   } finally {
     await browser.close();
     await server.close();

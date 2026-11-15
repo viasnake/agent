@@ -16,7 +16,7 @@ function edit(f: Awaited<ReturnType<typeof fixture>>) {
   return settingsInput.parse({
     ...value,
     models: value.models.map(
-      ({ hasKey: _, authorized: __, status: ___, ...m }) => m,
+      ({ hasKey: _, authorized: __, status: ___, oauth: ____, ...m }) => m,
     ),
     mcp: [],
   });
@@ -135,13 +135,19 @@ test("connection tests use the real provider model independently of the injected
       );
       if (auth === "oauth")
         assert.equal(request.body.max_output_tokens, undefined);
-      assert.ok(!JSON.stringify(result).includes("fixture-oauth"));
-      assert.ok(!JSON.stringify(result).includes("sk-fixture"));
+      assert.equal(
+        result.models[0]!.oauth?.access,
+        auth === "oauth" ? "fixture-oauth-access" : undefined,
+      );
+      assert.equal(
+        result.models[0]!.key,
+        auth === "api_key" ? "sk-fixture-api-key" : undefined,
+      );
       reject = true;
       const failed = await f.service.testModel(id);
       assert.equal(failed.models[0]!.status, "接続失敗（HTTP 401）");
-      assert.ok(!JSON.stringify(failed).includes("fixture-oauth"));
-      assert.ok(!JSON.stringify(failed).includes("sk-fixture"));
+      assert.ok(!failed.models[0]!.status.includes("fixture-oauth"));
+      assert.ok(!failed.models[0]!.status.includes("sk-fixture"));
       assert.equal(
         requests.length,
         before + 2,
@@ -173,7 +179,7 @@ test("connection tests use the real provider model independently of the injected
         streamFailure = "subscription_sharing_usage_limit_exceeded";
         const limited = await f.service.testModel(id);
         assert.equal(limited.models[0]!.status, "利用上限");
-        assert.ok(!JSON.stringify(limited).includes("fixture-oauth"));
+        assert.ok(!limited.models[0]!.status.includes("fixture-oauth"));
         streamFailure = "";
       }
     }
@@ -420,17 +426,10 @@ test("OpenAI SDK OAuth: browser ownership, PKCE, refresh, restart, disconnect an
     assert.equal(a?.auth.apiKey, "fixture-access-2");
     assert.deepEqual(a, b);
     const projection = JSON.stringify(f.service.management());
-    for (const secret of [
-      "fixture-access-1",
-      "fixture-access-2",
-      "fixture-refresh-1",
-      "fixture-refresh-2",
-    ])
-      assert.ok(!projection.includes(secret));
-    assert.equal(
-      f.service.redact("fixture-access-1 fixture-access-2 fixture-refresh-2"),
-      "[REDACTED] [REDACTED] [REDACTED]",
-    );
+    assert.ok(projection.includes("fixture-access-2"));
+    assert.ok(projection.includes("fixture-refresh-2"));
+    assert.ok(!projection.includes("fixture-access-1"));
+    assert.ok(!projection.includes("fixture-refresh-1"));
     const path = join(f.root, "control/settings-v1.json");
     assert.equal((await stat(path)).mode & 0o777, 0o600);
     assert.match(await readFile(path, "utf8"), /fixture-refresh-2/);

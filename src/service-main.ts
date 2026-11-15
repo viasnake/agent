@@ -24,7 +24,7 @@ process.on("SIGINT", () => {
   void stop().catch(() => process.exit(1));
 });
 await server.listen({ host: config.server.host, port: config.server.port });
-service.harness.closed
+service.closed
   .then(() => {
     if (!stopping) void stop().finally(() => process.exit(1));
   })

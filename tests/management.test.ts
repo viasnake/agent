@@ -58,7 +58,7 @@ async function http(service: Awaited<ReturnType<typeof fixture>>["service"]) {
   headers["x-csrf-token"] = session.json().csrf;
   return { app, headers };
 }
-test("Web settings protect secrets, require CSRF, preserve history, persist restart and apply only at the next run", async () => {
+test("Web settings display registered credentials, require CSRF, preserve history, persist restart and apply only at the next run", async () => {
   let tested = 0;
   let f = await fixture(
     [call("bash", { command: "sleep 1; printf done" }), answer("first")],
@@ -110,7 +110,7 @@ test("Web settings protect secrets, require CSRF, preserve history, persist rest
     });
     assert.equal(saved.statusCode, 200);
     assert.equal(saved.json().pending, true);
-    assert.ok(!saved.body.includes("dummy-model-key"));
+    assert.ok(saved.body.includes("dummy-model-key"));
     assert.equal(f.config.limits.modelRequests, 60);
     assert.equal((await f.service.conversation(id)).requests, before.requests);
     assert.equal(
@@ -203,7 +203,7 @@ test("model connections save without a model and invalid settings identify the f
     const saved = await save(settings);
     assert.equal(saved.statusCode, 200);
     assert.equal(saved.json().models[0].name, "Personal");
-    assert.ok(!saved.body.includes("dummy-private-key"));
+    assert.ok(saved.body.includes("dummy-private-key"));
     const current = input(f.service);
     for (const [patch, expected] of [
       [{ name: "x".repeat(101) }, "接続名は100文字以内です"],
@@ -296,7 +296,7 @@ test("stdio registration via HTTP, failed MCP isolation and safe disable/delete 
       payload: s,
     });
     assert.equal(saved.statusCode, 200);
-    assert.ok(!saved.body.includes("delegated-test-secret"));
+    assert.ok(saved.body.includes("delegated-test-secret"));
     const tested = await app.inject({
       method: "POST",
       url: `/api/settings/mcp/${id}/test`,
@@ -408,7 +408,7 @@ test("Streamable HTTP supports unauthenticated and Bearer tools without persisti
     assert.match(history, /Remote hello/);
     assert.ok(!history.includes("fixture-bearer"));
     assert.ok(
-      !JSON.stringify(f.service.management()).includes("fixture-bearer"),
+      JSON.stringify(f.service.management()).includes("fixture-bearer"),
     );
   } finally {
     await f.service.close();
@@ -473,8 +473,7 @@ test("OAuth uses PKCE and browser-bound one-time state, refreshes, reauthenticat
       (await f.service.testMcp(server.id)).mcp[0]!.status.state,
       "ready",
     );
-    for (const secret of remote.secrets())
-      assert.ok(!JSON.stringify(f.service.management()).includes(secret));
+    assert.ok(f.service.management().mcp[0]!.oauth?.tokens?.access_token);
     f.faux.setResponses([
       call(mcpToolName(server.id, "greet"), { name: "OAuth" }),
       answer("done"),

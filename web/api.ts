@@ -19,7 +19,6 @@ export type Conversation = {
   detail: string;
   updatedAt: number;
   modelConfigId?: string;
-  credentialIds?: string[];
   model?: string;
   parentId?: string;
   forkEntry?: number;
@@ -76,23 +75,47 @@ let csrf = "";
 export function setCsrf(value: string) {
   csrf = value;
 }
+let reconnecting: Promise<void> | undefined;
+async function reconnect() {
+  reconnecting ??= api<{ csrf: string }>("/api/session")
+    .then((session) => setCsrf(session.csrf))
+    .finally(() => {
+      reconnecting = undefined;
+    });
+  await reconnecting;
+}
 export async function api<T>(
   path: string,
   method = "GET",
   body?: unknown,
 ): Promise<T> {
-  const response = await fetch(path, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(method === "GET" ? {} : { "X-CSRF-Token": csrf }),
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  const value = await response.json();
-  if (!response.ok)
-    throw new ApiError(response.status, value.error ?? "操作に失敗しました");
-  return value as T;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const sentCsrf = csrf;
+    const response = await fetch(path, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(method === "GET" ? {} : { "X-CSRF-Token": sentCsrf }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const value = await response.json();
+    // Only this pre-handler rejection proves no mutation was admitted. Never
+    // replay transport failures or provider authentication errors automatically.
+    if (
+      attempt === 0 &&
+      path !== "/api/session" &&
+      response.status === 401 &&
+      value.code === "session_expired"
+    ) {
+      if (csrf === sentCsrf) await reconnect();
+      continue;
+    }
+    if (!response.ok)
+      throw new ApiError(response.status, value.error ?? "操作に失敗しました");
+    return value as T;
+  }
+  throw new Error("接続を更新できませんでした");
 }
 // Persist request identity, never message text or attachment contents. A lost response reuses the same ID.
 export async function requestId(key: string, body: unknown): Promise<string> {
@@ -189,11 +212,3 @@ export function modelChoices(options: ModelOptions) {
       })),
     );
 }
-
-export type CredentialOption = {
-  id: string;
-  name: string;
-  kind: "env" | "ssh";
-  envNames?: string[];
-  publicKey?: string;
-};

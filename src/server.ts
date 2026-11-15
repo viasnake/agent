@@ -1,4 +1,3 @@
-import { credentialIds } from "./work-credentials.js";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
@@ -132,7 +131,10 @@ export async function createServer(
       return;
     const session = sessions.get(request.cookies.agent_session ?? "");
     if (!session || session.expires < Date.now())
-      throw new AppError(401, "接続が切れました。再接続してください");
+      return reply.code(401).send({
+        code: "session_expired",
+        error: "接続が切れました。再接続してください",
+      });
     if (
       request.method !== "GET" &&
       request.method !== "HEAD" &&
@@ -348,7 +350,6 @@ export async function createServer(
         requestId,
         title: z.string().min(1).max(200),
         modelId: z.string().uuid().optional(),
-        credentialIds: credentialIds.default([]),
         model: z.string().min(1).max(200).optional(),
       })
       .strict()
@@ -361,7 +362,6 @@ export async function createServer(
           body.title,
           body.modelId,
           body.model,
-          body.credentialIds,
         ),
       );
   });
@@ -419,15 +419,6 @@ export async function createServer(
       }),
     );
   });
-  app.put("/api/conversations/:id/credentials", async (request) => {
-    const { id } = identifier.parse(request.params);
-    const body = z.object({ credentialIds }).strict().parse(request.body);
-    return safe(await service.selectCredentials(id, body.credentialIds));
-  });
-  app.get(
-    "/api/credential-options",
-    async () => service.management().workCredentials,
-  );
   app.put("/api/conversations/:id/model", async (request) => {
     const { id } = identifier.parse(request.params);
     const { modelId, model } = z

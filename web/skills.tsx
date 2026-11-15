@@ -16,7 +16,11 @@ function encode(bytes: Uint8Array) {
   return btoa(binary);
 }
 
-export function Skills() {
+export function Skills({
+  onDirtyChange,
+}: {
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const [view, setView] = useState<SkillsManagement>();
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -26,6 +30,9 @@ export function Skills() {
     editing?: SkillDetail;
     files: SkillImport["files"];
   }>();
+  useEffect(() => {
+    onDirtyChange?.(!!draft);
+  }, [draft, onDirtyChange]);
   const request = useRef(0);
   const opener = useRef<HTMLButtonElement | null>(null);
   const restoreFocus = useRef(false);
@@ -239,6 +246,7 @@ export function Skills() {
             SKILL.md
             <textarea
               className="form-control skill-source"
+              aria-label="SKILL.md"
               rows={12}
               maxLength={65536}
               value={draft.content}

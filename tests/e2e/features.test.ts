@@ -222,13 +222,44 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     await row(a.id).locator(".conversation-item").click();
     await page.getByText("保存済みの応答", { exact: true }).waitFor();
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
-    await page
-      .getByRole("button", { name: "セッション一覧を閉じる", exact: true })
-      .click();
-    assert.equal(await page.locator("#sidebar").isVisible(), false);
+    const sidebarFooter = page.locator(".sidebar-footer");
+    const collapse = sidebarFooter.getByRole("button", {
+      name: "セッション一覧を閉じる",
+      exact: true,
+    });
+    const settingsButton = sidebarFooter.getByRole("button", {
+      name: "設定",
+      exact: true,
+    });
+    const settingsBox = (await settingsButton.boundingBox())!;
+    const collapseBox = (await collapse.boundingBox())!;
+    assert.ok(collapseBox.x > settingsBox.x);
+    assert.ok(Math.abs(collapseBox.y - settingsBox.y) < 1);
+    await collapse.focus();
+    await page.keyboard.press("Enter");
+    const rail = (await page.locator("#sidebar").boundingBox())!;
+    assert.equal(rail.width, 64);
+    assert.equal(await page.locator("#conversations").isVisible(), false);
+    assert.equal(await page.locator("#new-conversation").isVisible(), true);
+    assert.equal(await settingsButton.isVisible(), true);
+    assert.equal(
+      await page
+        .locator(".sidebar-toggle")
+        .evaluate((node) => node === document.activeElement),
+      true,
+    );
+    await mkdir("test-results", { recursive: true });
+    await page.screenshot({ path: "test-results/sidebar-rail.png" });
+    await settingsButton.click();
+    await page.getByRole("heading", { name: "設定", exact: true }).waitFor();
     await page
       .getByRole("button", { name: "セッション一覧を開く", exact: true })
       .click();
+    assert.equal((await page.locator("#sidebar").boundingBox())!.width, 272);
+    await page
+      .getByRole("button", { name: "セッションに戻る", exact: true })
+      .click();
+    assert.equal(await page.locator("#message").inputValue(), "A の下書き");
 
     const filter = page.getByRole("searchbox", { name: "セッションを検索" });
     await filter.fill("セッション B");
