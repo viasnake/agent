@@ -22,6 +22,7 @@ import type { Runner } from "./execution/protocol.js";
 import type { State } from "./state.js";
 import type { Memory } from "./memory.js";
 import { hash } from "./security.js";
+import { worktreePlan } from "./execution/worktrees.js";
 
 const markerName = "session-deletion.json";
 const stagingName = "conversations-delete.sqlite";
@@ -36,12 +37,18 @@ async function syncDirectory(path: string) {
   }
 }
 
-export async function requestDeletion(control: string, id: string) {
+export async function requestDeletion(
+  control: string,
+  id: string,
+  worktrees?: z.infer<typeof worktreePlan>,
+) {
   z.string().uuid().parse(id);
   const temporary = join(control, `${markerName}.tmp`);
   const file = await open(temporary, "w", 0o600);
   try {
-    await file.writeFile(JSON.stringify({ id }));
+    await file.writeFile(
+      JSON.stringify({ id, ...(worktrees ? { worktrees } : {}) }),
+    );
     await file.sync();
   } finally {
     await file.close();
@@ -321,10 +328,11 @@ export async function finishDeletion(
     },
   );
   if (pending === undefined) return;
-  const { id } = z
-    .object({ id: z.string().uuid() })
+  const intent = z
+    .object({ id: z.string().uuid(), worktrees: worktreePlan.optional() })
     .strict()
     .parse(JSON.parse(pending));
+  const { id } = intent;
   const path = join(control, conversationDatabase);
   await stat(path); // Never create an empty replacement for a missing source.
   const staging = join(control, stagingName);
@@ -341,15 +349,22 @@ export async function finishDeletion(
     const cleaned = await runner.call(id, "cleanup", {});
     if (!cleaned.cleanup)
       throw new Error("Deletion requires confirmed worker cleanup");
-    const project = state.conversations.find((item) => item.id === id)?.project;
-    if (project) {
-      const result = await runner.call(id, "repositories", {
-        operation: "remove",
-        repositories: project.repositories,
-      });
-      if (result.data && JSON.parse(result.data).error)
-        throw new Error("Worktree removal failed");
-    }
+    const targets =
+      intent.worktrees ??
+      worktreePlan.parse(
+        JSON.parse(
+          (
+            await runner.call(id, "worktrees", {
+              operation: "plan",
+              legacyRepositories:
+                state.conversations.find((item) => item.id === id)?.project
+                  ?.repositories ?? [],
+            })
+          ).data ?? "null",
+        ),
+      );
+    if (!intent.worktrees) await requestDeletion(control, id, targets);
+    await runner.call(id, "worktrees", { operation: "remove", targets });
     await runner.call(id, "delete_workspace", {});
     for (const suffix of ["", "-wal", "-shm"])
       await rm(`${staging}${suffix}`, { force: true });

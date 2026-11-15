@@ -16,7 +16,7 @@ export const requestSchema = z
       "read_attachment",
       "cleanup",
       "delete_workspace",
-      "repositories",
+      "worktrees",
     ]),
     args: z.record(z.string(), z.unknown()),
   })

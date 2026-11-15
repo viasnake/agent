@@ -95,34 +95,35 @@ on it. No direct master push, shared-history rewriting, merge or release without
 explicit authorization. Do not commit credentials, machine state, dependencies,
 generated output or live provider responses.
 
-Project metadata lives in the session-scoped agent.projects Pi Document. Normalize
-GitHub-only identities server-side and revision-check edits/deletion. Snapshot the
-Project into Conversation in the same commit as session creation; existing sessions
-and forks never depend on the current Project definition. Metadata reads, CRUD,
-creation, forks and ordinary reopen must not run Git or inference.
+The work-owned dataRoot/work/shared directory is persistent shared storage for all
+sessions. Create and validate it when initializing work, and give the agent its
+absolute path in request instructions. Standard Pi read/write/edit/bash tools can
+use absolute paths; no shared-file API, repository registry, Project UI, snapshot,
+pre-dispatch Git preparation, fetch UI or automatic synchronization is needed.
+Clone missing repositories with ordinary Git only when work needs them, normally
+under shared/repos/<owner>/<repo>, and reuse existing checkouts and other shared
+files directly. Never fetch or pull automatically. Model/MCP credentials remain
+control-only and work credential delivery stays in the ordinary bash path.
 
-Project repositories share work-owned bare stores under work/repositories/github.com/
-and use independent linked worktrees under work/conversations/<id>/repos/<owner>/<repo>.
-All managed Git runs through the Worker and NodeExecutionEnv with argv arrays,
-bounded output/time, cancellation and temporary SSH signing sockets. Preparation and
-fetch reserve the single execution gate without holding the admission lock during
-Git. Never queue competing execution. Freeze registered work credentials at admission;
-only managed network Git and bash receive them, never read/write tools or model context.
+Sessions keep separate conversation history and local attachments/outputs. Shared
+files are live mutable files, not snapshots. Independent editing uses optional Git
+worktrees created with ordinary bash inside the session workspace. Forking creates
+no Git checkout and copies no session files. Existing work/home repositories,
+work/repositories bare stores, local branches and session changes stay untouched;
+never delete or convert them automatically. Existing Project Documents are inert
+stored data and remain preserved through public Storage copies. Existing session
+bindings are used only to locate old worktree registrations during deletion.
 
-Fetch only `refs/heads/*` into `refs/remotes/origin/*` using the binding URL, without
-rewriting origin, running hooks, following redirects or accepting URL rewrites.
-Publish verified initial bare stores from temporary directories. Resolve all starts
-and persist every baseCommit before adding any worktree on agent/<session-id>.
-Reuse validated worktrees, preserving changed HEAD, index, dirty and untracked files.
-Explicit fetch never updates worktree HEAD or files. Partial fetch results identify
-each repository; successful stores and starts survive retry. Branches inherit saved
-starts, not the source HEAD or uncommitted files; state this in execution context.
-
-Deletion recovery unregisters only validated target worktrees through Git before
-removing session files. Retain shared stores, local branches, commits, ProjectsDoc and
-surviving bindings through SQLite rebuild. Never globally prune registrations or run
-GC, remove shared Git data or migrate manual clones. Worktrees share refs, config and
-the work UID; they prevent accidental editing conflicts, not cross-session access.
+Session deletion plans worktree cleanup through the work UID while execution is
+idle. Discover session worktrees and registrations in shared, home and legacy bare
+stores using bounded local Git and filesystem reads. Persist the exact cleanup
+plan in the existing deletion intent before removing any worktree. On recovery,
+validate paths and Git registrations again, unregister only targets inside that
+session, then remove its files. Preserve shared storage, branches, commits and all
+other worktrees. Never globally prune registrations or run GC. A repository inside
+the deleted session must not own surviving worktrees outside it. Unsafe metadata,
+substituted paths, cleanup failure or discovery limits fail closed. Worktrees and
+shared files use the same work UID and provide no cross-session isolation.
 Downloads remain confined to attachments/ and outputs/. Repository files never
 activate Skills or grant authority. No sync service, search index or Git job system.
 
