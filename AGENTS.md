@@ -95,6 +95,37 @@ on it. No direct master push, shared-history rewriting, merge or release without
 explicit authorization. Do not commit credentials, machine state, dependencies,
 generated output or live provider responses.
 
+Project metadata lives in the session-scoped agent.projects Pi Document. Normalize
+GitHub-only identities server-side and revision-check edits/deletion. Snapshot the
+Project into Conversation in the same commit as session creation; existing sessions
+and forks never depend on the current Project definition. Metadata reads, CRUD,
+creation, forks and ordinary reopen must not run Git or inference.
+
+Project repositories share work-owned bare stores under work/repositories/github.com/
+and use independent linked worktrees under work/conversations/<id>/repos/<owner>/<repo>.
+All managed Git runs through the Worker and NodeExecutionEnv with argv arrays,
+bounded output/time, cancellation and temporary SSH signing sockets. Preparation and
+fetch reserve the single execution gate without holding the admission lock during
+Git. Never queue competing execution. Freeze registered work credentials at admission;
+only managed network Git and bash receive them, never read/write tools or model context.
+
+Fetch only `refs/heads/*` into `refs/remotes/origin/*` using the binding URL, without
+rewriting origin, running hooks, following redirects or accepting URL rewrites.
+Publish verified initial bare stores from temporary directories. Resolve all starts
+and persist every baseCommit before adding any worktree on agent/<session-id>.
+Reuse validated worktrees, preserving changed HEAD, index, dirty and untracked files.
+Explicit fetch never updates worktree HEAD or files. Partial fetch results identify
+each repository; successful stores and starts survive retry. Branches inherit saved
+starts, not the source HEAD or uncommitted files; state this in execution context.
+
+Deletion recovery unregisters only validated target worktrees through Git before
+removing session files. Retain shared stores, local branches, commits, ProjectsDoc and
+surviving bindings through SQLite rebuild. Never globally prune registrations or run
+GC, remove shared Git data or migrate manual clones. Worktrees share refs, config and
+the work UID; they prevent accidental editing conflicts, not cross-session access.
+Downloads remain confined to attachments/ and outputs/. Repository files never
+activate Skills or grant authority. No sync service, search index or Git job system.
+
 Shared Skills live only in dataRoot/skills, with control ownership, root-owned
 ancestors and read/execute access for work. Settings can import, edit SKILL.md and
 delete Skills only while all execution is idle, under the admission lock. Validate
@@ -185,7 +216,7 @@ MCP credentials remain control-only. UI visibility grants no additional authorit
 Work credentials are centrally managed in the private settings store. All sessions
 use all registered work environments and SSH signers without credential selection.
 Resolve and freeze values at idle admission; reject conflicting environment names
-and aggregate limits. Inject work environment values only into standard bash;
+and aggregate limits. Inject work environment values only into standard bash and managed network Git;
 these values are necessarily readable by work code. Never treat masking as an
 isolation boundary. Preserve unedited values server-side and revision-check edits.
 SSH imports use passphrase-free keys for automatic use. New entries can generate

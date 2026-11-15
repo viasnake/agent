@@ -145,6 +145,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
           ["models", "モデル"],
           ["mcp", "MCP"],
           ["credentials", "クレデンシャル"],
+          ["projects", "プロジェクト"],
           ["skills", "Skills"],
           ["agent", "指示・制限"],
           ["memory", "記憶"],

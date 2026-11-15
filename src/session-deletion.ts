@@ -341,6 +341,15 @@ export async function finishDeletion(
     const cleaned = await runner.call(id, "cleanup", {});
     if (!cleaned.cleanup)
       throw new Error("Deletion requires confirmed worker cleanup");
+    const project = state.conversations.find((item) => item.id === id)?.project;
+    if (project) {
+      const result = await runner.call(id, "repositories", {
+        operation: "remove",
+        repositories: project.repositories,
+      });
+      if (result.data && JSON.parse(result.data).error)
+        throw new Error("Worktree removal failed");
+    }
     await runner.call(id, "delete_workspace", {});
     for (const suffix of ["", "-wal", "-shm"])
       await rm(`${staging}${suffix}`, { force: true });

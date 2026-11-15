@@ -1,3 +1,4 @@
+import { Repositories } from "./repositories.js";
 import { workEnvironment } from "../work-credentials.js";
 import { constants } from "node:fs";
 import {
@@ -339,6 +340,168 @@ export class Worker {
         throw new Error("Child cleanup was not confirmed");
     }
   }
+  private async repositories(
+    id: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<WorkerResult> {
+    const operation = z
+      .enum(["resolve", "checkout", "fetch", "remove"])
+      .parse(args.operation);
+    const seconds = z
+      .number()
+      .positive()
+      .max(300)
+      .parse(args.commandSeconds ?? 300);
+    const maxBytes = z
+      .number()
+      .int()
+      .positive()
+      .max(10485760)
+      .parse(args.commandBytes ?? 1048576);
+    const supplied = workEnvironment.parse(args.environment ?? {});
+    // Git control variables cannot override validated paths, transports or helpers.
+    const environment = {
+      ...this.env(),
+      ...Object.fromEntries(
+        Object.entries(supplied).filter(
+          ([key]) =>
+            !/^(GIT_|SSH_|GCM_|CURL_|HTTPS?_PROXY$|ALL_PROXY$|https?_proxy$|all_proxy$)/.test(
+              key,
+            ),
+        ),
+      ),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_ASKPASS: "/bin/false",
+      GIT_SSH_COMMAND:
+        "/usr/bin/ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o ProxyCommand=none",
+    };
+    if (args.sshSocket !== undefined)
+      Object.assign(environment, {
+        SSH_AUTH_SOCK: z
+          .string()
+          .regex(/^\/tmp\/agent-ssh-[A-Za-z0-9]+\/socket$/)
+          .parse(args.sshSocket),
+      });
+    const env = new NodeExecutionEnv({
+      cwd: this.options.root,
+      shellEnv: environment,
+    });
+    this.environments.add(env);
+    const context = withAbortSignal(
+      AbortSignal.any([signal, AbortSignal.timeout(seconds * 1000)]),
+      BACKGROUND_CONTEXT,
+    );
+    let bytes = 0;
+    const helperArgs: string[] = [];
+    const git = async (argv: string[], cwd: string) => {
+      let output = "";
+      const result = await env.exec(
+        [
+          "/usr/bin/git",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "protocol.allow=never",
+          "-c",
+          "protocol.https.allow=always",
+          "-c",
+          "protocol.ssh.allow=always",
+          "-c",
+          "http.followRedirects=false",
+          "-c",
+          "credential.interactive=false",
+          "-c",
+          "gc.auto=0",
+          ...helperArgs,
+          ...argv,
+        ],
+        {
+          cwd,
+          inheritEnv: false,
+          env: environment,
+          timeout: seconds,
+          onOutput: (text, _ctx, info) => {
+            bytes += Buffer.byteLength(text);
+            if (bytes > maxBytes) throw new Error("Git output limit reached");
+            if (info.stream === "stdout") output += text;
+          },
+        },
+        context,
+      );
+      if (!result.ok || result.value.exitCode !== 0)
+        throw new Error("Git operation failed");
+      return output;
+    };
+    const repositories = new Repositories(this.options.root, id, git);
+    try {
+      if (operation === "resolve" || operation === "fetch") {
+        const home = join(this.options.root, "home"),
+          config = join(home, ".gitconfig");
+        if ((await realpath(home)) !== home)
+          throw new Error("Work home was replaced");
+        const info = await lstat(config).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return undefined;
+            throw error;
+          },
+        );
+        if (info) {
+          if (!info.isFile() || info.nlink !== 1 || info.size > 65536)
+            throw new Error("Unsafe work Git configuration");
+          const entries = await git(
+            ["config", "--file", config, "--no-includes", "--null", "--list"],
+            this.options.root,
+          );
+          // Read only explicitly configured credential helpers, not global URL/SSH overrides.
+          for (const entry of entries.split("\0").filter(Boolean)) {
+            const separator = entry.indexOf("\n"),
+              key = entry.slice(0, separator),
+              value = entry.slice(separator + 1);
+            if (
+              key === "credential.helper" ||
+              key === "credential.https://github.com.helper"
+            )
+              helperArgs.push("-c", `${key}=${value}`);
+          }
+        }
+      }
+      if (operation === "resolve")
+        return {
+          data: JSON.stringify({
+            repositories: await repositories.resolve(args.repositories),
+          }),
+        };
+      if (operation === "fetch")
+        return {
+          data: JSON.stringify({
+            results: await repositories.update(args.repositories),
+          }),
+        };
+      if (operation === "checkout")
+        await repositories.checkout(args.repositories);
+      else await repositories.remove(args.repositories);
+      return {};
+    } catch (error) {
+      // Only locally classified errors leave the worker, never Git stderr or credential output.
+      return {
+        data: JSON.stringify({
+          error:
+            error instanceof Error &&
+            /^github\.com\/[a-z0-9-]+\/[a-z0-9_.-]+: /.test(error.message)
+              ? error.message
+              : "リポジトリ操作に失敗しました。パスと登録状態を確認してください",
+        }),
+      };
+    } finally {
+      await env.cleanup(BACKGROUND_CONTEXT);
+      this.environments.delete(env);
+      if (!(await this.cleanup()))
+        throw new Error("Git child cleanup was not confirmed");
+    }
+  }
   private async mcp(
     id: string,
     args: Record<string, unknown>,
@@ -441,6 +604,7 @@ export class Worker {
         mode: 0o700,
       });
     if (op === "cleanup") return { cleanup: await this.cleanup() };
+    if (op === "repositories") return this.repositories(id, args, signal);
     if (op === "mcp_list" || op === "mcp_call")
       return this.mcp(id, args, op === "mcp_call", signal);
     if (op === "init") {
@@ -508,7 +672,13 @@ export async function serveWorker(options: WorkerOptions): Promise<void> {
         }
         const request = requestSchema.parse(value),
           controller = new AbortController();
-        const tool = ["tool", "mcp_call", "mcp_list"].includes(request.op);
+        const tool = [
+          "tool",
+          "mcp_call",
+          "mcp_list",
+          "repositories",
+          "delete_workspace",
+        ].includes(request.op);
         if (tool && activeTool) {
           reply({ id: request.id, ok: false, error: "Worker busy" });
           continue;
