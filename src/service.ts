@@ -132,6 +132,11 @@ export class AgentService {
   private closing = false;
   private reopening = false;
   private fatal = false;
+  private resolveClosed!: () => void;
+  // Service termination survives Harness replacement; fatal failures also settle it.
+  readonly closed = new Promise<void>((resolve) => {
+    this.resolveClosed = resolve;
+  });
   private readyModel = false;
   private modelId: string | null;
   private providerId: string;
@@ -184,10 +189,7 @@ export class AgentService {
           afterFailedRun: "keep",
         },
         onReport: (report) => {
-          if (report.kind === "storage_failed") {
-            this.fatal = true;
-            this.notify();
-          }
+          if (report.kind === "storage_failed") this.fail();
         },
       },
       ctx,
@@ -220,10 +222,8 @@ export class AgentService {
         await this.abortRetainingInput(await this.pi(conversation));
     const harness = this.harness;
     void harness.closed.then(() => {
-      if (!this.closing && !this.reopening && this.harness === harness) {
-        this.fatal = true;
-        this.notify();
-      }
+      if (!this.closing && !this.reopening && this.harness === harness)
+        this.fail();
     });
   }
   management() {
@@ -708,6 +708,12 @@ export class AgentService {
   healthy(): boolean {
     return !this.fatal && !this.closing && !this.reopening;
   }
+  private fail(): void {
+    if (this.fatal) return;
+    this.fatal = true;
+    this.resolveClosed();
+    this.notify();
+  }
   private assertHealthy(): void {
     if (!this.healthy())
       throw new AppError(
@@ -1007,7 +1013,7 @@ export class AgentService {
         await finishDeletion(control, this.runner);
         await this.openHarness();
       } catch {
-        this.fatal = true;
+        this.fail();
         throw new AppError(
           503,
           "削除が完了していません。サービスを再起動して削除状態を確認してください",
@@ -1064,7 +1070,7 @@ export class AgentService {
         try {
           await signer.close();
         } catch (error) {
-          this.fatal = true;
+          this.fail();
           throw error;
         } finally {
           this.signers.delete(signer);
@@ -1327,7 +1333,7 @@ export class AgentService {
           controller: new AbortController(),
           timer: setTimeout(() => {
             void this.stop(id, "実行時間の上限に達しました").catch(() => {
-              this.fatal = true;
+              this.fail();
             });
           }, this.config.limits.runSeconds * 1000),
         };
@@ -1375,8 +1381,7 @@ export class AgentService {
       if (starting) {
         const active = this.active!;
         this.monitor = this.monitorConversation(active, pi).catch(() => {
-          this.fatal = true;
-          this.notify();
+          this.fail();
         });
       }
       this.harness.resume();
@@ -1480,7 +1485,7 @@ export class AgentService {
       await this.abortRetainingInput(await this.pi(conversation));
       await this.runner.ready();
       if (!(await this.runner.call(id, "cleanup", {})).cleanup) {
-        this.fatal = true;
+        this.fail();
         throw new AppError(
           503,
           "子プロセスの停止を確認できません。サービスの再起動が必要です",
@@ -1805,15 +1810,22 @@ export class AgentService {
   }
   async close(): Promise<void> {
     if (this.closing) return;
-    if (this.active && !this.fatal) await this.stop(this.active.id);
-    this.closing = true;
-    this.active?.controller.abort();
-    for (const signer of this.signers) await signer.close();
-    await this.modelAuth.close();
-    if (this.active) clearTimeout(this.active.timer);
-    this.notify();
-    await this.harness.close(ctx);
-    await this.runner.close();
-    await this.monitor;
+    try {
+      if (this.active && !this.fatal) await this.stop(this.active.id);
+      this.closing = true;
+      this.active?.controller.abort();
+      for (const signer of this.signers) await signer.close();
+      await this.modelAuth.close();
+      if (this.active) clearTimeout(this.active.timer);
+      this.notify();
+      await this.harness.close(ctx);
+      await this.runner.close();
+      await this.monitor;
+    } catch (error) {
+      this.fail();
+      throw error;
+    } finally {
+      this.resolveClosed();
+    }
   }
 }

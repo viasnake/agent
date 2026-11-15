@@ -19,6 +19,33 @@ import { AgentDoc } from "@earendil-works/pi-durable";
 import { requestDeletion } from "../src/session-deletion.js";
 import type { WorkerRequest } from "../src/execution/protocol.js";
 
+test("service termination ignores deletion reopens and settles on normal close", async () => {
+  const f = await fixture([answer("still usable")]);
+  let closed = false;
+  void f.service.closed.then(() => {
+    closed = true;
+  });
+  try {
+    const target = await f.service.create(randomUUID(), "delete");
+    const survivor = await f.service.create(randomUUID(), "keep");
+    await f.service.deleteConversation(target.id);
+    assert.equal(f.service.healthy(), true);
+    assert.equal(closed, false);
+    await f.service.send(survivor.id, randomUUID(), "continue");
+    await until(
+      async () => (await f.service.conversation(survivor.id)).status === "idle",
+    );
+    assert.match(
+      JSON.stringify(await f.service.view(survivor.id)),
+      /still usable/,
+    );
+    assert.equal(closed, false);
+  } finally {
+    await f.service.close();
+  }
+  assert.equal(closed, true);
+});
+
 test("purge removes old titles, text, images, memories and all workspace files while preserving unrelated data", async () => {
   let f = await fixture([answer("deleted-answer-unique-marker")]);
   const creation = randomUUID();
@@ -251,6 +278,10 @@ test("a failed deletion fails closed and restart completes the durable intent wi
     runner: new FailingRunner(join(root, "work")),
   });
   const target = await f.service.create(randomUUID(), "delete on restart");
+  let closed = false;
+  void f.service.closed.then(() => {
+    closed = true;
+  });
   await f.service.upload(
     target.id,
     randomUUID(),
@@ -261,6 +292,7 @@ test("a failed deletion fails closed and restart completes the durable intent wi
     statusCode: 503,
   });
   assert.equal(f.service.healthy(), false);
+  assert.equal(closed, true, "deletion failure must reach the entry point");
   await assert.rejects(f.service.create(randomUUID(), "blocked"), {
     statusCode: 503,
   });
