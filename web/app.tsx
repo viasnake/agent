@@ -1,3 +1,5 @@
+import { ProjectSummary } from "./projects.js";
+import type { Project } from "../src/projects.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
 import { NotificationProvider, useNotify } from "./notifications.js";
@@ -226,7 +228,7 @@ function Chat({
                         .filter((tool) => tool.status !== "done")
                         .map((tool) => toolLabel(tool.name))
                         .join("・")}…`
-                    : "応答中"}
+                    : view.conversation.detail || "応答中"}
                 </div>
               )}
             </div>
@@ -397,6 +399,19 @@ function App() {
     null,
   );
   const [ready, setReady] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [draftProject, setDraftProject] = useState("");
+  useEffect(() => {
+    if (ready && !settingsOpen)
+      void api<{ projects: Project[] }>("/api/projects")
+        .then((r) => {
+          setProjects(r.projects);
+          setDraftProject((id) =>
+            r.projects.some((p) => p.id === id) ? id : "",
+          );
+        })
+        .catch(notice);
+  }, [ready, settingsOpen]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const selectedRef = useRef(selected);
@@ -646,6 +661,7 @@ function App() {
         const title = text.slice(0, 80);
         const choice = choices.find((m) => m.id === draftModel);
         const selection = {
+          ...(draftProject ? { projectId: draftProject } : {}),
           ...(choice
             ? { modelId: choice.connectionId, model: choice.model }
             : {}),
@@ -1069,6 +1085,20 @@ function App() {
             aria-hidden={settingsOpen}
             inert={settingsOpen}
           >
+            {view?.conversation.project && (
+              <ProjectSummary
+                key={view.conversation.id}
+                id={view.conversation.id}
+                project={view.conversation.project}
+                disabled={
+                  conversations.some(
+                    (c) => c.status === "running" || c.status === "stopping",
+                  ) ||
+                  currentStatus === "running" ||
+                  currentStatus === "stopping"
+                }
+              />
+            )}
             <header className="conversation-header">
               <button
                 className="mobile-only btn-text theme-secondary btn-sm"
@@ -1306,6 +1336,24 @@ function App() {
                       }}
                       modelPicker={
                         <>
+                          {!selected && (
+                            <select
+                              className="form-control form-control-sm project-picker"
+                              aria-label="プロジェクト"
+                              disabled={sending}
+                              value={draftProject}
+                              onChange={(event) =>
+                                setDraftProject(event.target.value)
+                              }
+                            >
+                              <option value="">プロジェクトなし</option>
+                              {projects.map((project) => (
+                                <option key={project.id} value={project.id}>
+                                  {project.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                           <ModelPicker
                             label="セッションのモデル"
                             compact

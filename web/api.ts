@@ -1,3 +1,4 @@
+import type { ProjectBinding } from "../src/projects.js";
 import type { ConversationUsage } from "../src/usage.js";
 
 export type Message = {
@@ -13,6 +14,7 @@ export type Message = {
 };
 export type Entry = { id: number; messages: Message[] };
 export type Conversation = {
+  project?: ProjectBinding;
   id: string;
   title: string;
   status: string;
