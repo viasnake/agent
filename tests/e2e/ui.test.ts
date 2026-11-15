@@ -114,6 +114,11 @@ test("real browser conversation: no category, attachments, response-loss retry, 
   });
   try {
     await page.goto(origin);
+    await page.locator("#message").waitFor();
+    assert.equal(
+      await page.getByText("以前の記録", { exact: true }).count(),
+      0,
+    );
     const bootstrap = await page.request.get(`${origin}/bootstrap.css`);
     assert.equal(bootstrap.status(), 200);
     assert.ok(
@@ -440,12 +445,14 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.locator("#new-conversation").click();
     await page.locator("#conversations button").first().click();
-    await page.locator("#earlier").waitFor();
+    await page.locator(".message").first().waitFor();
     assert.equal(
       await page.getByText("保存済みの履歴 0", { exact: true }).count(),
       0,
     );
-    await page.locator("#earlier").click();
+    await page.locator("#transcript").evaluate((node) => {
+      node.scrollTop = 0;
+    });
     await page.getByText("保存済みの履歴 0", { exact: true }).waitFor();
     f.faux.setResponses([answer("履歴の読み込み後も続けられます。")]);
     await page.locator("#message").fill("過去の履歴を読んで続けて");

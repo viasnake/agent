@@ -98,6 +98,7 @@ function Chat({
   const notify = useNotify();
   const viewport = useReadingPosition();
   const draftFailure = useRef(false);
+  const previousScrollTop = useRef(0);
   const messages = useMemo(
     () => threadMessages(entries, view),
     [entries, view],
@@ -173,6 +174,13 @@ function Chat({
             className="thread-viewport"
             id="transcript"
             aria-label="会話の履歴"
+            onScroll={(event) => {
+              const top = event.currentTarget.scrollTop;
+              const movingUp = top < previousScrollTop.current;
+              previousScrollTop.current = top;
+              if (movingUp && top <= 32 && cursor && !loading)
+                void runtime.thread.loadEarlier();
+            }}
           >
             <div className="thread-content">
               {loading && (
@@ -199,13 +207,6 @@ function Chat({
                   <h2>何を始めますか？</h2>
                 </div>
               )}
-              {/* Keep the load control and prepended messages on the same runtime update. */}
-              <ThreadPrimitive.LoadEarlier
-                id="earlier"
-                className="btn-text theme-secondary btn-sm mb-5"
-              >
-                以前の記録
-              </ThreadPrimitive.LoadEarlier>
               <ThreadPrimitive.Messages>
                 {({ message }) =>
                   message.role === "user" ? (
