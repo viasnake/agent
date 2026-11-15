@@ -278,6 +278,11 @@ Reject images for text-only models, including when replaying existing history.
 Vertex ADC and AWS credential chains are explicit control-side authentication
 choices; never pass their files or environment to the worker.
 
+A session-expired API response must identify rejection before route execution.
+The browser may reestablish its CSRF session and retry once only for this response;
+never automatically replay transport failures or provider authentication errors.
+Keep deletion confirmation to the session title and delete/cancel controls.
+
 There is no UI password or login screen. Establish a
 CSRF session automatically for local browsers. Keep loopback Host, Origin,
 Fetch Metadata and CSRF checks; never trust forwarded headers. Listen on 0.0.0.0

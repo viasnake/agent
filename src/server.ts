@@ -131,7 +131,10 @@ export async function createServer(
       return;
     const session = sessions.get(request.cookies.agent_session ?? "");
     if (!session || session.expires < Date.now())
-      throw new AppError(401, "接続が切れました。再接続してください");
+      return reply.code(401).send({
+        code: "session_expired",
+        error: "接続が切れました。再接続してください",
+      });
     if (
       request.method !== "GET" &&
       request.method !== "HEAD" &&

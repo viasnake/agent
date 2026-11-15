@@ -342,12 +342,7 @@ function SessionDialog({
       >
         <h2 id={heading}>{deleting ? "セッションを削除" : "名前を変更"}</h2>
         {deleting ? (
-          <>
-            <p className="session-dialog-title">{action.session.title}</p>
-            <p>
-              履歴・添付・作業ファイルと、このセッションを出典とする記憶を削除します。元に戻せません。別セッションに分岐・引用した内容は残ります。
-            </p>
-          </>
+          <p className="session-dialog-title">{action.session.title}</p>
         ) : (
           <label className="form-label">
             セッション名
