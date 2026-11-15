@@ -7,7 +7,7 @@ import { mkdir } from "node:fs/promises";
 import { fixture, call, answer, until } from "../support.js";
 import { createServer } from "../../src/server.js";
 
-test("browser manages private environment values and persists session selection in light and dark themes", async () => {
+test("browser displays credentials and shares them with every session in light and dark themes", async () => {
   const f = await fixture([
     call("bash", { command: 'test -n "$GH_TOKEN" && echo configured' }),
     answer("完了"),
@@ -36,7 +36,7 @@ test("browser manages private environment values and persists session selection 
         r.request().method() === "PUT" &&
         new URL(r.url()).pathname === "/api/settings",
     );
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByRole("button", { name: "設定を保存", exact: true }).click();
     assert.equal((await response).status(), 200);
     await page
       .locator(".notification")
@@ -59,9 +59,14 @@ test("browser manages private environment values and persists session selection 
     await save();
     assert.equal(
       await page.getByLabel("環境変数の値 1", { exact: true }).inputValue(),
-      "",
+      "browser-private-pat",
     );
-    assert.ok(!(await page.content()).includes("browser-private-pat"));
+    assert.equal(
+      await page
+        .getByLabel("環境変数の値 1", { exact: true })
+        .getAttribute("type"),
+      "text",
+    );
     await page.getByLabel("名前", { exact: true }).fill("Git PAT");
     await save();
     const credential = f.service.settings.snapshot().workCredentials[0]!;
@@ -94,11 +99,11 @@ test("browser manages private environment values and persists session selection 
       ),
     );
     await save();
-    assert.equal(
+    assert.match(
       await sshCard
         .getByLabel("秘密鍵（パスフレーズなし）", { exact: true })
         .inputValue(),
-      "",
+      /BEGIN OPENSSH PRIVATE KEY/,
     );
     assert.match(
       await sshCard.getByLabel("公開鍵", { exact: true }).inputValue(),
@@ -134,17 +139,11 @@ test("browser manages private environment values and persists session selection 
       });
     }
     await page.getByRole("button", { name: "セッションに戻る" }).click();
-    await page
-      .getByRole("button", { name: "セッションのクレデンシャル" })
-      .click();
-    await page.getByRole("checkbox", { name: "Git PAT" }).check();
-    await page.getByRole("button", { name: "適用", exact: true }).click();
-    assert.equal(await page.getByRole("dialog").count(), 0);
     assert.equal(
       await page
         .getByRole("button", { name: "セッションのクレデンシャル" })
-        .evaluate((e) => e === document.activeElement),
-      true,
+        .count(),
+      0,
     );
     await page
       .getByRole("textbox", { name: "メッセージ", exact: true })
@@ -156,9 +155,7 @@ test("browser manages private environment values and persists session selection 
         (await f.service.list()).length === 1 &&
         (await f.service.list())[0]!.status === "idle",
     );
-    assert.deepEqual((await f.service.list())[0]!.credentialIds, [
-      credential.id,
-    ]);
+    assert.ok(!("credentialIds" in (await f.service.list())[0]!));
     assert.match(
       JSON.stringify(await f.service.view((await f.service.list())[0]!.id)),
       /configured/,
@@ -169,14 +166,12 @@ test("browser manages private environment values and persists session selection 
       .getByRole("button", { name: /確認してください/ })
       .first()
       .click();
-    await page
-      .getByRole("button", { name: "セッションのクレデンシャル" })
-      .click();
     assert.equal(
-      await page.getByRole("checkbox", { name: "Git PAT" }).isChecked(),
-      true,
+      await page
+        .getByRole("button", { name: "セッションのクレデンシャル" })
+        .count(),
+      0,
     );
-    await page.keyboard.press("Escape");
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: "test-results/credentials-mobile.png" });
     assert.equal(

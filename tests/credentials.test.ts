@@ -1,3 +1,8 @@
+import {
+  getCurrentTools,
+  fauxAssistantMessage,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, createHash } from "node:crypto";
@@ -10,9 +15,9 @@ import { createConnection } from "node:net";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { fixture, call, answer, until } from "./support.js";
 import { createServer } from "../src/server.js";
-import { settingsInput } from "../src/settings.js";
+import { connectionIdentity, settingsInput } from "../src/settings.js";
 import { openSshAgent, sshPublicKey } from "../src/ssh-agent.js";
-import { selectCredentials, workEnvironment } from "../src/work-credentials.js";
+import { sharedCredentials, workEnvironment } from "../src/work-credentials.js";
 
 const exec = promisify(execFile);
 function input(service: Awaited<ReturnType<typeof fixture>>["service"]) {
@@ -53,7 +58,7 @@ async function keyFixture() {
   };
 }
 
-test("credential settings keep values private, revision-check edits, and preserve omitted values across restart", async () => {
+test("credential settings expose registered values, revision-check edits, and preserve omitted values across restart", async () => {
   let f = await fixture();
   const key = await keyFixture(),
     envId = randomUUID(),
@@ -100,14 +105,14 @@ test("credential settings keep values private, revision-check edits, and preserv
       headers,
     });
     assert.equal(saved.statusCode, 200, saved.body);
-    assert.ok(!saved.body.includes("fixture-private-pat"));
-    assert.ok(!saved.body.includes("PRIVATE KEY"));
+    assert.ok(saved.body.includes("fixture-private-pat"));
+    assert.equal(saved.json().workCredentials[1].privateKey, key.key);
     assert.equal(saved.json().workCredentials[1].publicKey, key.publicKey);
     const publicResponse = await app.inject({
       url: "/api/credential-options",
       headers,
     });
-    assert.ok(!publicResponse.body.includes("fixture-private-pat"));
+    assert.equal(publicResponse.statusCode, 404);
     assert.equal(
       (
         await app.inject({
@@ -139,29 +144,19 @@ test("credential settings keep values private, revision-check edits, and preserv
       (await stat(join(f.root, "control/settings-v1.json"))).mode & 0o777,
       0o600,
     );
-    const { id } = await f.service.create(
-      randomUUID(),
-      "selected",
-      undefined,
-      undefined,
-      [envId, sshId],
-    );
+    const { id } = await f.service.create(randomUUID(), "selected");
     await app.close();
     await f.service.close();
     f = await fixture([], { root: f.root });
     app = await createServer(f.service);
-    assert.deepEqual((await f.service.conversation(id)).credentialIds, [
-      envId,
-      sshId,
-    ]);
+    assert.equal((await f.service.conversation(id)).id, id);
     assert.equal(f.service.settings.snapshot().workCredentials.length, 2);
     await f.service.saveSettings({ ...input(f.service), workCredentials: [] });
-    await assert.rejects(
-      f.service.send(id, randomUUID(), "start"),
-      /クレデンシャル/,
+    f.faux.setResponses([answer("without credentials")]);
+    await f.service.send(id, randomUUID(), "start");
+    await until(
+      async () => (await f.service.conversation(id)).status === "idle",
     );
-    await f.service.selectCredentials(id, []);
-    assert.deepEqual((await f.service.conversation(id)).credentialIds, []);
     assert.ok(
       !JSON.stringify(f.service.management()).includes("fixture-private-pat"),
     );
@@ -172,7 +167,7 @@ test("credential settings keep values private, revision-check edits, and preserv
   }
 });
 
-test("selected environment is frozen during a run, redacted before Pi storage, and absent from other sessions", async () => {
+test("shared environment is frozen during a run, redacted from history and available in all sessions", async () => {
   const f = await fixture([
     call("bash", {
       command:
@@ -195,13 +190,7 @@ test("selected environment is frozen during a run, redacted before Pi storage, a
         },
       ],
     });
-    const { id } = await f.service.create(
-      randomUUID(),
-      "selected",
-      undefined,
-      undefined,
-      [credentialId],
-    );
+    const { id } = await f.service.create(randomUUID(), "selected");
     await f.service.send(id, randomUUID(), "run");
     await until(async () =>
       access(join(f.root, "work/conversations", id, "outputs/started")).then(
@@ -209,7 +198,6 @@ test("selected environment is frozen during a run, redacted before Pi storage, a
         () => false,
       ),
     );
-    await assert.rejects(f.service.selectCredentials(id, []), /終わって/);
     await f.service.saveSettings({
       ...input(f.service),
       workCredentials: [
@@ -256,10 +244,10 @@ test("selected environment is frozen during a run, redacted before Pi storage, a
         createHash("sha256").update(second).digest("hex"),
       ),
     );
-    const other = await f.service.create(randomUUID(), "unselected");
+    const other = await f.service.create(randomUUID(), "shared");
     f.faux.setResponses([
       call("bash", {
-        command: 'test -z "${GH_TOKEN-}${SSH_AUTH_SOCK-}" && echo absent',
+        command: "printf '%s' \"$GH_TOKEN\"",
       }),
       answer("clean"),
     ]);
@@ -267,14 +255,20 @@ test("selected environment is frozen during a run, redacted before Pi storage, a
     await until(
       async () => (await f.service.conversation(other.id)).status === "idle",
     );
-    assert.match(JSON.stringify(await f.service.view(other.id)), /absent/);
+    assert.match(JSON.stringify(await f.service.view(other.id)), /REDACTED/);
     const entry = (await f.service.view(id)).transcript.find((entry) =>
       entry.messages.some((m) => m.role === "assistant"),
     )!;
     const branch = await f.service.branch(id, randomUUID(), entry.id, "fork");
-    assert.deepEqual((await f.service.conversation(branch.id)).credentialIds, [
-      credentialId,
+    f.faux.setResponses([
+      call("bash", { command: "printenv GH_TOKEN" }),
+      answer("fork shared"),
     ]);
+    await f.service.send(branch.id, randomUUID(), "check fork");
+    await until(
+      async () => (await f.service.conversation(branch.id)).status === "idle",
+    );
+    assert.match(JSON.stringify(await f.service.view(branch.id)), /REDACTED/);
   } finally {
     await f.service.close();
   }
@@ -295,13 +289,10 @@ test("credential validation rejects collisions, managed variables and invalid SS
     b = randomUUID();
   assert.throws(
     () =>
-      selectCredentials(
-        [
-          { id: a, name: "A", kind: "env", env: { GH_TOKEN: "one" } },
-          { id: b, name: "B", kind: "env", env: { GH_TOKEN: "two" } },
-        ],
-        [a, b],
-      ),
+      sharedCredentials([
+        { id: a, name: "A", kind: "env", env: { GH_TOKEN: "one" } },
+        { id: b, name: "B", kind: "env", env: { GH_TOKEN: "two" } },
+      ]),
     /重複/,
   );
   await assert.rejects(sshPublicKey("not-a-key"), /SSH 鍵/);
@@ -318,11 +309,7 @@ test("short environment values do not corrupt session identifiers", async () => 
       ],
     });
     assert.equal(f.service.management().workCredentials[0]!.id, credentialId);
-    assert.equal(f.service.redact("value: 1"), "value: [REDACTED]");
-    assert.equal(
-      f.service.redact("11223344-1111-4111-8111-111111111111"),
-      "11223344-1111-4111-8111-111111111111",
-    );
+    assert.equal(f.service.management().workCredentials[0]!.kind, "env");
   } finally {
     await f.service.close();
   }
@@ -358,7 +345,7 @@ test("real OpenSSH signer lists and signs without exposing its private socket an
   }
 });
 
-test("session bash receives a disposable SSH socket and never receives the private key", async () => {
+test("session bash automatically receives a disposable SSH socket without putting private keys in its environment", async () => {
   const f = await fixture([
     call("bash", {
       command:
@@ -374,13 +361,7 @@ test("session bash receives a disposable SSH socket and never receives the priva
         { id: sshId, name: "SSH", kind: "ssh", generateKey: true },
       ],
     });
-    const { id } = await f.service.create(
-      randomUUID(),
-      "SSH",
-      undefined,
-      undefined,
-      [sshId],
-    );
+    const { id } = await f.service.create(randomUUID(), "SSH");
     await f.service.send(id, randomUUID(), "check");
     await until(
       async () => (await f.service.conversation(id)).status === "idle",
@@ -413,13 +394,7 @@ test("stopping a command revokes its SSH socket before another session can execu
         { id: sshId, name: "SSH", kind: "ssh", privateKey: key.key },
       ],
     });
-    const { id } = await f.service.create(
-      randomUUID(),
-      "stop SSH",
-      undefined,
-      undefined,
-      [sshId],
-    );
+    const { id } = await f.service.create(randomUUID(), "stop SSH");
     await f.service.send(id, randomUUID(), "start");
     const path = join(f.root, "work/conversations", id, "outputs/socket");
     await until(async () =>
@@ -436,5 +411,124 @@ test("stopping a command revokes its SSH socket before another session can execu
   } finally {
     await f.service.close();
     await rm(key.dir, { recursive: true, force: true });
+  }
+});
+
+test("visible settings never advertise a credential-reading tool or expose connection secrets to work", async () => {
+  const f = await fixture([call("bash", { command: "env" }), answer("read")]);
+  const modelId = randomUUID(),
+    oauthId = randomUUID(),
+    mcpId = randomUUID();
+  try {
+    await f.service.saveSettings({
+      ...input(f.service),
+      models: [
+        { id: modelId, provider: "openai", key: "fixture-model-key" },
+        { id: oauthId, provider: "openai", auth: "oauth" },
+      ],
+      workCredentials: [
+        {
+          id: randomUUID(),
+          name: "CLI",
+          kind: "env",
+          env: { TOKEN: "fixture-work-token" },
+        },
+        { id: randomUUID(), name: "SSH", kind: "ssh", generateKey: true },
+      ],
+      mcp: [
+        {
+          id: mcpId,
+          name: "Disabled MCP",
+          enabled: false,
+          transport: "http",
+          url: "https://example.com/mcp",
+          command: "",
+          args: [],
+          privateHosts: [],
+          auth: "oauth",
+          bearer: "fixture-mcp-bearer",
+          clientId: "client",
+          clientSecret: "fixture-mcp-secret",
+          env: { MCP_TOKEN: "fixture-mcp-env" },
+        },
+      ],
+    });
+    const model = f.service.settings
+      .snapshot()
+      .models.find((m) => m.id === oauthId)!;
+    await f.service.settings.setModelOAuth(oauthId, model.authVersion, {
+      type: "oauth",
+      access: "fixture-model-access",
+      refresh: "fixture-model-refresh",
+      expires: Date.now() + 3600000,
+    });
+    const server = f.service.settings.snapshot().mcp[0]!;
+    await f.service.settings.oauth(
+      mcpId,
+      connectionIdentity(server),
+      (value) => {
+        value.tokens = {
+          access_token: "fixture-mcp-access",
+          refresh_token: "fixture-mcp-refresh",
+          token_type: "Bearer",
+        };
+      },
+    );
+    const { id } = await f.service.create(
+      randomUUID(),
+      "Read all",
+      modelId,
+      "gpt-4.1",
+    );
+    let advertised: string[] = [];
+    f.faux.setResponses([
+      (context) => {
+        advertised = getCurrentTools(context.messages).map((tool) => tool.name);
+        return fauxAssistantMessage(fauxToolCall("bash", { command: "env" }), {
+          stopReason: "toolUse",
+        });
+      },
+      answer("done"),
+    ]);
+    await f.service.send(id, randomUUID(), "Use the ordinary tools");
+    await until(
+      async () => (await f.service.conversation(id)).status === "idle",
+    );
+    assert.ok(!advertised.includes("credentials_read"));
+    assert.equal("readCredentials" in f.service, false);
+    const raw = JSON.stringify(
+      await (
+        await f.service.piConversation(id)
+      ).entries({}, 100, undefined, ctx),
+    );
+    const visible = JSON.stringify(f.service.management());
+    assert.ok(visible.includes("BEGIN OPENSSH PRIVATE KEY"));
+    assert.ok(!raw.includes("BEGIN OPENSSH PRIVATE KEY"));
+    for (const value of [
+      "fixture-model-key",
+      "fixture-model-access",
+      "fixture-model-refresh",
+      "fixture-work-token",
+      "fixture-mcp-bearer",
+      "fixture-mcp-secret",
+      "fixture-mcp-env",
+      "fixture-mcp-access",
+      "fixture-mcp-refresh",
+    ]) {
+      assert.ok(
+        visible.includes(value),
+        "Settings must display registered values",
+      );
+      assert.ok(
+        !raw.includes(value),
+        "Agent history must not expose registered credentials",
+      );
+      assert.ok(
+        !f.service.redact(value).includes(value),
+        "Tool output must redact registered credentials",
+      );
+    }
+  } finally {
+    await f.service.close();
   }
 });

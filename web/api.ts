@@ -19,7 +19,6 @@ export type Conversation = {
   detail: string;
   updatedAt: number;
   modelConfigId?: string;
-  credentialIds?: string[];
   model?: string;
   parentId?: string;
   forkEntry?: number;
@@ -189,11 +188,3 @@ export function modelChoices(options: ModelOptions) {
       })),
     );
 }
-
-export type CredentialOption = {
-  id: string;
-  name: string;
-  kind: "env" | "ssh";
-  envNames?: string[];
-  publicKey?: string;
-};

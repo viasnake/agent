@@ -43,7 +43,9 @@ test("Skills settings import folders, edit and delete with validation in light, 
     await panel.getByText("互換性: Python 3", { exact: true }).waitFor();
     await panel.getByText("読み込みエラー", { exact: true }).waitFor();
     assert.equal(
-      await page.getByRole("button", { name: "保存", exact: true }).count(),
+      await page
+        .getByRole("button", { name: "設定を保存", exact: true })
+        .count(),
       0,
     );
     const folder = resolve(s.root, "import-folder");
@@ -66,6 +68,10 @@ test("Skills settings import folders, edit and delete with validation in light, 
         document.querySelector(".skill-source") as HTMLTextAreaElement
       )?.value.includes("Original instructions"),
     );
+    await panel.getByText("補助ファイル（1件）", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "モデル", exact: true }).click();
+    await page.getByRole("button", { name: "Skills", exact: true }).click();
+    assert.equal(await source.inputValue(), original);
     await panel.getByText("補助ファイル（1件）", { exact: true }).waitFor();
     await panel.getByRole("button", { name: "追加", exact: true }).click();
     await panel

@@ -71,7 +71,7 @@ import {
   type SkillImport,
 } from "./skills.js";
 import { skillsTools } from "./skills-tools.js";
-import { selectCredentials } from "./work-credentials.js";
+import { sharedCredentials } from "./work-credentials.js";
 import { openSshAgent } from "./ssh-agent.js";
 import { readInstallation } from "./installation.js";
 
@@ -90,7 +90,7 @@ type Active = {
   id: string;
   version: number;
   timer: NodeJS.Timeout;
-  credentials: ReturnType<typeof selectCredentials>;
+  credentials: ReturnType<typeof sharedCredentials>;
   controller: AbortController;
 };
 const interrupted =
@@ -258,7 +258,7 @@ export class AgentService {
                 : "API キー未登録"),
       })),
     };
-    return this.sanitize(projection);
+    return projection;
   }
   async saveSettings(input: unknown) {
     this.assertHealthy();
@@ -769,7 +769,6 @@ export class AgentService {
     title: string,
     modelId?: string,
     model?: string,
-    credentialIds: string[] = [],
   ): Promise<{ id: string }> {
     return this.exclusive(async () => {
       this.assertHealthy();
@@ -777,7 +776,6 @@ export class AgentService {
         title,
         ...(modelId ? { modelId } : {}),
         ...(model ? { model } : {}),
-        ...(credentialIds.length ? { credentialIds } : {}),
       });
       const result = await this.harness.commit(async (tx) => {
         const state = await tx.doc(ConversationsDoc),
@@ -804,10 +802,6 @@ export class AgentService {
           Object.keys(state.receipts).length >= 10000
         )
           throw new AppError(413, "保存上限に達しました");
-        selectCredentials(
-          this.settings.snapshot().workCredentials,
-          credentialIds,
-        );
         const pi = await tx.createConversation({
             ownership: { kind: "ownerless" },
           }),
@@ -820,7 +814,6 @@ export class AgentService {
           detail: "",
           updatedAt: Date.now(),
           workspaceCreated: false,
-          credentialIds: [...credentialIds],
           ...(modelId || this.modelOptions().initialModel
             ? { modelConfigId: modelId ?? this.modelOptions().initialModel! }
             : {}),
@@ -972,7 +965,6 @@ export class AgentService {
           detail: "",
           updatedAt: Date.now(),
           workspaceCreated: false,
-          credentialIds: [...(parent.credentialIds ?? [])],
           ...(parent.modelConfigId
             ? { modelConfigId: parent.modelConfigId }
             : {}),
@@ -1025,27 +1017,6 @@ export class AgentService {
       }
       this.notify();
       return { id };
-    });
-  }
-  async selectCredentials(id: string, ids: string[]) {
-    return this.exclusive(async () => {
-      this.assertHealthy();
-      const conversation = await this.conversation(id);
-      if (["running", "stopping"].includes(conversation.status))
-        throw new AppError(
-          409,
-          "応答が終わってからクレデンシャルを変更してください",
-        );
-      selectCredentials(this.settings.snapshot().workCredentials, ids);
-      await this.harness.commit(async (tx) => {
-        const record = (await tx.doc(ConversationsDoc)).conversations.find(
-          (c) => c.id === id,
-        )!;
-        record.credentialIds = [...ids];
-        record.updatedAt = Date.now();
-      }, ctx);
-      this.notify();
-      return this.view(id);
     });
   }
   async callTool(
@@ -1203,10 +1174,7 @@ export class AgentService {
         throw new AppError(409, "停止を確認しています");
       const starting = !this.active;
       const admittedCredentials = starting
-        ? selectCredentials(
-            this.settings.snapshot().workCredentials,
-            conversation.credentialIds ?? [],
-          )
+        ? sharedCredentials(this.settings.snapshot().workCredentials)
         : this.active!.credentials;
       if (!this.active)
         await this.applySettings(

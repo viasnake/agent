@@ -48,7 +48,7 @@ test("conversation models are account-specific, cached, secret-free and never re
     return settingsInput.parse({
       ...value,
       models: value.models.map(
-        ({ hasKey: _, authorized: __, status: ___, ...m }) => m,
+        ({ hasKey: _, authorized: __, status: ___, oauth: ____, ...m }) => m,
       ),
     });
   };

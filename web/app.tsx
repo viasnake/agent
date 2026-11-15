@@ -1,5 +1,3 @@
-import { CredentialPicker } from "./credentials.js";
-import type { CredentialOption } from "./api.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
 import { NotificationProvider, useNotify } from "./notifications.js";
@@ -13,7 +11,7 @@ import { readDraft, saveDraft } from "./drafts.js";
 import { ConversationSearch } from "./search.js";
 import type { MemoryDraft, MemorySource } from "./memory.js";
 import type { ReactNode } from "react";
-import { Settings } from "./settings.js";
+import { Settings, confirmSettingsExit } from "./settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -388,14 +386,10 @@ function App() {
   const choices = useMemo(() => modelChoices(modelOptions), [modelOptions]);
   const [draftModel, setDraftModel] = useState("");
   const [changingModel, setChangingModel] = useState(false);
-  const [credentialOptions, setCredentialOptions] = useState<
-    CredentialOption[]
-  >([]);
-  const [draftCredentials, setDraftCredentials] = useState<string[]>([]);
-  const [changingCredentials, setChangingCredentials] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(
     new URLSearchParams(location.search).has("settings"),
   );
+  const [settingsDirty, setSettingsDirty] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState<MemoryDraft | null>(null);
@@ -521,11 +515,6 @@ function App() {
   useEffect(() => {
     if (!ready || settingsOpen) return;
     let active = true;
-    void api<CredentialOption[]>("/api/credential-options")
-      .then((options) => {
-        if (active) setCredentialOptions(options);
-      })
-      .catch(notice);
     void api<ModelOptions>("/api/model-options")
       .then((options) => {
         if (!active) return;
@@ -553,27 +542,6 @@ function App() {
       active = false;
     };
   }, [ready, settingsOpen, notice, notify]);
-  async function changeCredentials(ids: string[]): Promise<boolean> {
-    const id = selectedRef.current;
-    if (!id) {
-      setDraftCredentials(ids);
-      return true;
-    }
-    setChangingCredentials(true);
-    try {
-      merge(
-        await api<View>(`/api/conversations/${id}/credentials`, "PUT", {
-          credentialIds: ids,
-        }),
-      );
-      return true;
-    } catch (error) {
-      notice(error);
-      return false;
-    } finally {
-      setChangingCredentials(false);
-    }
-  }
   async function changeModel(choiceId: string) {
     const choice = choices.find((m) => m.id === choiceId);
     if (!choice) return;
@@ -681,7 +649,6 @@ function App() {
           ...(choice
             ? { modelId: choice.connectionId, model: choice.model }
             : {}),
-          credentialIds: draftCredentials,
         };
         const created = await api<{ id: string }>(
           "/api/conversations",
@@ -696,7 +663,6 @@ function App() {
           },
         );
         id = created.id;
-        setDraftCredentials([]);
         saveDraft(null, "");
         attachmentDrafts.current.delete("new");
         // Keep the composer mounted so a rejected/lost response can restore its draft.
@@ -781,6 +747,12 @@ function App() {
   async function deleteSession(session: Conversation) {
     if (sending || acting || deleting) return;
     const id = session.id;
+    if (
+      settingsOpen &&
+      selectedRef.current === id &&
+      !confirmSettingsExit(settingsDirty)
+    )
+      return;
     setDeleting(true);
     try {
       await api(`/api/conversations/${id}`, "DELETE", {});
@@ -989,21 +961,18 @@ function App() {
       >
         <div className="sidebar-header">
           <button
-            className="sidebar-close btn-text theme-secondary btn-sm icon-button"
-            aria-label="セッション一覧を閉じる"
-            title="一覧を閉じる"
-            onClick={() => setSidebar(false)}
-          >
-            <Icon name="close" />
-          </button>
-          <button
             id="new-conversation"
+            aria-label="新しいセッション"
+            title="新しいセッション"
             className="btn-text theme-secondary new-conversation"
             disabled={sending || deleting}
-            onClick={() => select(null)}
+            onClick={() => {
+              if (!settingsOpen || confirmSettingsExit(settingsDirty))
+                select(null);
+            }}
           >
             <Icon name="plus" />
-            新しいセッション
+            <span className="sidebar-label-text">新しいセッション</span>
           </button>
         </div>
         <SessionList
@@ -1012,8 +981,13 @@ function App() {
           )}
           selected={selected}
           disabled={sending || deleting}
-          onSelect={select}
-          onOpenSource={openSource}
+          onSelect={(id) => {
+            if (!settingsOpen || confirmSettingsExit(settingsDirty)) select(id);
+          }}
+          onOpenSource={async (source) => {
+            if (!settingsOpen || confirmSettingsExit(settingsDirty))
+              await openSource(source);
+          }}
           onRename={renameSession}
           onDelete={deleteSession}
           onUpdate={(session, change) =>
@@ -1022,7 +996,10 @@ function App() {
         />
         <div className="sidebar-footer">
           <button
-            className="btn-text theme-secondary btn-sm"
+            className="sidebar-settings btn-text theme-secondary btn-sm"
+            aria-label="設定"
+            title="設定"
+            aria-pressed={settingsOpen}
             onClick={() => {
               setMemoryDraft(null);
               setSettingsOpen(true);
@@ -1030,11 +1007,39 @@ function App() {
             }}
           >
             <Icon name="settings" />
-            設定
+            <span className="sidebar-label-text">設定</span>
+          </button>
+          <button
+            className="sidebar-toggle btn-text theme-secondary btn-sm icon-button"
+            aria-label={
+              collapsed ? "セッション一覧を開く" : "セッション一覧を閉じる"
+            }
+            title={collapsed ? "サイドバーを展開" : "サイドバーを折りたたむ"}
+            aria-expanded={!collapsed}
+            aria-controls="sidebar"
+            onClick={() => setCollapsed((value) => !value)}
+          >
+            <Icon name={collapsed ? "right" : "left"} />
+          </button>
+          <button
+            className="sidebar-close btn-text theme-secondary btn-sm icon-button"
+            aria-label="セッション一覧を閉じる"
+            title="一覧を閉じる"
+            aria-controls="sidebar"
+            onClick={() => setSidebar(false)}
+          >
+            <Icon name="left" />
           </button>
           {connection !== "接続中" && (
-            <span id="connection" className="small fg-2" role="status">
-              {connection}
+            <span
+              id="connection"
+              className="small fg-2"
+              role="status"
+              aria-label={`接続状態: ${connection}`}
+              title={connection}
+            >
+              <span className="status-dot interrupted" aria-hidden="true" />
+              <span className="sidebar-label-text">{connection}</span>
             </span>
           )}
         </div>
@@ -1042,6 +1047,9 @@ function App() {
       <div className="workspace-stack">
         {settingsOpen && (
           <Settings
+            sidebarOpen={sidebar}
+            onOpenSidebar={() => setSidebar(true)}
+            onDirtyChange={setSettingsDirty}
             memoryDraft={memoryDraft}
             onSelectSource={openSource}
             onClose={() => {
@@ -1062,18 +1070,6 @@ function App() {
             inert={settingsOpen}
           >
             <header className="conversation-header">
-              <button
-                className="desktop-only btn-text theme-secondary btn-sm icon-button"
-                aria-label={
-                  collapsed ? "セッション一覧を開く" : "セッション一覧を閉じる"
-                }
-                title={collapsed ? "一覧を開く" : "一覧を閉じる"}
-                aria-expanded={!collapsed}
-                aria-controls="sidebar"
-                onClick={() => setCollapsed(!collapsed)}
-              >
-                <Icon name="sidebar" />
-              </button>
               <button
                 className="mobile-only btn-text theme-secondary btn-sm"
                 aria-label="セッション一覧を開く"
@@ -1300,7 +1296,6 @@ function App() {
                         sending ||
                         deleting ||
                         changingModel ||
-                        changingCredentials ||
                         (selected !== null && !view)
                       }
                       loading={selected !== null && !view && !loadError}
@@ -1311,24 +1306,6 @@ function App() {
                       }}
                       modelPicker={
                         <>
-                          <CredentialPicker
-                            key={selected ?? "new"}
-                            options={credentialOptions}
-                            value={
-                              selected
-                                ? (view?.conversation.credentialIds ?? [])
-                                : draftCredentials
-                            }
-                            disabled={
-                              sending ||
-                              deleting ||
-                              changingCredentials ||
-                              (selected !== null && !view) ||
-                              currentStatus === "running" ||
-                              currentStatus === "stopping"
-                            }
-                            onChange={changeCredentials}
-                          />
                           <ModelPicker
                             label="セッションのモデル"
                             compact

@@ -55,7 +55,7 @@ test("Web settings save cloud connections and display private image inputs acros
       await page.getByLabel("認証方式", { exact: true }).inputValue(),
       "adc",
     );
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByRole("button", { name: "設定を保存", exact: true }).click();
     await until(async () => f.service.settings.snapshot().models.length === 1);
     await page.getByRole("button", { name: "接続を追加", exact: true }).click();
     await page
@@ -67,7 +67,7 @@ test("Web settings save cloud connections and display private image inputs acros
     await page
       .getByLabel("AWS プロファイル", { exact: true })
       .fill("fixture-profile");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByRole("button", { name: "設定を保存", exact: true }).click();
     await until(async () => f.service.settings.snapshot().models.length === 2);
     await page
       .getByRole("button", { name: "セッションに戻る", exact: true })

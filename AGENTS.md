@@ -129,7 +129,7 @@ auto-discover work-owned Skills, or replace a changed version during resume.
   callback loopback-only, with explicit full-URL submission for forwarded connections.
   OAuth state/PKCE/exchange/refresh belong to Pi, not a custom inference client.
 - src/settings.ts: atomic mode-0600 control-owned settings, private credentials
-  and secret-free projections. Import config.yaml only when settings-v1.json is
+  and projections that display saved values only in the browser settings UI. Import config.yaml only when settings-v1.json is
   absent; preserve the source and old credential files. Web-managed fields have
   one source of truth thereafter. Server/disk settings remain in config.yaml.
 - src/mcp.ts and src/remote-http.ts: official Streamable HTTP/OAuth client and
@@ -174,14 +174,21 @@ environment; never inherit control credentials, host homes or SSH agents.
 Never silently fall back when mount/UUID, UID, firewall or cleanup is unavailable.
 Retain systemd control-group cleanup and bounded tool duration/output.
 
-Work credentials are centrally managed in the private settings store. Sessions
-persist only selected credential IDs, including on forks. Resolve and freeze
-values at idle admission; reject deleted selections and conflicting environment
-names. Inject selected environment values only into standard bash execution;
-these values are readable by work code. Never treat masking as an isolation
-boundary. Preserve unedited secrets server-side and revision-check changes.
+Credential visibility in Settings is independent of agent access. Show saved work,
+model and MCP values in the browser UI, including private keys and OAuth tokens,
+but do not expose a credential-reading agent tool, model context or worker API.
+Retain redaction of tool results, history projections and memory. Model and remote
+MCP credentials remain control-only. UI visibility grants no additional authority.
+
+Work credentials are centrally managed in the private settings store. All sessions
+use all registered work environments and SSH signers without credential selection.
+Resolve and freeze values at idle admission; reject conflicting environment names
+and aggregate limits. Inject work environment values only into standard bash;
+these values are necessarily readable by work code. Never treat masking as an
+isolation boundary. Preserve unedited values server-side and revision-check edits.
 SSH imports use passphrase-free keys for automatic use. New entries can generate
-Ed25519 keys on control; return only the public key. Keep keys and OpenSSH
+Ed25519 keys on control. Only the settings UI can display the private key; work
+code receives a signing socket, not the key. Keep keys and OpenSSH
 signers under the control UID; expose only bounded list/sign requests through a
 work-UID ACL socket for the command lifetime. Reject agent mutation and provider
 loading requests. Close existing socket connections and the signer on completion,
@@ -225,14 +232,20 @@ provider, tools or budgets. Install/uninstall server extensions using the Pi
 Registry; isolate each connection failure and never replay an ambiguous tool
 mutation. Connection tests cannot run worker cleanup during an active tool.
 OAuth rotation uses atomic private writes; stale edits/callbacks must not restore
-revoked credentials. GET, tool results and errors must not disclose secrets.
+revoked credentials. Only Settings responses display stored values. Agent-facing
+projections, tool results and errors must not disclose model/MCP secrets.
 Use short UI labels (Test, stdio, arguments) and named MCP cards with enabled first.
-Environment variables use name/value rows; unchanged secret values stay server-side.
+Environment variables use visible name/value rows; unchanged values are preserved server-side.
 A blank edited key deletes that credential, not its model or conversation.
 Keep credential-delegation rules in this guidance, not helper prose in forms.
 Use a searchable model picker in the conversation composer;
 persist selections server-side and retain keyboard navigation and focus restoration.
 Model and MCP settings use collapsible sections. Do not show application branding.
+Group settings navigation by connections, work environment and behavior. Separate
+connection identity, authentication and destructive actions within forms. Keep
+the global settings save action distinct from memory and Skill saves and available
+across sections when dirty. Preserve local editors during section changes; confirm
+discarding drafts on exit and never persist credential drafts in browser storage.
 Transient results use one dismissible bottom-right notification with timed dismissal;
 pause dismissal on keyboard focus and keep essential connection state visible.
 Starting ChatGPT authorization saves edited settings first; deleting a connection

@@ -124,7 +124,11 @@ test("Copilot device UI, reauthentication, disconnect and model picker in light 
       .locator(".notification")
       .filter({ hasText: "GitHub Copilot に接続しました。" })
       .waitFor();
-    assert.ok(!(await page.content()).includes("browser-copilot"));
+    const credentials = JSON.parse(
+      await page.getByLabel("モデル OAuth 認証情報").inputValue(),
+    );
+    assert.equal(credentials.access, "browser-copilot-access-secret");
+    assert.equal(credentials.refresh, "browser-copilot-refresh-secret");
     await page
       .getByRole("button", { name: "セッションに戻る", exact: true })
       .click();
