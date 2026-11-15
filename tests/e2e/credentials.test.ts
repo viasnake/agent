@@ -1,3 +1,4 @@
+import { returnToSession } from "./navigation.js";
 import { execFileSync } from "node:child_process";
 import { resolve, join } from "node:path";
 import { test } from "node:test";
@@ -73,6 +74,18 @@ test("browser displays credentials and shares them with every session in light a
     assert.equal(credential.kind, "env");
     if (credential.kind === "env")
       assert.equal(credential.env.GH_TOKEN, "browser-private-pat");
+    await page.getByRole("button", { name: "モデル", exact: true }).click();
+    await page
+      .getByRole("button", { name: "クレデンシャル", exact: true })
+      .click();
+    assert.equal(
+      await page.getByLabel("環境変数の値 1", { exact: true }).isVisible(),
+      true,
+    );
+    assert.equal(
+      await page.getByLabel("環境変数の値 1", { exact: true }).inputValue(),
+      "browser-private-pat",
+    );
     const keyPath = join(f.root, "browser-key");
     execFileSync("/usr/bin/ssh-keygen", [
       "-q",
@@ -138,7 +151,7 @@ test("browser displays credentials and shares them with every session in light a
         path: `test-results/credentials-${colorScheme}.png`,
       });
     }
-    await page.getByRole("button", { name: "セッションに戻る" }).click();
+    await returnToSession(page);
     assert.equal(
       await page
         .getByRole("button", { name: "セッションのクレデンシャル" })

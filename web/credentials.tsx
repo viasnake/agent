@@ -1,9 +1,12 @@
-import { useRef, useState } from "react";
+import { SettingsDisclosure, SettingsEmpty } from "./settings-layout.js";
+import { useRef } from "react";
 import type { WorkCredentialInput } from "../src/work-credentials.js";
 import type { WorkCredential } from "../src/work-credentials.js";
 
 type Row = { name: string; value?: string };
 export function CredentialSettings({
+  expanded,
+  onToggle,
   entries,
   saved,
   environments,
@@ -11,6 +14,8 @@ export function CredentialSettings({
   onChange,
   onError,
 }: {
+  expanded: Set<string>;
+  onToggle: (id: string, open: boolean) => void;
   entries: WorkCredentialInput[];
   saved: WorkCredential[];
   environments: Record<string, Row[]>;
@@ -20,9 +25,11 @@ export function CredentialSettings({
 }) {
   const latest = useRef(entries);
   latest.current = entries;
-  const [expanded, setExpanded] = useState<string[]>([]);
   return (
     <>
+      {!entries.length && (
+        <SettingsEmpty>クレデンシャルはありません</SettingsEmpty>
+      )}
       {entries.map((entry) => {
         const current = saved.find((c) => c.id === entry.id);
         const update = (next: WorkCredentialInput) =>
@@ -36,30 +43,20 @@ export function CredentialSettings({
               }))
             : []);
         return (
-          <details
+          <SettingsDisclosure
             key={entry.id}
-            className="settings-disclosure"
-            open={expanded.includes(entry.id)}
-            onToggle={(event) => {
-              const open = event.currentTarget.open;
-              setExpanded((old) =>
-                open
-                  ? [...new Set([...old, entry.id])]
-                  : old.filter((id) => id !== entry.id),
-              );
-            }}
+            title={entry.name || "新しいクレデンシャル"}
+            status={entry.kind === "env" ? "環境変数" : "SSH 鍵"}
+            open={expanded.has(entry.id)}
+            onToggle={(open) => onToggle(entry.id, open)}
           >
-            <summary>
-              <span>{entry.name || "新しいクレデンシャル"}</span>
-              <small>{entry.kind === "env" ? "環境変数" : "SSH 鍵"}</small>
-            </summary>
-            <div className="settings-card">
+            <div className="accordion-body settings-card d-flex flex-column gap-4 p-5 text-break">
               <fieldset className="settings-form-section">
                 <legend>登録情報</legend>
-                <label className="form-label">
+                <label className="form-label d-block m-0">
                   名前
                   <input
-                    className="form-control"
+                    className="form-control mt-1"
                     value={entry.name}
                     maxLength={100}
                     onChange={(e) => update({ ...entry, name: e.target.value })}
@@ -73,7 +70,7 @@ export function CredentialSettings({
                     {rows.map((row, index) => (
                       <div className="environment-row" key={index}>
                         <input
-                          className="form-control"
+                          className="form-control mt-1"
                           aria-label={`環境変数名 ${index + 1}`}
                           placeholder="GH_TOKEN"
                           value={row.name}
@@ -92,7 +89,7 @@ export function CredentialSettings({
                           }
                         />
                         <input
-                          className="form-control"
+                          className="form-control mt-1"
                           type="text"
                           autoComplete="new-password"
                           aria-label={`環境変数の値 ${index + 1}`}
@@ -156,10 +153,10 @@ export function CredentialSettings({
                         新しい鍵を生成
                       </label>
                     )}
-                    <label className="form-label settings-span-all">
+                    <label className="form-label d-block m-0 settings-span-all">
                       秘密鍵（パスフレーズなし）
                       <textarea
-                        className="form-control"
+                        className="form-control mt-1"
                         aria-label="秘密鍵（パスフレーズなし）"
                         disabled={!!entry.generateKey}
                         rows={5}
@@ -179,12 +176,12 @@ export function CredentialSettings({
                         }
                       />
                     </label>
-                    <label className="form-label settings-span-all">
+                    <label className="form-label d-block m-0 settings-span-all">
                       鍵ファイル
                       <input
                         type="file"
                         disabled={!!entry.generateKey}
-                        className="form-control"
+                        className="form-control mt-1"
                         onChange={(e) => {
                           const file = e.target.files?.[0];
                           e.target.value = "";
@@ -214,10 +211,10 @@ export function CredentialSettings({
                       />
                     </label>
                     {current?.kind === "ssh" && current.publicKey && (
-                      <label className="form-label settings-span-all">
+                      <label className="form-label d-block m-0 settings-span-all">
                         公開鍵
                         <textarea
-                          className="form-control"
+                          className="form-control mt-1"
                           aria-label="公開鍵"
                           readOnly
                           rows={3}
@@ -229,10 +226,10 @@ export function CredentialSettings({
                   </div>
                 )}
               </fieldset>
-              <div className="settings-danger-actions">
+              <div className="d-flex border-top pt-4 mt-1">
                 <button
                   type="button"
-                  className="btn-text theme-danger btn-sm"
+                  className="btn-text theme-danger ms-auto"
                   onClick={() =>
                     onChange(entries.filter((c) => c.id !== entry.id))
                   }
@@ -241,31 +238,9 @@ export function CredentialSettings({
                 </button>
               </div>
             </div>
-          </details>
+          </SettingsDisclosure>
         );
       })}
-      <div className="d-flex gap-2 flex-wrap">
-        {(
-          [
-            ["env", "環境変数を登録"],
-            ["ssh", "SSH 鍵を登録"],
-          ] as const
-        ).map(([kind, label]) => (
-          <button
-            key={kind}
-            type="button"
-            className="btn-outline theme-secondary"
-            disabled={entries.length >= 32}
-            onClick={() => {
-              const id = crypto.randomUUID();
-              setExpanded((old) => [...old, id]);
-              onChange([...entries, { id, name: "", kind }]);
-            }}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
     </>
   );
 }

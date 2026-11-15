@@ -1,3 +1,4 @@
+import { returnToSession } from "./navigation.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -40,8 +41,7 @@ test("memory settings and inline session search preserve conflicts, sources and 
   const row = (id: string) =>
     page.locator(`[data-session-id="${id}"] .conversation-item`);
   const panel = page.locator(".memory-content");
-  const close = () =>
-    page.getByRole("button", { name: "セッションに戻る", exact: true }).click();
+  const close = () => returnToSession(page);
   const openMemory = async () => {
     if ((page.viewportSize()?.width ?? 1280) < 768) {
       await page
@@ -61,7 +61,7 @@ test("memory settings and inline session search preserve conflicts, sources and 
       .getByRole("button", { name: "メッセージを記憶", exact: true })
       .click();
     await panel.getByLabel("記憶の内容").fill("認証の変更時は接続を確認する");
-    await panel.getByRole("button", { name: "保存", exact: true }).click();
+    await panel.getByRole("button", { name: "追加", exact: true }).click();
     await panel
       .getByText("認証の変更時は接続を確認する", { exact: true })
       .waitFor();
@@ -90,6 +90,18 @@ test("memory settings and inline session search preserve conflicts, sources and 
     );
     await page.locator(".search-current").waitFor();
     await openMemory();
+    const edit = panel.getByRole("button", { name: "記憶を編集", exact: true });
+    await edit.focus();
+    await page.keyboard.press("Enter");
+    await panel.getByLabel("記憶の内容").fill("キャンセルする下書き");
+    assert.equal(await panel.locator(".settings-toolbar").count(), 0);
+    await panel
+      .getByRole("button", { name: "キャンセル", exact: true })
+      .click();
+    assert.equal(
+      await edit.evaluate((node) => node === document.activeElement),
+      true,
+    );
     await panel
       .getByRole("button", { name: "記憶を編集", exact: true })
       .click();
@@ -181,16 +193,21 @@ test("memory settings and inline session search preserve conflicts, sources and 
     );
     await openMemory();
     await page.setViewportSize({ width: 1280, height: 900 });
+    page.once("dialog", (dialog) => void dialog.dismiss());
     await panel
       .getByRole("button", { name: "記憶を削除", exact: true })
       .click();
+    assert.equal((await f.service.memory.list()).length, 1);
     const updatedNote = (await f.service.memory.list())[0]!;
-    await f.service.memory.update(updatedNote.id, {
-      text: "削除確認中の AI 更新",
-      revision: updatedNote.revision,
+    page.once("dialog", async (dialog) => {
+      await f.service.memory.update(updatedNote.id, {
+        text: "削除確認中の AI 更新",
+        revision: updatedNote.revision,
+      });
+      await dialog.accept();
     });
     await panel
-      .getByRole("button", { name: "記憶の削除を確定", exact: true })
+      .getByRole("button", { name: "記憶を削除", exact: true })
       .click();
     await panel
       .getByRole("alert")
@@ -204,11 +221,9 @@ test("memory settings and inline session search preserve conflicts, sources and 
       .getByRole("button", { name: "再読み込み", exact: true })
       .click();
     await panel.getByText("削除確認中の AI 更新", { exact: true }).waitFor();
+    page.once("dialog", (dialog) => void dialog.accept());
     await panel
       .getByRole("button", { name: "記憶を削除", exact: true })
-      .click();
-    await panel
-      .getByRole("button", { name: "記憶の削除を確定", exact: true })
       .click();
     await panel.getByText("記憶はありません", { exact: true }).waitFor();
     await close();
