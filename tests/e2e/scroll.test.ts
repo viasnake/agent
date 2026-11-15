@@ -280,7 +280,10 @@ test("search, tabs, resizing and history loading retain the reading position wit
       await page
         .getByRole("button", { name: "表示位置の確認", exact: true })
         .click();
-      await page.locator("#earlier").scrollIntoViewIfNeeded();
+      await page.locator(".message").first().waitFor();
+      await page.locator("#transcript").evaluate((node) => {
+        node.scrollTop = 80;
+      });
       await settle(page);
       const oldest = page.locator(".message").first();
       const oldestId = await oldest.getAttribute("data-entry-id");
@@ -288,7 +291,9 @@ test("search, tabs, resizing and history loading retain the reading position wit
         (node) => node.getBoundingClientRect().top,
       );
       const count = await page.locator(".message").count();
-      await page.locator("#earlier").click();
+      await page.locator("#transcript").evaluate((node) => {
+        node.scrollTop = 32;
+      });
       await page.waitForFunction(
         (count) => document.querySelectorAll(".message").length > count,
         count,
@@ -299,7 +304,8 @@ test("search, tabs, resizing and history loading retain the reading position wit
         Math.abs(
           (await retained.evaluate(
             (node) => node.getBoundingClientRect().top,
-          )) - oldestTop,
+          )) -
+            (oldestTop + 48),
         ) < 2,
         `Prepending history retains the existing message position: ${JSON.stringify({ width, oldestTop, newTop: await retained.evaluate((node) => node.getBoundingClientRect().top), position: await position(page) })}`,
       );

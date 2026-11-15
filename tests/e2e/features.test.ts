@@ -328,7 +328,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       );
     await page.reload();
     await row(a.id).locator(".conversation-item").click();
-    await page.locator("#earlier").waitFor();
+    await page.locator(".message").first().waitFor();
     assert.equal(
       await page.getByText("最初の検索ワード", { exact: true }).count(),
       0,
