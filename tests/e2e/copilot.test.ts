@@ -1,3 +1,4 @@
+import { returnToSession } from "./navigation.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
@@ -72,7 +73,7 @@ test("Copilot device UI, reauthentication, disconnect and model picker in light 
   try {
     await page.goto(origin);
     await page.getByRole("button", { name: "設定", exact: true }).click();
-    await page.getByRole("button", { name: "接続を追加", exact: true }).click();
+    await page.getByRole("button", { name: "追加", exact: true }).click();
     await page
       .getByLabel("プロバイダー", { exact: true })
       .selectOption("github-copilot");
@@ -119,7 +120,7 @@ test("Copilot device UI, reauthentication, disconnect and model picker in light 
     });
     await page.setViewportSize({ width: 1280, height: 900 });
     approve();
-    await page.getByText("GitHub Copilot 認証済み", { exact: true }).waitFor();
+    await page.getByText("認証済み", { exact: true }).waitFor();
     await page
       .locator(".notification")
       .filter({ hasText: "GitHub Copilot に接続しました。" })
@@ -129,9 +130,7 @@ test("Copilot device UI, reauthentication, disconnect and model picker in light 
     );
     assert.equal(credentials.access, "browser-copilot-access-secret");
     assert.equal(credentials.refresh, "browser-copilot-refresh-secret");
-    await page
-      .getByRole("button", { name: "セッションに戻る", exact: true })
-      .click();
+    await returnToSession(page);
     await page
       .getByRole("button", { name: "セッションのモデル", exact: true })
       .click();
@@ -153,11 +152,9 @@ test("Copilot device UI, reauthentication, disconnect and model picker in light 
     assert.equal(f.service.management().models[0]!.authorized, true);
     // Cancellation of reauthentication preserves the prior working credential.
     await page.getByRole("button", { name: "認証を解除", exact: true }).click();
-    await page.getByText("GitHub Copilot 未認証", { exact: true }).waitFor();
+    await page.getByText("未認証", { exact: true }).waitFor();
     assert.equal(f.service.management().models[0]!.authorized, false);
-    await page
-      .getByRole("button", { name: "セッションに戻る", exact: true })
-      .click();
+    await returnToSession(page);
     await page
       .getByRole("button", { name: "セッションのモデル", exact: true })
       .click();

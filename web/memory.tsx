@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, requestId, forget } from "./api.js";
 import type { MemoryNote } from "./api.js";
+import { SettingsToolbar, SettingsEmpty } from "./settings-layout.js";
+import { useNotify } from "./notifications.js";
 import { Icon } from "./icons.js";
 
 export type MemoryDraft = { text?: string; source?: MemoryNote["source"] };
@@ -29,7 +31,25 @@ export function MemoryNotes({
   const [error, setError] = useState("");
   const [version, setVersion] = useState(0);
   const request = useRef(0);
-  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const notify = useNotify();
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
+  useEffect(() => {
+    if (!busy && !creating && !editing && restoreFocus.current) {
+      restoreFocus.current = false;
+      (opener.current?.isConnected
+        ? opener.current
+        : addButton.current
+      )?.focus();
+    }
+  }, [busy, creating, editing]);
+  function closeEditor() {
+    setCreating(false);
+    setEditing(null);
+    setText("");
+    restoreFocus.current = true;
+  }
   useEffect(() => {
     const current = ++request.current;
     setLoading(true);
@@ -45,7 +65,6 @@ export function MemoryNotes({
               previous)
             : null,
         );
-        setDeleteId(null);
       })
       .catch((error: Error) => {
         if (current === request.current) setError(error.message);
@@ -76,9 +95,28 @@ export function MemoryNotes({
   }
   return (
     <section className="memory-content" aria-label="記憶">
-      {creating || editing ? (
+      {!(creating || editing) && (
+        <SettingsToolbar>
+          <button
+            ref={addButton}
+            type="button"
+            className="btn-outline theme-secondary"
+            disabled={busy || creating || !!editing || notes.length >= 32}
+            onClick={(event) => {
+              opener.current = event.currentTarget;
+              setCreating(true);
+              setText("");
+              setSource(undefined);
+            }}
+          >
+            追加
+          </button>
+        </SettingsToolbar>
+      )}
+      {(creating || editing) && (
         <form
-          className="settings-card"
+          className="settings-card card card-body p-5 gap-4 mb-5"
+          aria-label={editing ? "記憶を編集" : "記憶を追加"}
           onSubmit={async (event) => {
             event.preventDefault();
             if (busy || !text.trim()) return;
@@ -101,62 +139,55 @@ export function MemoryNotes({
               }
             });
             if (saved) {
-              setCreating(false);
-              setEditing(null);
-              setText("");
+              notify(editing ? "記憶を保存しました" : "記憶を追加しました");
+              closeEditor();
               setVersion((value) => value + 1);
             }
           }}
         >
-          <textarea
-            className="form-control"
-            aria-label="記憶の内容"
-            maxLength={1000}
-            rows={4}
-            value={text}
-            disabled={busy}
-            autoFocus
-            onChange={(event) => setText(event.target.value)}
-          />
-          <footer>
+          <h3 className="fs-md fw-semibold m-0">
+            {editing ? "記憶を編集" : "記憶を追加"}
+          </h3>
+          <label className="form-label d-block m-0">
+            記憶の内容
+            <textarea
+              className="form-control mt-1"
+              aria-label="記憶の内容"
+              maxLength={1000}
+              rows={4}
+              value={text}
+              disabled={busy}
+              autoFocus
+              onChange={(event) => setText(event.target.value)}
+            />
+          </label>
+          <div className="d-flex align-items-center flex-wrap gap-3 border-top pt-4">
+            <button
+              type="submit"
+              className="btn-solid theme-primary"
+              disabled={busy || !text.trim()}
+            >
+              {editing ? "保存" : "追加"}
+            </button>
             <button
               type="button"
               className="btn-text theme-secondary"
               disabled={busy}
-              onClick={() => {
-                setCreating(false);
-                setEditing(null);
-              }}
+              onClick={closeEditor}
             >
               キャンセル
             </button>
-            <button
-              className="btn-solid theme-primary"
-              disabled={busy || !text.trim()}
-            >
-              <Icon name="check" />
-              保存
-            </button>
-          </footer>
+          </div>
         </form>
-      ) : (
-        <button
-          className="btn-outline theme-secondary btn-sm"
-          onClick={() => {
-            setCreating(true);
-            setText("");
-            setSource(undefined);
-          }}
-        >
-          <Icon name="plus" />
-          記憶を追加
-        </button>
       )}
       <div className="memory-notes" aria-busy={busy}>
         {notes.map((note) => (
-          <article key={note.id} className="memory-note">
+          <article
+            key={note.id}
+            className="settings-card memory-note card card-body p-5 gap-4 mb-5"
+          >
             <p>{note.text}</p>
-            <footer>
+            <div className="d-flex align-items-center flex-wrap gap-3">
               {note.source && (
                 <button
                   className="btn-text theme-secondary btn-sm"
@@ -173,31 +204,27 @@ export function MemoryNotes({
               >
                 {new Date(note.updatedAt).toLocaleDateString("ja-JP")}
               </time>
+            </div>
+            <div className="d-flex align-items-center flex-wrap gap-3 border-top pt-4">
               <button
-                className="btn-text theme-secondary icon-button"
+                className="btn-text theme-secondary"
                 aria-label="記憶を編集"
                 title="編集"
-                disabled={busy}
-                onClick={() => {
+                disabled={busy || creating || !!editing}
+                onClick={(event) => {
+                  opener.current = event.currentTarget;
                   setEditing(note);
                   setText(note.text);
-                  setDeleteId(null);
                 }}
               >
-                <Icon name="edit" />
+                編集
               </button>
               <button
-                className={`btn-text theme-${deleteId === note.id ? "danger" : "secondary"} icon-button`}
-                aria-label={
-                  deleteId === note.id ? "記憶の削除を確定" : "記憶を削除"
-                }
-                title={deleteId === note.id ? "削除を確定" : "削除"}
-                disabled={busy}
+                className="btn-text theme-danger ms-auto"
+                aria-label="記憶を削除"
+                disabled={busy || creating || !!editing}
                 onClick={async () => {
-                  if (deleteId !== note.id) {
-                    setDeleteId(note.id);
-                    return;
-                  }
+                  if (!window.confirm("この記憶を削除しますか？")) return;
                   if (
                     await action(() =>
                       api(`/api/memories/${note.id}`, "DELETE", {
@@ -205,18 +232,22 @@ export function MemoryNotes({
                       }),
                     )
                   ) {
-                    setDeleteId(null);
+                    notify("記憶を削除しました");
+                    opener.current = addButton.current;
+                    restoreFocus.current = true;
                     setVersion((value) => value + 1);
                   }
                 }}
               >
-                <Icon name={deleteId === note.id ? "check" : "trash"} />
+                削除
               </button>
-            </footer>
+            </div>
           </article>
         ))}
-        {!notes.length && !busy && <p className="fg-2">記憶はありません</p>}
-      </div>{" "}
+        {!notes.length && !busy && !error && (
+          <SettingsEmpty>記憶はありません</SettingsEmpty>
+        )}
+      </div>
       {busy && (
         <span role="status" className="small fg-2">
           {acting ? "処理中…" : "読み込み中…"}
@@ -226,7 +257,9 @@ export function MemoryNotes({
         <div role="alert">
           <p className="fg-danger">{error}</p>
           <button
-            className="btn-text theme-secondary btn-sm"
+            type="button"
+            className="btn-text theme-secondary"
+            disabled={busy}
             onClick={() => setVersion((value) => value + 1)}
           >
             再読み込み
