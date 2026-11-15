@@ -1,3 +1,4 @@
+import { returnToSession } from "./navigation.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -218,9 +219,7 @@ test("search, tabs, resizing and history loading retain the reading position wit
           .click();
       await page.getByRole("button", { name: "設定", exact: true }).click();
       await page.getByRole("button", { name: "記憶", exact: true }).click();
-      await page
-        .getByRole("button", { name: "セッションに戻る", exact: true })
-        .click();
+      await returnToSession(page);
       await settle(page);
       await assertShell(page);
       assert.equal(

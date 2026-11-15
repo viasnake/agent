@@ -54,9 +54,7 @@ test("Skills settings import folders, edit and delete with validation in light, 
       "---\nname: imported\ndescription: Imported skill\n---\nOriginal instructions";
     await writeFile(resolve(folder, "SKILL.md"), original);
     await writeFile(resolve(folder, "scripts/run.py"), "print('fixture')");
-    await panel
-      .getByRole("button", { name: "Skill を追加", exact: true })
-      .click();
+    await panel.getByRole("button", { name: "追加", exact: true }).click();
     await panel.locator("input[webkitdirectory]").setInputFiles(folder);
     const source = panel.getByRole("textbox", {
       name: "SKILL.md",
@@ -137,11 +135,12 @@ test("Skills settings import folders, edit and delete with validation in light, 
       .waitFor({ state: "hidden" });
     assert.equal(
       await panel
-        .getByRole("button", { name: "Skill を追加", exact: true })
+        .getByRole("button", { name: "追加", exact: true })
         .evaluate((node) => node === document.activeElement),
       true,
     );
     await rm(resolve(s.root, "skills/pdf-processing"), { recursive: true });
+    await panel.getByRole("button", { name: "pdf-processing を編集" }).click();
     await panel.getByRole("button", { name: "再読み込み" }).click();
     await panel
       .getByText("pdf-processing", { exact: true })

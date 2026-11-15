@@ -1,3 +1,4 @@
+import { returnToSession } from "./navigation.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer as portProbe } from "node:net";
@@ -42,7 +43,7 @@ test("Web settings save cloud connections and display private image inputs acros
   try {
     await page.goto(origin);
     await page.getByRole("button", { name: "設定", exact: true }).click();
-    await page.getByRole("button", { name: "接続を追加", exact: true }).click();
+    await page.getByRole("button", { name: "追加", exact: true }).click();
     await page
       .getByLabel("プロバイダー", { exact: true })
       .selectOption("google-vertex");
@@ -57,7 +58,7 @@ test("Web settings save cloud connections and display private image inputs acros
     );
     await page.getByRole("button", { name: "設定を保存", exact: true }).click();
     await until(async () => f.service.settings.snapshot().models.length === 1);
-    await page.getByRole("button", { name: "接続を追加", exact: true }).click();
+    await page.getByRole("button", { name: "追加", exact: true }).click();
     await page
       .getByLabel("プロバイダー", { exact: true })
       .last()
@@ -69,9 +70,7 @@ test("Web settings save cloud connections and display private image inputs acros
       .fill("fixture-profile");
     await page.getByRole("button", { name: "設定を保存", exact: true }).click();
     await until(async () => f.service.settings.snapshot().models.length === 2);
-    await page
-      .getByRole("button", { name: "セッションに戻る", exact: true })
-      .click();
+    await returnToSession(page);
     await page
       .getByRole("button", { name: "セッションのモデル", exact: true })
       .click();

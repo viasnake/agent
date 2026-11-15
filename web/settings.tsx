@@ -1,4 +1,9 @@
 import { Projects } from "./projects.js";
+import {
+  SettingsToolbar,
+  SettingsDisclosure,
+  SettingsEmpty,
+} from "./settings-layout.js";
 import { Icon } from "./icons.js";
 import { CredentialSettings } from "./credentials.js";
 import { Skills } from "./skills.js";
@@ -12,31 +17,16 @@ import type { SettingsInput } from "../src/settings.js";
 import { api } from "./api.js";
 type PublicSettings = ReturnType<AgentService["management"]>;
 type EnvironmentRow = { name: string; value?: string };
-const settingsGroups = [
-  {
-    label: "接続",
-    items: [
-      ["models", "モデル"],
-      ["mcp", "MCP"],
-    ],
-  },
-  {
-    label: "作業環境",
-    items: [
-      ["credentials", "クレデンシャル"],
-      ["projects", "プロジェクト"],
-      ["skills", "Skills"],
-    ],
-  },
-  {
-    label: "動作",
-    items: [
-      ["agent", "Agent 設定"],
-      ["memory", "記憶"],
-    ],
-  },
+const settingsSections = [
+  ["models", "モデル"],
+  ["mcp", "MCP"],
+  ["credentials", "クレデンシャル"],
+  ["projects", "プロジェクト"],
+  ["skills", "Skills"],
+  ["agent", "指示・制限"],
+  ["memory", "記憶"],
 ] as const;
-type Tab = (typeof settingsGroups)[number]["items"][number][0];
+type Tab = (typeof settingsSections)[number][0];
 export function confirmSettingsExit(unsaved: boolean) {
   return !unsaved || window.confirm("未保存の変更を破棄して設定を閉じますか？");
 }
@@ -104,14 +94,12 @@ function editable(s: PublicSettings): SettingsInput {
   };
 }
 export function Settings({
-  onClose,
   onOpenSidebar,
   sidebarOpen,
   memoryDraft,
   onSelectSource,
   onDirtyChange,
 }: {
-  onClose: () => void;
   onOpenSidebar: () => void;
   sidebarOpen: boolean;
   memoryDraft?: MemoryDraft | null;
@@ -132,6 +120,7 @@ export function Settings({
   const [callbackUrl, setCallbackUrl] = useState("");
   const loginPending =
     !!login && ["waiting", "exchanging"].includes(login.state);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saved, setSaved] = useState<PublicSettings>();
   const [draft, setDraft] = useState<SettingsInput>();
   const [tab, setTab] = useState<Tab>(
@@ -199,14 +188,24 @@ export function Settings({
       setBusy(false);
     }
   }
-  useEffect(() => {
-    void perform(async () => {
-      accept(await api<PublicSettings>("/api/settings"));
-      setLogin(
-        (await api<ModelLogin | null>("/api/settings/model-login")) ??
-          undefined,
-      );
+  async function load() {
+    setLoadFailed(false);
+    await perform(async () => {
+      try {
+        const [settings, login] = await Promise.all([
+          api<PublicSettings>("/api/settings"),
+          api<ModelLogin | null>("/api/settings/model-login"),
+        ]);
+        accept(settings);
+        setLogin(login ?? undefined);
+      } catch (error) {
+        setLoadFailed(true);
+        throw error;
+      }
     });
+  }
+  useEffect(() => {
+    void load();
   }, []);
   useEffect(() => {
     if (login?.state === "error") notify(login.message, true);
@@ -324,83 +323,56 @@ export function Settings({
           <Icon name="menu" />
         </button>
         <h1>設定</h1>
-        <button
-          className="btn-outline theme-secondary btn-sm ms-auto"
-          onClick={() =>
-            void perform(async () => {
-              if (!canLeave()) return;
-              if (loginPending && login)
-                await api(
-                  `/api/settings/model-login/${login.id}/cancel`,
-                  "POST",
-                  {},
-                );
-              onClose();
-            })
-          }
-          disabled={busy}
-        >
-          セッションに戻る
-        </button>
       </header>
       <div className="settings-layout">
         <nav
           ref={navigation}
-          className="settings-navigation"
+          className="settings-navigation gap-1"
           aria-label="設定の種類"
         >
-          {settingsGroups.map((group) => (
-            <div className="settings-nav-group" key={group.label}>
-              <h2>{group.label}</h2>
-              {group.items.map(([id, label]) => (
-                <button
-                  key={id}
-                  className={
-                    tab === id
-                      ? "btn-solid theme-primary"
-                      : "btn-text theme-secondary"
-                  }
-                  aria-pressed={tab === id}
-                  aria-label={label}
-                  aria-description={
-                    (id === "memory" && memoryDirty) ||
-                    (id === "skills" && skillsDirty) ||
-                    (id === "projects" && projectsDirty)
-                      ? "編集中"
-                      : undefined
-                  }
-                  aria-controls="settings-panel"
-                  onClick={() => {
-                    setVisited((old) => new Set([...old, id]));
-                    setTab(id);
-                  }}
-                >
-                  {label}
-                  {((id === "memory" && memoryDirty) ||
-                    (id === "skills" && skillsDirty) ||
-                    (id === "projects" && projectsDirty)) && (
-                    <small className="settings-editing" aria-hidden="true">
-                      編集中
-                    </small>
-                  )}
-                </button>
-              ))}
-            </div>
+          {settingsSections.map(([id, label]) => (
+            <button
+              key={id}
+              className={
+                tab === id
+                  ? "btn-solid theme-primary"
+                  : "btn-text theme-secondary"
+              }
+              aria-pressed={tab === id}
+              aria-label={label}
+              aria-description={
+                (id === "memory" && memoryDirty) ||
+                (id === "skills" && skillsDirty) ||
+                (id === "projects" && projectsDirty)
+                  ? "編集中"
+                  : undefined
+              }
+              aria-controls="settings-panel"
+              onClick={() => {
+                setVisited((old) => new Set([...old, id]));
+                setTab(id);
+              }}
+            >
+              {label}
+              {((id === "memory" && memoryDirty) ||
+                (id === "skills" && skillsDirty) ||
+                (id === "projects" && projectsDirty)) && (
+                <small className="settings-editing" aria-hidden="true">
+                  編集中
+                </small>
+              )}
+            </button>
           ))}
         </nav>
         <div className="settings-main">
           <div className="settings-content" ref={content} id="settings-panel">
             <div className="settings-column">
               <div className="settings-section-heading">
-                <h2>
-                  {settingsGroups
-                    .map((group) => group.items.find(([id]) => id === tab)?.[1])
-                    .find((label) => label !== undefined)}
-                </h2>
+                <h2>{settingsSections.find(([id]) => id === tab)?.[1]}</h2>
               </div>
               {loginPending && login && (
                 <section
-                  className="settings-card"
+                  className="settings-card card card-body p-5 gap-4 mb-5"
                   aria-label={
                     login.provider === "github-copilot"
                       ? "GitHub Copilot 認証"
@@ -428,10 +400,10 @@ export function Settings({
                           <code aria-label="認証コード">{login.userCode}</code>
                         </p>
                       ) : (
-                        <label className="form-label">
+                        <label className="form-label d-block m-0">
                           認証後の URL（localhost に接続できなかった場合）
                           <input
-                            className="form-control"
+                            className="form-control mt-1"
                             type="text"
                             autoComplete="off"
                             value={callbackUrl}
@@ -440,7 +412,7 @@ export function Settings({
                           />
                         </label>
                       )}
-                      <div className="settings-actions">
+                      <div className="d-flex flex-wrap gap-3">
                         {login.provider !== "github-copilot" && (
                           <button
                             className="btn-solid theme-primary"
@@ -511,14 +483,110 @@ export function Settings({
               {tab === "projects" ||
               tab === "skills" ||
               tab === "memory" ? null : !draft ? (
-                <p>読み込み中…</p>
+                loadFailed ? (
+                  <button
+                    className="btn-outline theme-secondary"
+                    disabled={busy}
+                    onClick={() => void load()}
+                  >
+                    再試行
+                  </button>
+                ) : (
+                  <p role="status">読み込み中…</p>
+                )
               ) : (
                 <fieldset
                   disabled={busy || loginPending}
                   className="settings-fields"
                 >
+                  {tab !== "agent" && (
+                    <SettingsToolbar>
+                      {tab === "models" && (
+                        <button
+                          className="btn-outline theme-secondary"
+                          disabled={draft.models.length >= 10}
+                          onClick={() => {
+                            const id = crypto.randomUUID();
+                            toggle(id, true);
+                            change((s) => ({
+                              ...s,
+                              models: [
+                                ...s.models,
+                                { id, provider: "openai", name: "" },
+                              ],
+                              defaultModel: s.defaultModel ?? id,
+                            }));
+                          }}
+                        >
+                          追加
+                        </button>
+                      )}
+                      {tab === "mcp" && (
+                        <button
+                          className="btn-outline theme-secondary"
+                          disabled={draft.mcp.length >= 10}
+                          onClick={() => {
+                            const id = crypto.randomUUID();
+                            toggle(id, true);
+                            change((s) => ({
+                              ...s,
+                              mcp: [
+                                ...s.mcp,
+                                {
+                                  id,
+                                  name: "",
+                                  enabled: true,
+                                  transport: "stdio",
+                                  command: "",
+                                  args: [],
+                                  url: "",
+                                  privateHosts: [],
+                                  auth: "none",
+                                  clientId: "",
+                                },
+                              ],
+                            }));
+                          }}
+                        >
+                          追加
+                        </button>
+                      )}
+                      {tab === "credentials" &&
+                        (
+                          [
+                            ["env", "環境変数を登録"],
+                            ["ssh", "SSH 鍵を登録"],
+                          ] as const
+                        ).map(([kind, label]) => (
+                          <button
+                            key={kind}
+                            type="button"
+                            className="btn-outline theme-secondary"
+                            disabled={
+                              (draft.workCredentials?.length ?? 0) >= 32
+                            }
+                            onClick={() => {
+                              const id = crypto.randomUUID();
+                              toggle(id, true);
+                              change((s) => ({
+                                ...s,
+                                workCredentials: [
+                                  ...(s.workCredentials ?? []),
+                                  { id, name: "", kind },
+                                ],
+                              }));
+                            }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                    </SettingsToolbar>
+                  )}
                   {tab === "models" && (
                     <>
+                      {!draft.models.length && (
+                        <SettingsEmpty>モデル接続はありません</SettingsEmpty>
+                      )}
                       {draft.models.map((model) => {
                         const current = saved?.models.find(
                           (m) => m.id === model.id,
@@ -531,39 +599,37 @@ export function Settings({
                             ),
                           }));
                         return (
-                          <details
+                          <SettingsDisclosure
                             key={model.id}
-                            className="settings-disclosure"
-                            open={expanded.has(model.id)}
-                            onToggle={(e) =>
-                              toggle(model.id, e.currentTarget.open)
+                            title={
+                              model.name ||
+                              (model.provider === "github-copilot"
+                                ? "GitHub Copilot"
+                                : model.auth === "oauth"
+                                  ? "ChatGPT"
+                                  : model.provider === "openai"
+                                    ? "OpenAI API"
+                                    : model.provider)
                             }
+                            status={
+                              current?.status === "未確認"
+                                ? ""
+                                : current?.status.replace(
+                                    /^(ChatGPT|GitHub Copilot) /,
+                                    "",
+                                  )
+                            }
+                            open={expanded.has(model.id)}
+                            onToggle={(open) => toggle(model.id, open)}
                           >
-                            <summary>
-                              <span>
-                                {model.name ||
-                                  (model.provider === "github-copilot"
-                                    ? "GitHub Copilot"
-                                    : model.auth === "oauth"
-                                      ? "ChatGPT"
-                                      : model.provider === "openai"
-                                        ? "OpenAI API"
-                                        : model.provider)}
-                              </span>
-                              <small>
-                                {current?.status === "未確認"
-                                  ? ""
-                                  : current?.status}
-                              </small>
-                            </summary>
-                            <div className="settings-card">
+                            <div className="accordion-body settings-card d-flex flex-column gap-4 p-5 text-break">
                               <fieldset className="settings-form-section">
                                 <legend>接続先</legend>
                                 <div className="settings-form-grid">
-                                  <label className="form-label">
+                                  <label className="form-label d-block m-0">
                                     プロバイダー
                                     <select
-                                      className="form-control"
+                                      className="form-control mt-1"
                                       aria-label="プロバイダー"
                                       value={model.provider}
                                       onChange={(e) => {
@@ -611,10 +677,10 @@ export function Settings({
                                       </option>
                                     </select>
                                   </label>
-                                  <label className="form-label">
+                                  <label className="form-label d-block m-0">
                                     名前
                                     <input
-                                      className="form-control"
+                                      className="form-control mt-1"
                                       aria-label="接続名"
                                       placeholder={
                                         model.provider === "github-copilot"
@@ -636,10 +702,10 @@ export function Settings({
                               <fieldset className="settings-form-section">
                                 <legend>認証</legend>
                                 <div className="settings-form-grid">
-                                  <label className="form-label">
+                                  <label className="form-label d-block m-0">
                                     認証方式
                                     <select
-                                      className="form-control"
+                                      className="form-control mt-1"
                                       aria-label="認証方式"
                                       value={model.auth ?? "api_key"}
                                       onChange={(e) =>
@@ -681,10 +747,10 @@ export function Settings({
 
                                   {model.provider === "google-vertex" && (
                                     <>
-                                      <label className="form-label">
+                                      <label className="form-label d-block m-0">
                                         プロジェクト ID
                                         <input
-                                          className="form-control"
+                                          className="form-control mt-1"
                                           aria-label="プロジェクト ID"
                                           value={model.project ?? ""}
                                           onChange={(e) =>
@@ -692,10 +758,10 @@ export function Settings({
                                           }
                                         />
                                       </label>
-                                      <label className="form-label">
+                                      <label className="form-label d-block m-0">
                                         ロケーション
                                         <input
-                                          className="form-control"
+                                          className="form-control mt-1"
                                           aria-label="ロケーション"
                                           value={model.location ?? "global"}
                                           onChange={(e) =>
@@ -707,10 +773,10 @@ export function Settings({
                                   )}
                                   {model.provider === "amazon-bedrock" && (
                                     <>
-                                      <label className="form-label">
+                                      <label className="form-label d-block m-0">
                                         リージョン
                                         <input
-                                          className="form-control"
+                                          className="form-control mt-1"
                                           aria-label="リージョン"
                                           value={model.region ?? ""}
                                           onChange={(e) =>
@@ -719,10 +785,10 @@ export function Settings({
                                         />
                                       </label>
                                       {model.auth === "aws" && (
-                                        <label className="form-label">
+                                        <label className="form-label d-block m-0">
                                           AWS プロファイル
                                           <input
-                                            className="form-control"
+                                            className="form-control mt-1"
                                             aria-label="AWS プロファイル"
                                             value={model.profile ?? ""}
                                             onChange={(e) =>
@@ -740,10 +806,10 @@ export function Settings({
                                     model.auth ?? "api_key",
                                   ) && (
                                     <>
-                                      <label className="form-label settings-span-all">
+                                      <label className="form-label d-block m-0 settings-span-all">
                                         API キー
                                         <input
-                                          className="form-control"
+                                          className="form-control mt-1"
                                           type="text"
                                           autoComplete="new-password"
                                           value={
@@ -765,10 +831,10 @@ export function Settings({
                                 </div>
                               </fieldset>
                               {current?.oauth && (
-                                <label className="form-label">
+                                <label className="form-label d-block m-0">
                                   OAuth 認証情報
                                   <textarea
-                                    className="form-control"
+                                    className="form-control mt-1"
                                     aria-label="モデル OAuth 認証情報"
                                     readOnly
                                     rows={6}
@@ -780,7 +846,7 @@ export function Settings({
                                   />
                                 </label>
                               )}
-                              <div className="settings-actions">
+                              <div className="d-flex flex-wrap gap-3">
                                 <button
                                   className="btn-outline theme-secondary btn-sm"
                                   disabled={
@@ -867,9 +933,9 @@ export function Settings({
                                   </>
                                 ) : null}
                               </div>
-                              <div className="settings-danger-actions">
+                              <div className="d-flex border-top pt-4 mt-1">
                                 <button
-                                  className="btn-text theme-danger btn-sm"
+                                  className="btn-text theme-danger ms-auto"
                                   onClick={() =>
                                     void perform(async () => {
                                       await persist({
@@ -892,31 +958,15 @@ export function Settings({
                                 </button>
                               </div>
                             </div>
-                          </details>
+                          </SettingsDisclosure>
                         );
                       })}
-                      <button
-                        className="btn-outline theme-secondary"
-                        disabled={draft.models.length >= 10}
-                        onClick={() => {
-                          const id = crypto.randomUUID();
-                          toggle(id, true);
-                          change((s) => ({
-                            ...s,
-                            models: [
-                              ...s.models,
-                              { id, provider: "openai", name: "" },
-                            ],
-                            defaultModel: s.defaultModel ?? id,
-                          }));
-                        }}
-                      >
-                        接続を追加
-                      </button>
                     </>
                   )}
                   {tab === "credentials" && (
                     <CredentialSettings
+                      expanded={expanded}
+                      onToggle={toggle}
                       entries={draft.workCredentials ?? []}
                       saved={saved?.workCredentials ?? []}
                       environments={environments}
@@ -932,6 +982,9 @@ export function Settings({
                   )}
                   {tab === "mcp" && (
                     <>
+                      {!draft.mcp.length && (
+                        <SettingsEmpty>MCP はありません</SettingsEmpty>
+                      )}
                       {draft.mcp.map((server) => {
                         const current = saved?.mcp.find(
                           (m) => m.id === server.id,
@@ -944,25 +997,20 @@ export function Settings({
                             ),
                           }));
                         return (
-                          <details
+                          <SettingsDisclosure
                             key={server.id}
-                            className="settings-disclosure"
-                            open={expanded.has(server.id)}
-                            onToggle={(e) =>
-                              toggle(server.id, e.currentTarget.open)
+                            title={server.name || "新しい MCP"}
+                            status={
+                              !server.enabled
+                                ? "無効"
+                                : current?.status.state === "untested"
+                                  ? ""
+                                  : current?.status.message
                             }
+                            open={expanded.has(server.id)}
+                            onToggle={(open) => toggle(server.id, open)}
                           >
-                            <summary>
-                              <span>{server.name || "新しい MCP"}</span>
-                              <small>
-                                {!server.enabled
-                                  ? "無効"
-                                  : current?.status.state === "untested"
-                                    ? ""
-                                    : current?.status.message}
-                              </small>
-                            </summary>
-                            <div className="settings-card">
+                            <div className="accordion-body settings-card d-flex flex-column gap-4 p-5 text-break">
                               <fieldset className="settings-form-section">
                                 <legend>接続先</legend>
                                 <div className="settings-form-grid">
@@ -976,20 +1024,20 @@ export function Settings({
                                     />
                                     有効
                                   </label>
-                                  <label className="form-label">
+                                  <label className="form-label d-block m-0">
                                     名前
                                     <input
-                                      className="form-control"
+                                      className="form-control mt-1"
                                       value={server.name}
                                       onChange={(e) =>
                                         update({ name: e.target.value })
                                       }
                                     />
                                   </label>
-                                  <label className="form-label">
+                                  <label className="form-label d-block m-0">
                                     接続方式
                                     <select
-                                      className="form-control"
+                                      className="form-control mt-1"
                                       aria-label="接続方式"
                                       value={server.transport}
                                       onChange={(e) =>
@@ -1018,10 +1066,10 @@ export function Settings({
                                 <div className="settings-form-grid">
                                   {server.transport === "stdio" ? (
                                     <>
-                                      <label className="form-label settings-span-all">
+                                      <label className="form-label d-block m-0 settings-span-all">
                                         コマンド
                                         <input
-                                          className="form-control"
+                                          className="form-control mt-1"
                                           placeholder="/usr/bin/npx"
                                           value={server.command}
                                           onChange={(e) =>
@@ -1029,10 +1077,10 @@ export function Settings({
                                           }
                                         />
                                       </label>
-                                      <label className="form-label settings-span-all">
+                                      <label className="form-label d-block m-0 settings-span-all">
                                         引数
                                         <textarea
-                                          className="form-control"
+                                          className="form-control mt-1"
                                           aria-label="引数"
                                           rows={5}
                                           placeholder={
@@ -1080,7 +1128,7 @@ export function Settings({
                                                 key={index}
                                               >
                                                 <input
-                                                  className="form-control"
+                                                  className="form-control mt-1"
                                                   aria-label={`環境変数名 ${index + 1}`}
                                                   placeholder="TOKEN"
                                                   value={row.name}
@@ -1100,7 +1148,7 @@ export function Settings({
                                                   }
                                                 />
                                                 <input
-                                                  className="form-control"
+                                                  className="form-control mt-1"
                                                   aria-label={`環境変数の値 ${index + 1}`}
                                                   type="text"
                                                   autoComplete="new-password"
@@ -1165,10 +1213,10 @@ export function Settings({
                                     </>
                                   ) : (
                                     <>
-                                      <label className="form-label settings-span-all">
+                                      <label className="form-label d-block m-0 settings-span-all">
                                         URL
                                         <input
-                                          className="form-control"
+                                          className="form-control mt-1"
                                           type="url"
                                           value={server.url}
                                           placeholder="https://mcp.example.com/mcp"
@@ -1184,10 +1232,10 @@ export function Settings({
                                           }
                                         />
                                       </label>
-                                      <label className="form-label">
+                                      <label className="form-label d-block m-0">
                                         認証
                                         <select
-                                          className="form-control"
+                                          className="form-control mt-1"
                                           aria-label="MCP 認証"
                                           value={server.auth}
                                           onChange={(e) =>
@@ -1217,10 +1265,10 @@ export function Settings({
                                         </select>
                                       </label>
                                       {server.auth === "bearer" && (
-                                        <label className="form-label">
+                                        <label className="form-label d-block m-0">
                                           Bearer Token
                                           <input
-                                            className="form-control"
+                                            className="form-control mt-1"
                                             type="text"
                                             autoComplete="new-password"
                                             value={
@@ -1242,10 +1290,10 @@ export function Settings({
                                       )}
                                       {server.auth === "oauth" && (
                                         <>
-                                          <label className="form-label">
+                                          <label className="form-label d-block m-0">
                                             Client ID
                                             <input
-                                              className="form-control"
+                                              className="form-control mt-1"
                                               value={server.clientId}
                                               onChange={(e) =>
                                                 update({
@@ -1254,10 +1302,10 @@ export function Settings({
                                               }
                                             />
                                           </label>
-                                          <label className="form-label">
+                                          <label className="form-label d-block m-0">
                                             Client Secret
                                             <input
-                                              className="form-control"
+                                              className="form-control mt-1"
                                               type="text"
                                               autoComplete="new-password"
                                               value={
@@ -1293,10 +1341,10 @@ export function Settings({
                                 </div>
                               </fieldset>
                               {current?.oauth && (
-                                <label className="form-label">
+                                <label className="form-label d-block m-0">
                                   OAuth 認証情報
                                   <textarea
-                                    className="form-control"
+                                    className="form-control mt-1"
                                     aria-label="MCP OAuth 認証情報"
                                     readOnly
                                     rows={6}
@@ -1323,7 +1371,7 @@ export function Settings({
                                   </ul>
                                 </details>
                               )}
-                              <div className="settings-actions">
+                              <div className="d-flex flex-wrap gap-3">
                                 <button
                                   className="btn-outline theme-secondary btn-sm"
                                   disabled={
@@ -1358,9 +1406,9 @@ export function Settings({
                                   認証情報を解除
                                 </button>
                               </div>
-                              <div className="settings-danger-actions">
+                              <div className="d-flex border-top pt-4 mt-1">
                                 <button
-                                  className="btn-text theme-danger btn-sm"
+                                  className="btn-text theme-danger ms-auto"
                                   onClick={() =>
                                     change((s) => ({
                                       ...s,
@@ -1374,61 +1422,31 @@ export function Settings({
                                 </button>
                               </div>
                             </div>
-                          </details>
+                          </SettingsDisclosure>
                         );
                       })}
-                      <button
-                        className="btn-outline theme-secondary"
-                        disabled={draft.mcp.length >= 10}
-                        onClick={() => {
-                          const id = crypto.randomUUID();
-                          toggle(id, true);
-                          change((s) => ({
-                            ...s,
-                            mcp: [
-                              ...s.mcp,
-                              {
-                                id,
-                                name: "",
-                                enabled: true,
-                                transport: "stdio",
-                                command: "",
-                                args: [],
-                                url: "",
-                                privateHosts: [],
-                                auth: "none",
-                                clientId: "",
-                              },
-                            ],
-                          }));
-                        }}
-                      >
-                        MCP を追加
-                      </button>
                     </>
                   )}
                   {tab === "agent" && (
                     <>
-                      <div className="settings-card">
-                        <label className="form-label">
-                          共通指示
-                          <textarea
-                            className="form-control"
-                            aria-label="共通指示"
-                            rows={7}
-                            maxLength={16000}
-                            value={draft.instructions}
-                            onChange={(e) =>
-                              change((s) => ({
-                                ...s,
-                                instructions: e.target.value,
-                              }))
-                            }
-                          />
-                        </label>
+                      <div className="settings-card card card-body p-5 gap-4 mb-5">
+                        <h3 className="fs-md fw-semibold m-0">共通指示</h3>
+                        <textarea
+                          className="form-control mt-1"
+                          aria-label="共通指示"
+                          rows={7}
+                          maxLength={16000}
+                          value={draft.instructions}
+                          onChange={(e) =>
+                            change((s) => ({
+                              ...s,
+                              instructions: e.target.value,
+                            }))
+                          }
+                        />
                       </div>
-                      <fieldset className="settings-card">
-                        <legend>実行上限</legend>
+                      <div className="settings-card card card-body p-5 gap-4 mb-5">
+                        <h3 className="fs-md fw-semibold m-0">実行上限</h3>
                         <div className="settings-form-grid">
                           {(
                             [
@@ -1443,11 +1461,11 @@ export function Settings({
                           ).map(([key, label, max]) => (
                             <label
                               key={key}
-                              className={`form-label ${key === "modelRequests" ? "settings-span-all" : ""}`}
+                              className={`form-label d-block m-0 ${key === "modelRequests" ? "settings-span-all" : ""}`}
                             >
                               {label}
                               <input
-                                className="form-control"
+                                className="form-control mt-1"
                                 type="number"
                                 min={1}
                                 max={max}
@@ -1465,7 +1483,7 @@ export function Settings({
                             </label>
                           ))}
                         </div>
-                      </fieldset>
+                      </div>
                     </>
                   )}
                 </fieldset>
@@ -1475,32 +1493,13 @@ export function Settings({
           {(dirty ||
             (tab !== "projects" && tab !== "memory" && tab !== "skills")) && (
             <footer className="settings-footer" aria-label="設定の保存">
-              <div className="settings-column settings-footer-content">
-                <span className="settings-save-state" role="status">
-                  {dirty ? "未保存の変更" : "変更なし"}
-                </span>
+              <div className="settings-column settings-footer-content justify-content-end">
                 <button
                   className="btn-solid theme-primary"
                   disabled={busy || loginPending || !dirty}
                   onClick={() => void save()}
                 >
                   {busy ? "処理中…" : "設定を保存"}
-                </button>
-                <button
-                  className="btn-text theme-secondary"
-                  disabled={busy || loginPending}
-                  onClick={() => {
-                    if (
-                      dirty &&
-                      !window.confirm("設定の未保存の変更を破棄しますか？")
-                    )
-                      return;
-                    void perform(async () =>
-                      accept(await api<PublicSettings>("/api/settings")),
-                    );
-                  }}
-                >
-                  {dirty ? "変更を破棄" : "再読み込み"}
                 </button>
               </div>
             </footer>

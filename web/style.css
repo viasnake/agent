@@ -933,24 +933,12 @@ button {
 .settings-navigation {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
   padding: 1.25rem 0.75rem;
   overflow: auto;
   border-right: 1px solid var(--bs-border-muted);
   background: var(--bs-bg-1);
 }
-.settings-nav-group {
-  display: grid;
-  gap: 0.25rem;
-}
-.settings-nav-group h2 {
-  margin: 0 0 0.25rem;
-  padding: 0 0.75rem;
-  color: var(--bs-fg-2);
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-.settings-nav-group button {
+.settings-navigation > button {
   text-align: left;
   justify-content: flex-start;
   white-space: nowrap;
@@ -978,11 +966,6 @@ button {
   gap: 0.5rem;
   align-items: center;
   flex-wrap: wrap;
-}
-.settings-save-state {
-  color: var(--bs-fg-2);
-  font-size: 0.8rem;
-  margin-right: auto;
 }
 .settings-content {
   flex: 1;
@@ -1028,16 +1011,6 @@ button {
 .settings-span-all {
   grid-column: 1 / -1;
 }
-.settings-danger-actions {
-  display: flex;
-  border-top: 1px solid var(--bs-border-muted);
-  padding-top: 0.75rem;
-  margin-top: 0.25rem;
-}
-.settings-content .skills-list,
-.settings-content .memory-content {
-  max-width: none;
-}
 @media (max-width: 1100px) {
   .settings-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -1050,13 +1023,7 @@ button {
     border-right: 0;
     border-bottom: 1px solid var(--bs-border-muted);
   }
-  .settings-nav-group {
-    display: contents;
-  }
-  .settings-nav-group h2 {
-    display: none;
-  }
-  .settings-nav-group button {
+  .settings-navigation > button {
     flex: 0 0 auto;
   }
 }
@@ -1070,9 +1037,6 @@ button {
   .settings-footer {
     padding: 0.75rem 1rem;
   }
-  .settings-save-state {
-    flex-basis: 100%;
-  }
 }
 .settings-fields {
   border: 0;
@@ -1080,54 +1044,6 @@ button {
   margin: 0;
   width: 100%;
   min-width: 0;
-}
-.settings-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  border: 1px solid var(--bs-border-muted);
-  border-radius: 0.75rem;
-  padding: 1rem;
-  margin-bottom: 1rem;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.settings-card legend {
-  float: none;
-  width: auto;
-  font-size: 1rem;
-  padding: 0 0.3rem;
-}
-.settings-card .form-label {
-  display: block;
-  margin: 0;
-}
-.settings-card .form-control {
-  margin-top: 0.3rem;
-}
-.settings-card p {
-  margin: 0;
-}
-.skills-list {
-  display: grid;
-  gap: 1rem;
-  max-width: 48rem;
-}
-.skills-list > .btn {
-  justify-self: start;
-}
-.skills-list > .settings-card,
-.skills-list > p {
-  margin: 0;
-}
-.skills-list h2 {
-  margin: 0;
-  font-size: 1rem;
-}
-.settings-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
 }
 .settings-check {
   display: flex;
@@ -1352,46 +1268,6 @@ button {
   white-space: nowrap;
 }
 
-.settings-disclosure {
-  border: 1px solid var(--bs-border-muted);
-  border-radius: 12px;
-  margin-bottom: 12px;
-  background: var(--bs-bg-body);
-}
-.settings-disclosure > summary {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  cursor: pointer;
-  padding: 16px;
-  list-style: none;
-}
-.settings-disclosure > summary::-webkit-details-marker {
-  display: none;
-}
-.settings-disclosure > summary > span {
-  flex: 1;
-  font-weight: 600;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.settings-disclosure > summary small {
-  font-size: 11px;
-  color: var(--bs-fg-2);
-}
-.settings-disclosure > summary::after {
-  content: "⌄";
-  color: var(--bs-fg-2);
-}
-.settings-disclosure[open] > summary::after {
-  transform: rotate(180deg);
-}
-.settings-disclosure > .settings-card {
-  border: 0;
-  border-top: 1px solid var(--bs-border-muted);
-  border-radius: 0;
-  margin: 0;
-}
 .notification-region {
   position: fixed;
   z-index: 100;
@@ -1825,24 +1701,9 @@ button {
   border-radius: 7px;
   text-decoration: none;
 }
-.memory-note footer {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-.memory-notes {
-  margin-top: 1rem;
-}
-.memory-note {
-  padding: 1rem 0;
-  border-bottom: 1px solid var(--bs-border-muted);
-}
 .memory-note p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-.memory-note time {
-  margin-right: auto;
 }
 @media (max-width: 767px) {
   .sidebar-footer .sidebar-close {
@@ -1861,15 +1722,6 @@ button {
   }
 }
 
-.memory-content {
-  max-width: 48rem;
-}
-.memory-content footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-}
 .conversation-search {
   flex-shrink: 0;
   max-height: 35dvh;

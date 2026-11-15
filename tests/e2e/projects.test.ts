@@ -1,3 +1,4 @@
+import { returnToSession } from "./navigation.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -40,16 +41,44 @@ test("project editor, selection, fetch and preserved drafts work in light/dark a
     await page.goto(origin);
     await page.locator("#message").fill("準備して");
     await page.getByRole("button", { name: "設定", exact: true }).click();
+    await page.route(
+      "**/api/projects",
+      (route) =>
+        route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "読み込みに失敗しました" }),
+        }),
+      { times: 1 },
+    );
     await page
       .getByRole("button", { name: "プロジェクト", exact: true })
       .click();
+    const reload = page.getByRole("button", {
+      name: "一覧を再読み込み",
+      exact: true,
+    });
+    await reload.click();
+    await reload.waitFor({ state: "hidden" });
     await page.getByLabel("プロジェクト名", { exact: true }).fill("横断作業");
     await page.getByLabel("リポジトリ 1", { exact: true }).fill("example/one");
     await page
       .getByRole("button", { name: "リポジトリを追加", exact: true })
       .click();
     await page.getByLabel("リポジトリ 2", { exact: true }).fill("example/two");
-    await page.getByRole("button", { name: "Agent 設定", exact: true }).click();
+    assert.equal(
+      await page
+        .getByRole("button", { name: "プロジェクト", exact: true })
+        .getAttribute("aria-description"),
+      "編集中",
+    );
+    page.once("dialog", (dialog) => void dialog.dismiss());
+    await returnToSession(page);
+    assert.equal(
+      await page.getByLabel("リポジトリ 2", { exact: true }).inputValue(),
+      "example/two",
+    );
+    await page.getByRole("button", { name: "指示・制限", exact: true }).click();
     await page
       .getByRole("button", { name: "プロジェクト", exact: true })
       .click();
@@ -82,9 +111,7 @@ test("project editor, selection, fetch and preserved drafts work in light/dark a
       );
     }
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page
-      .getByRole("button", { name: "セッションに戻る", exact: true })
-      .click();
+    await returnToSession(page);
     assert.equal(await page.locator("#message").inputValue(), "準備して");
     const project = (await f.service.projects())[0]!;
     await page
@@ -165,9 +192,7 @@ test("project editor, selection, fetch and preserved drafts work in light/dark a
       ),
       "shared needle one\n",
     );
-    await page
-      .getByRole("button", { name: "セッションに戻る", exact: true })
-      .click();
+    await returnToSession(page);
     assert.equal(await page.locator("#message").inputValue(), "未送信の下書き");
     assert.deepEqual(errors, []);
   } finally {

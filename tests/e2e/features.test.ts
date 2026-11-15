@@ -1,3 +1,4 @@
+import { returnToSession } from "./navigation.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -256,9 +257,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       .getByRole("button", { name: "セッション一覧を開く", exact: true })
       .click();
     assert.equal((await page.locator("#sidebar").boundingBox())!.width, 272);
-    await page
-      .getByRole("button", { name: "セッションに戻る", exact: true })
-      .click();
+    await returnToSession(page);
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
 
     const filter = page.getByRole("searchbox", { name: "セッションを検索" });

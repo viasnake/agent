@@ -493,6 +493,8 @@ function App() {
   function select(id: string | null) {
     setSearchOpen(false);
     setSettingsOpen(false);
+    setMemoryDraft(null);
+    history.replaceState(null, "", location.pathname);
     setSidebar(false);
     // Reselecting the visible conversation must preserve its subscription and draft.
     if (id !== null && selectedRef.current === id) return;
@@ -1068,11 +1070,6 @@ function App() {
             onDirtyChange={setSettingsDirty}
             memoryDraft={memoryDraft}
             onSelectSource={openSource}
-            onClose={() => {
-              setSettingsOpen(false);
-              setMemoryDraft(null);
-              history.replaceState(null, "", location.pathname);
-            }}
           />
         )}
         <Tabs

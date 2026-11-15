@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { Project, ProjectBinding } from "../src/projects.js";
 import { api, requestId, forget } from "./api.js";
 import { useNotify } from "./notifications.js";
+import { SettingsToolbar } from "./settings-layout.js";
 
 type Draft = {
   id?: string;
@@ -23,8 +24,17 @@ export function Projects({
   const [draft, setDraft] = useState<Draft>(empty);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reloadNeeded, setReloadNeeded] = useState(false);
   async function reload() {
-    setProjects((await api<{ projects: Project[] }>("/api/projects")).projects);
+    try {
+      setProjects(
+        (await api<{ projects: Project[] }>("/api/projects")).projects,
+      );
+      setReloadNeeded(false);
+    } catch (error) {
+      setReloadNeeded(true);
+      throw error;
+    }
   }
   useEffect(() => {
     void reload().catch((error: unknown) =>
@@ -80,6 +90,7 @@ export function Projects({
       await reload();
       notify("プロジェクトを保存しました");
     } catch (error) {
+      setReloadNeeded(true);
       notify(error instanceof Error ? error.message : "操作に失敗しました");
     } finally {
       setBusy(false);
@@ -101,6 +112,7 @@ export function Projects({
       await reload();
       notify("プロジェクトを削除しました");
     } catch (error) {
+      setReloadNeeded(true);
       notify(error instanceof Error ? error.message : "操作に失敗しました");
     } finally {
       setBusy(false);
@@ -108,7 +120,7 @@ export function Projects({
   }
   return (
     <section className="projects-content" aria-label="プロジェクト設定">
-      <div className="d-flex flex-wrap gap-2 mb-3">
+      <SettingsToolbar>
         {projects.map((project) => (
           <button
             type="button"
@@ -129,26 +141,28 @@ export function Projects({
         >
           プロジェクトを追加
         </button>
-        <button
-          type="button"
-          className="btn-outline theme-secondary"
-          disabled={busy}
-          onClick={() =>
-            void reload()
-              .then(() => notify("一覧を再読み込みしました"))
-              .catch((error: unknown) =>
-                notify(
-                  error instanceof Error
-                    ? error.message
-                    : "読み込みに失敗しました",
-                  true,
-                ),
-              )
-          }
-        >
-          一覧を再読み込み
-        </button>
-      </div>
+        {reloadNeeded && (
+          <button
+            type="button"
+            className="btn-outline theme-secondary"
+            disabled={busy}
+            onClick={() =>
+              void reload()
+                .then(() => notify("一覧を再読み込みしました"))
+                .catch((error: unknown) =>
+                  notify(
+                    error instanceof Error
+                      ? error.message
+                      : "読み込みに失敗しました",
+                    true,
+                  ),
+                )
+            }
+          >
+            一覧を再読み込み
+          </button>
+        )}
+      </SettingsToolbar>
       <form
         onSubmit={(event) => {
           event.preventDefault();

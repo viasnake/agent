@@ -109,7 +109,7 @@ fetch reserve the single execution gate without holding the admission lock durin
 Git. Never queue competing execution. Freeze registered work credentials at admission;
 only managed network Git and bash receive them, never read/write tools or model context.
 
-Fetch only refs/heads/_ into refs/remotes/origin/_ using the binding URL, without
+Fetch only `refs/heads/*` into `refs/remotes/origin/*` using the binding URL, without
 rewriting origin, running hooks, following redirects or accepting URL rewrites.
 Publish verified initial bare stores from temporary directories. Resolve all starts
 and persist every baseCommit before adding any worktree on agent/<session-id>.
@@ -170,7 +170,9 @@ auto-discover work-owned Skills, or replace a changed version during resume.
   existing API without client-side tool execution or cloud persistence. Bundle
   browser dependencies locally with esbuild. Use Bootstrap 6 components and
   semantic color variables for controls and custom surfaces, including hover,
-  focus and disabled states. Verify both light and dark system preferences.
+  focus and disabled states. Prefer existing assistant-ui and Bootstrap components
+  and utilities; write custom CSS only when they cannot express the required behavior
+  or layout. Verify both light and dark system preferences.
   Keep Markdown HTML and remote images disabled; allow only safe external links
   and scoped output downloads. Keep UI copy to labels, status and actionable
   errors; avoid explanatory prose. Keep interruption and history-load failures in
@@ -272,7 +274,8 @@ Keep credential-delegation rules in this guidance, not helper prose in forms.
 Use a searchable model picker in the conversation composer;
 persist selections server-side and retain keyboard navigation and focus restoration.
 Model and MCP settings use collapsible sections. Do not show application branding.
-Group settings navigation by connections, work environment and behavior. Separate
+Keep settings navigation flat and labels concise. Avoid redundant status copy and
+normal-state reload or discard controls; retain recovery actions for failures. Separate
 connection identity, authentication and destructive actions within forms. Keep
 the global settings save action distinct from memory and Skill saves and available
 across sections when dirty. Preserve local editors during section changes; confirm
