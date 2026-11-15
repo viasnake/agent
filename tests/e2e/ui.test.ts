@@ -133,14 +133,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       0,
     );
     await mkdir("test-results", { recursive: true });
-    assert.equal(await page.locator("select").count(), 1);
-    assert.equal(
-      await page
-        .getByRole("combobox", { name: "プロジェクト", exact: true })
-        .inputValue(),
-      "",
-      "The optional project picker defaults to a standalone session; no job category is required",
-    );
+    assert.equal(await page.locator("select").count(), 0);
     await page.locator("#message").fill("CSV を整形して CSV を返してください");
     await page.locator("#attachments").setInputFiles({
       name: "input.csv",

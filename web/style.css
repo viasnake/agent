@@ -1776,22 +1776,3 @@ button {
 .skills-list li {
   overflow-wrap: anywhere;
 }
-
-.project-picker {
-  width: auto;
-  max-width: 14rem;
-}
-.project-summary {
-  max-height: 25vh;
-  overflow: auto;
-  flex-shrink: 0;
-  overflow-wrap: anywhere;
-  color: var(--bs-fg-2);
-  font-size: 0.85rem;
-}
-.projects-content fieldset {
-  min-width: 0;
-}
-.projects-content .d-flex {
-  flex-wrap: wrap;
-}

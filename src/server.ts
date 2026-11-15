@@ -341,41 +341,6 @@ export async function createServer(
   app.get("/api/history", async (request) =>
     safe(await service.memory.search(historyInput.parse(request.query))),
   );
-  app.get("/api/projects", async () =>
-    safe({ projects: await service.projects() }),
-  );
-  app.post("/api/projects", async (request, reply) => {
-    const { requestId: key, ...input } = z
-      .object({ requestId, name: z.unknown(), repositories: z.unknown() })
-      .strict()
-      .parse(request.body);
-    return reply.code(201).send(safe(await service.saveProject(key, input)));
-  });
-  app.put("/api/projects/:id", async (request) => {
-    const { id } = identifier.parse(request.params);
-    const { revision, ...input } = z
-      .object({
-        revision: z.number().int().positive(),
-        name: z.unknown(),
-        repositories: z.unknown(),
-      })
-      .strict()
-      .parse(request.body);
-    return safe(await service.saveProject("", input, id, revision));
-  });
-  app.delete("/api/projects/:id", async (request) => {
-    const { id } = identifier.parse(request.params);
-    const { revision } = z
-      .object({ revision: z.number().int().positive() })
-      .strict()
-      .parse(request.body);
-    return service.deleteProject(id, revision);
-  });
-  app.post("/api/conversations/:id/repositories/fetch", async (request) => {
-    const { id } = identifier.parse(request.params);
-    z.object({}).strict().parse(request.body);
-    return service.fetchRepositories(id);
-  });
   app.get("/api/conversations", async () =>
     safe({ conversations: (await service.list()).reverse() }),
   );
@@ -383,7 +348,6 @@ export async function createServer(
     const body = z
       .object({
         requestId,
-        projectId: z.string().uuid().optional(),
         title: z.string().min(1).max(200),
         modelId: z.string().uuid().optional(),
         model: z.string().min(1).max(200).optional(),
@@ -398,7 +362,6 @@ export async function createServer(
           body.title,
           body.modelId,
           body.model,
-          body.projectId,
         ),
       );
   });

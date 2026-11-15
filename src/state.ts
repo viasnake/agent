@@ -1,4 +1,3 @@
-import type { ProjectBinding } from "./projects.js";
 import type { SkillVersions } from "./skills.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { ConversationId } from "@earendil-works/pi-durable";
@@ -18,7 +17,8 @@ export type Conversation = {
   pinned?: boolean;
   archived?: boolean;
   workspaceCreated?: boolean;
-  project?: ProjectBinding;
+  // Existing bindings are retained only to recover deletion of their worktrees.
+  project?: { repositories: { key: string }[] };
   modelConfigId?: string;
   model?: string;
   skills?: SkillVersions;

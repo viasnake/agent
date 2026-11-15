@@ -1,4 +1,3 @@
-import { Projects } from "./projects.js";
 import {
   SettingsToolbar,
   SettingsDisclosure,
@@ -21,7 +20,6 @@ const settingsSections = [
   ["models", "モデル"],
   ["mcp", "MCP"],
   ["credentials", "クレデンシャル"],
-  ["projects", "プロジェクト"],
   ["skills", "Skills"],
   ["agent", "指示・制限"],
   ["memory", "記憶"],
@@ -132,7 +130,6 @@ export function Settings({
   );
   const [visited, setVisited] = useState(() => new Set<Tab>([tab]));
   const [memoryDirty, setMemoryDirty] = useState(false);
-  const [projectsDirty, setProjectsDirty] = useState(false);
   const [skillsDirty, setSkillsDirty] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const navigation = useRef<HTMLElement>(null);
@@ -141,7 +138,7 @@ export function Settings({
   const [environments, setEnvironments] = useState<
     Record<string, EnvironmentRow[]>
   >({});
-  const unsaved = dirty || memoryDirty || skillsDirty || projectsDirty;
+  const unsaved = dirty || memoryDirty || skillsDirty;
   function canLeave() {
     return confirmSettingsExit(unsaved);
   }
@@ -342,8 +339,7 @@ export function Settings({
               aria-label={label}
               aria-description={
                 (id === "memory" && memoryDirty) ||
-                (id === "skills" && skillsDirty) ||
-                (id === "projects" && projectsDirty)
+                (id === "skills" && skillsDirty)
                   ? "編集中"
                   : undefined
               }
@@ -355,8 +351,7 @@ export function Settings({
             >
               {label}
               {((id === "memory" && memoryDirty) ||
-                (id === "skills" && skillsDirty) ||
-                (id === "projects" && projectsDirty)) && (
+                (id === "skills" && skillsDirty)) && (
                 <small className="settings-editing" aria-hidden="true">
                   編集中
                 </small>
@@ -459,11 +454,6 @@ export function Settings({
                   )}
                 </section>
               )}
-              {visited.has("projects") && (
-                <div hidden={tab !== "projects"}>
-                  <Projects onDirtyChange={setProjectsDirty} />
-                </div>
-              )}
               {visited.has("skills") && (
                 <div hidden={tab !== "skills"}>
                   <Skills onDirtyChange={setSkillsDirty} />
@@ -480,9 +470,7 @@ export function Settings({
                   />
                 </div>
               )}
-              {tab === "projects" ||
-              tab === "skills" ||
-              tab === "memory" ? null : !draft ? (
+              {tab === "skills" || tab === "memory" ? null : !draft ? (
                 loadFailed ? (
                   <button
                     className="btn-outline theme-secondary"
@@ -1490,8 +1478,7 @@ export function Settings({
               )}
             </div>
           </div>
-          {(dirty ||
-            (tab !== "projects" && tab !== "memory" && tab !== "skills")) && (
+          {(dirty || (tab !== "memory" && tab !== "skills")) && (
             <footer className="settings-footer" aria-label="設定の保存">
               <div className="settings-column settings-footer-content justify-content-end">
                 <button
