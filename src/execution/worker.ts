@@ -59,9 +59,10 @@ export class Worker {
     );
   }
   private env(): Record<string, string> {
+    const home = join(this.options.root, "home");
     return {
-      PATH: "/opt/agent-node/bin:/opt/agent-python/bin:/usr/local/bin:/usr/bin:/bin",
-      HOME: join(this.options.root, "home"),
+      PATH: `/opt/agent-node/bin:/opt/agent-python/bin:/usr/local/bin:/usr/bin:/bin:${join(home, ".local", "bin")}`,
+      HOME: home,
       TMPDIR: join(this.options.root, "tmp"),
       LANG: "C.UTF-8",
     };
