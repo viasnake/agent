@@ -2,14 +2,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { replySchema } from "../src/execution/protocol.js";
 import type { WorkerRequest, WorkerResult } from "../src/execution/protocol.js";
 
 test("S02: real worker stdio protocol, file operations, command cancellation and allowlisted shell environment", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agent-worker-protocol-")),
+  const temporary = await mkdtemp(join(tmpdir(), "agent-worker-protocol-")),
+    root = join(temporary, "custom data", "work"),
     conversationId = randomUUID();
   const child = spawn(
     process.execPath,
@@ -71,6 +72,66 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
         'test -z "${AGENT_CONTROL_TOKEN-}${NODE_OPTIONS-}${LD_PRELOAD-}"',
     }).result;
     assert.equal(environment.result?.isError, undefined);
+    const home = join(root, "home"),
+      localBin = join(home, ".local", "bin"),
+      outputs = join(root, "conversations", conversationId, "outputs"),
+      runtimeCommand =
+        "set -e; command -v node python3 sh; node --version; python3 --version";
+    const runtimes = await tool("bash", { command: runtimeCommand }).result;
+    assert.equal(runtimes.result?.isError, undefined);
+    await mkdir(localBin, { recursive: true });
+    await writeFile(
+      join(localBin, "agent-path-probe"),
+      '#!/bin/sh\nset -eu\ntest -z "${AGENT_CONTROL_TOKEN-}"\nprintf \'%s\\n\' local-cli "$HOME" "$PATH"\n',
+      { mode: 0o700 },
+    );
+    // Local names must not shadow existing runtimes or system commands.
+    for (const name of ["node", "python3", "sh"])
+      await writeFile(join(localBin, name), "#!/bin/sh\nexit 99\n", {
+        mode: 0o700,
+      });
+    for (const name of [".bashrc", ".profile", ".bash_profile"])
+      await writeFile(join(home, name), "exit 99\n");
+    const local = await tool("bash", {
+      command: "agent-path-probe > outputs/local-cli",
+    }).result;
+    assert.equal(local.result?.isError, undefined, JSON.stringify(local));
+    const expected = [
+      "local-cli",
+      home,
+      `/opt/agent-node/bin:/opt/agent-python/bin:/usr/local/bin:/usr/bin:/bin:${localBin}`,
+      "",
+    ].join("\n");
+    assert.equal(await readFile(join(outputs, "local-cli"), "utf8"), expected);
+    const unchanged = await tool("bash", { command: runtimeCommand }).result;
+    assert.equal(unchanged.result?.isError, undefined);
+    assert.deepEqual(unchanged.result?.output, runtimes.result?.output);
+    // A configured stdio MCP process receives the same work-side PATH.
+    const mcpCommand = join(localBin, "agent-mcp-probe");
+    await writeFile(
+      mcpCommand,
+      '#!/bin/sh\nset -eu\nagent-path-probe > outputs/mcp-cli\nexec "$@"\n',
+      { mode: 0o700 },
+    );
+    const server = {
+      name: "local-path",
+      command: mcpCommand,
+      args: [process.execPath, resolve(".test-dist/tests/mcp-server.js")],
+      env: {},
+    };
+    assert.ok(
+      (await send("mcp_list", { server }).result).tools?.some(
+        (entry) => entry.name === "greet",
+      ),
+    );
+    assert.equal(await readFile(join(outputs, "mcp-cli"), "utf8"), expected);
+    const greeting = await send("mcp_call", {
+      server,
+      name: "greet",
+      args: { name: "local CLI" },
+    }).result;
+    assert.equal(greeting.result?.isError, false);
+    assert.match(JSON.stringify(greeting), /Hello local CLI/);
     const running = tool("bash", {
       command: "printf started > child-marker; sleep 30",
     });
@@ -102,5 +163,6 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
     });
     child.stdin.end();
     await exit;
+    await rm(temporary, { recursive: true, force: true });
   }
 });
