@@ -4,6 +4,7 @@ import { NotificationProvider, useNotify } from "./notifications.js";
 import { ModelPicker } from "./model-picker.js";
 import { SessionList } from "./sessions.js";
 import { SessionUsage } from "./usage.js";
+import { CoordinatorWork } from "./coordinator.js";
 import { MessageActions, MessageActionDialog } from "./message-actions.js";
 import { SelectionToolbar, SessionBranches } from "./message-controls.js";
 import type { MessageAction } from "./message-actions.js";
@@ -507,6 +508,19 @@ function App() {
     try {
       const session = await api<{ csrf: string }>("/api/session");
       setCsrf(session.csrf);
+      const parent = await api<{ id: string }>("/api/coordinator", "POST", {});
+      if (!selectionVersion.current) {
+        const initialSettings = location.search;
+        select(parent.id);
+        if (new URLSearchParams(initialSettings).has("settings")) {
+          history.replaceState(
+            null,
+            "",
+            `${location.pathname}${initialSettings}`,
+          );
+          setSettingsOpen(true);
+        }
+      }
       setReady(true);
     } catch (error) {
       notice(error);
@@ -962,7 +976,22 @@ function App() {
         id="sidebar"
         className={`sidebar ${sidebar ? "sidebar-open" : ""}`}
       >
-        <div className="sidebar-header">
+        <div className="sidebar-header flex-column">
+          <button
+            className="btn-text theme-primary new-conversation"
+            aria-label="アシスタントを開く"
+            title="アシスタント"
+            onClick={() => {
+              if (settingsOpen && !confirmSettingsExit(settingsDirty)) return;
+              const parent = conversations.find(
+                (c) => c.role === "coordinator",
+              );
+              if (parent) select(parent.id);
+            }}
+          >
+            <Icon name="chat" />
+            <span className="sidebar-label-text">アシスタント</span>
+          </button>
           <button
             id="new-conversation"
             aria-label="新しいセッション"
@@ -979,9 +1008,13 @@ function App() {
           </button>
         </div>
         <SessionList
-          sessions={conversations.map((session) =>
-            session.id === view?.conversation.id ? view.conversation : session,
-          )}
+          sessions={conversations
+            .filter((s) => s.role !== "coordinator")
+            .map((session) =>
+              session.id === view?.conversation.id
+                ? view.conversation
+                : session,
+            )}
           selected={selected}
           disabled={sending || deleting}
           onSelect={(id) => {
@@ -1099,6 +1132,30 @@ function App() {
                 </span>
               )}
               <div id="actions" className="ms-auto">
+                {view && view.conversation.role !== "coordinator" && (
+                  <button
+                    className="btn-text theme-secondary btn-sm"
+                    disabled={
+                      acting ||
+                      currentStatus === "running" ||
+                      currentStatus === "stopping"
+                    }
+                    onClick={() => {
+                      void api(
+                        `/api/conversations/${view.conversation.id}/coordinator`,
+                        "PUT",
+                        { enabled: !view.conversation.coordinatorId },
+                      )
+                        .then(() => {
+                          void list();
+                          setReload((v) => v + 1);
+                        })
+                        .catch(notice);
+                    }}
+                  >
+                    {view.conversation.coordinatorId ? "管理を外す" : "任せる"}
+                  </button>
+                )}
                 {selected && (
                   <button
                     className="btn-text theme-secondary btn-sm icon-button"
@@ -1128,6 +1185,23 @@ function App() {
                 )}
               </div>
             </header>
+            {view?.coordination && (
+              <CoordinatorWork value={view.coordination} onSelect={select} />
+            )}
+            {view?.conversation.coordinatorId && (
+              <div className="small px-3 py-1">
+                {view.conversation.paused
+                  ? "作業を停止中"
+                  : "アシスタントが管理"}{" "}
+                · 指示 {view.conversation.directiveVersion}
+                <button
+                  className="btn-text theme-primary btn-sm"
+                  onClick={() => select(view.conversation.coordinatorId!)}
+                >
+                  アシスタントへ
+                </button>
+              </div>
+            )}
             <TabsList className="session-tabs" aria-label="セッションの内容">
               <TabsTrigger
                 value="chat"
@@ -1263,6 +1337,7 @@ function App() {
                   <MessageActions.Provider
                     value={{
                       disabled:
+                        view?.conversation.role === "coordinator" ||
                         sending ||
                         changingModel ||
                         acting ||

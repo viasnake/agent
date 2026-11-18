@@ -163,14 +163,18 @@ test("browser displays credentials and shares them with every session in light a
       .fill("確認してください");
     await page.getByRole("button", { name: "送る", exact: true }).click();
     await page.getByText("完了", { exact: true }).waitFor();
-    await until(
-      async () =>
-        (await f.service.list()).length === 1 &&
-        (await f.service.list())[0]!.status === "idle",
-    );
-    assert.ok(!("credentialIds" in (await f.service.list())[0]!));
+    const workSessions = async () =>
+      (await f.service.list()).filter(
+        (session) => session.role !== "coordinator",
+      );
+    await until(async () => {
+      const sessions = await workSessions();
+      return sessions.length === 1 && sessions[0]!.status === "idle";
+    });
+    const session = (await workSessions())[0]!;
+    assert.ok(!("credentialIds" in session));
     assert.match(
-      JSON.stringify(await f.service.view((await f.service.list())[0]!.id)),
+      JSON.stringify(await f.service.view(session.id)),
       /configured/,
     );
     await page.reload();

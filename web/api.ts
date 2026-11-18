@@ -1,4 +1,5 @@
 import type { ConversationUsage } from "../src/usage.js";
+import type { RequestBudget } from "../src/coordinator-state.js";
 
 export type Message = {
   role: string;
@@ -21,6 +22,12 @@ export type Conversation = {
   modelConfigId?: string;
   model?: string;
   parentId?: string;
+  role?: "coordinator";
+  coordinatorId?: string;
+  directiveVersion?: number;
+  controlEpoch?: number;
+  paused?: boolean;
+  budgetId?: string;
   forkEntry?: number;
   branchSource?: { entryId: number; mode: "fork" | "edit" | "regenerate" };
   pinned?: boolean;
@@ -30,6 +37,15 @@ export type View = {
   conversation: Conversation;
   transcript: Entry[];
   usage: ConversationUsage;
+  coordination?: {
+    id?: string;
+    paused: boolean;
+    inputVersion: number;
+    requests: RequestBudget[];
+    sessions: Conversation[];
+    pending: { sequence: number; sessionId: string }[];
+    notifications: number;
+  };
   cursor: unknown;
   modelConfigured: boolean;
   pendingInputs: number;

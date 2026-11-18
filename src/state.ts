@@ -12,6 +12,13 @@ export type Conversation = {
   deletedAt?: number;
   purgedAt?: number;
   parentId?: string;
+  role?: "coordinator";
+  coordinatorId?: string;
+  directiveVersion?: number;
+  controlEpoch?: number;
+  paused?: boolean;
+  budgetId?: string;
+  dispatchSequence?: number;
   forkEntry?: number;
   branchSource?: { entryId: number; mode: "fork" | "edit" | "regenerate" };
   pinned?: boolean;
