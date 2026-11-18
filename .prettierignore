@@ -6,3 +6,4 @@ package-lock.json
 .codex
 .aws
 test-results
+.codex-attachments

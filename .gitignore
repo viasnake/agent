@@ -9,6 +9,7 @@ coverage/
 .agent/
 .agents/
 .codex/
+.codex-attachments/
 .aws/
 test-results/
 playwright-report/

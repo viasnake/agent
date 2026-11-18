@@ -8,8 +8,10 @@ Pi Durable 1.5.0, SQLite and separate control/work users. Machine provisioning,
 virtualization, disks, OS initialization and host networking belong outside this
 repository. Agent does not depend on or invoke a VM manager, including Devbox.
 The user-facing unit is a session containing a Pi conversation and its working
-directory. An answered session accepts more input. At most one session executes; other
-execution requests receive busy, without a host FIFO or scheduler.
+directory. The default entry is one persistent assistant (Coordinator). Its control
+and response slot can run alongside one work session; other direct work requests
+receive busy. Bounded managed instructions wait in Pi Documents inside the existing
+service. There is no general scheduler or continuously running model.
 
 install/install.sh downloads checksum-pinned Node.js 26.13.0 and standalone
 Python 3.14.10 for Agent. Keep them root-owned under /opt/agent-node and
@@ -28,6 +30,44 @@ A response ending is not proof that its contents are correct. Use ordinary
 CLI/API/scripts and configured MCP tools for new kinds of work.
 
 ## Work and delivery
+
+The Coordinator uses ownerless public Pi conversations through a host broker.
+Keep management ownership (`coordinatorId`) separate from fork ancestry (`parentId`).
+Only explicit browser actions adopt existing sessions. Authenticate management tools
+from the active Pi conversation, recheck ownership, directiveVersion and controlEpoch
+inside admission, and deny management and global knowledge writes to work sessions.
+The Coordinator has no arbitrary shell or MCP tools. Freeze its provider credentials,
+model, cancellation, budgets and selected extensions independently from the work slot.
+Do not let later extension registration change a running session's selected tools.
+
+Keep commands, notifications, shared request budgets and their admission receipts in
+public Pi Document transactions. Remove a command or notification in the same commit
+that submits its Pi input. Wait for Pi waitForIdle, including afterRun, before reporting
+a result. A result does not automatically complete the user request. Managed corrections
+share the originating allowance: eight children, three correction rounds, the configured
+call/time limits, and a bounded token allowance. Reserve conservatively before dispatch
+and record actual reported usage; unknown cost remains unknown. Explicit user inputs
+can renew an exhausted allowance without clearing cumulative usage.
+
+Stops persist epochs and cancel pending instructions. Restart may deliver previously
+authorized, unadmitted instructions or inspection notifications; it must not replay an
+interrupted external operation. Interrupted children remain paused for user inspection.
+The assistant's own stop affects its current response; stop-all disables autonomous
+continuation. Keep all model calls event-driven. Reject stale commands and expired
+receipts instead of treating them as new work. Coordinator branching, edit/regeneration,
+archive and deletion are unavailable; corrections are new inputs.
+
+Canonical private Markdown knowledge lives in agent.knowledge, with revisions and
+runtime-derived source lineage; existing agent.memories stays readable and unchanged.
+Work sessions receive only supplied context and their own history tools. Knowledge
+search/read is bounded, and Settings supports manual Markdown edits. Deleting a source
+removes current and superseded derived knowledge and related request/control state.
+Use public Pi handoff after committing a version-checked checkpoint; retain stored
+history and reject an outdated input version. Request maintenance within the admitted
+run when the active model history exceeds 32,000 serialized UTF-8 bytes. Never silently
+trim instructions or reset without a saved handoff; maintenance shares the request budget.
+Do not create a filesystem knowledge copy
+with an independent edit path or claim a character count is an exact token count.
 
 Inspect the worktree and preserve unrelated changes, user data and Git history.
 Never delete or automatically convert legacy databases or work directories.
@@ -83,7 +123,7 @@ history reads use message timestamps and an explicit IANA timezone; inherited fo
 are not counted twice. Summaries of prior days belong in the normal conversation,
 using bounded search and source reads, not a separate daily-report UI. Keep memory
 management in Settings and title/body searches inside the sidebar. In-conversation
-search stays inline; opening search must preserve the composer and subscription. No background extraction, scheduler or separate model passes.
+search stays inline; opening search must preserve the composer and subscription. No background extraction, general scheduler or per-message summarization pass.
 Memory tool use stays inside the admitted conversation's dispatch and time budgets.
 
 Use Japanese for UI and README, English for code, comments and commits. Keep
@@ -194,8 +234,9 @@ Inspect installed SDK exports/declarations before changing integration code.
 Use public Pi APIs. Keep inputs and their metadata in the same transaction;
 transaction drafts must not escape commits. Pi owns its tasks, inbox, history
 and tool replay policy. Do not implement a second workflow model or directly edit
-SDK tables. Execution tools remain replay-unsafe. Reopen never resumes inference
-or commands without explicit user input; preserve unapplied input when aborting.
+SDK tables. Execution tools remain replay-unsafe. Reopen only resumes saved Coordinator
+admission/inspection permissions; it never blindly replays interrupted work tools.
+Independent sessions still require explicit input. Preserve unapplied input when aborting.
 A failed storage session must stop and reopen, not continue accepting input.
 
 ## Safety
