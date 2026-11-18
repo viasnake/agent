@@ -23,6 +23,9 @@ import type { State } from "./state.js";
 import type { Memory } from "./memory.js";
 import { hash } from "./security.js";
 import { worktreePlan } from "./execution/worktrees.js";
+import { withoutSession } from "./coordinator-state.js";
+import type { CoordinatorState } from "./coordinator-state.js";
+import type { KnowledgeState } from "./knowledge.js";
 
 const markerName = "session-deletion.json";
 const stagingName = "conversations-delete.sqlite";
@@ -122,6 +125,24 @@ export async function copyWithoutSession(
         }
       : item,
   );
+  const coordination = await document(source, "agent.coordinator");
+  if (coordination) {
+    const budgets = new Set(
+      withoutSession(
+        coordination.value as unknown as CoordinatorState,
+        purged,
+      ).budgets.map((b) => b.id),
+    );
+    for (const session of state.conversations)
+      if (session.budgetId && !budgets.has(session.budgetId)) {
+        delete session.budgetId;
+        delete session.dispatchSequence;
+        if (session.coordinatorId) {
+          session.paused = true;
+          session.controlEpoch = (session.controlEpoch ?? 0) + 1;
+        }
+      }
+  }
 
   const records = new Map<
     ConversationId,
@@ -245,6 +266,19 @@ export async function copyWithoutSession(
       present.add(record.id);
       if (record.kind === "agent.conversations")
         stored.value = state as unknown as JsonObject;
+      if (record.kind === "agent.coordinator")
+        stored.value = withoutSession(
+          stored.value as unknown as CoordinatorState,
+          purged,
+        ) as unknown as JsonObject;
+      if (record.kind === "agent.knowledge")
+        stored.value = {
+          ...stored.value,
+          notes: (stored.value as unknown as KnowledgeState).notes.filter(
+            (note) =>
+              !note.sources.some((source) => purged.has(source.sessionId)),
+          ),
+        } as unknown as JsonObject;
       if (record.kind === "agent.memories") {
         const notes = (stored.value as unknown as { notes: Memory[] }).notes;
         stored.value = {

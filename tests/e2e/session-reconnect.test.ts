@@ -43,7 +43,20 @@ test("deletion renews a browser session after server restart without losing a dr
     });
     assert.equal(await dialog.locator("p").count(), 1);
     assert.equal(await dialog.locator("p").innerText(), "削除するセッション");
-    await server.close();
+    const started = performance.now();
+    const deadline = setTimeout(
+      () => server.server.closeAllConnections(),
+      5000,
+    );
+    try {
+      await server.close();
+    } finally {
+      clearTimeout(deadline);
+    }
+    assert.ok(
+      performance.now() - started < 5000,
+      "server shutdown closes the active assistant subscription",
+    );
     server = await createServer(f.service, resolve("dist/web") + "/");
     await listen();
     const rejected = page.waitForResponse(

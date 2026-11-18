@@ -9,6 +9,7 @@ import type {
   OAuthAuth,
   ImageContent,
   UserMessage,
+  Usage,
 } from "@earendil-works/pi-ai";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
@@ -74,6 +75,9 @@ import { skillsTools } from "./skills-tools.js";
 import { sharedCredentials } from "./work-credentials.js";
 import { openSshAgent } from "./ssh-agent.js";
 import { readInstallation } from "./installation.js";
+import { Coordinator } from "./coordinator.js";
+import type { CoordinatorCommand } from "./coordinator-state.js";
+import { CoordinatorDoc, budgetFor } from "./coordinator-state.js";
 
 export type ServiceOptions = {
   skills?: SkillsLoader;
@@ -96,9 +100,11 @@ type Active = {
 const interrupted =
   "実行を中断しました。Shell・CLI・外部更新は完了した可能性があります。履歴と作業ファイルを確認し、通常の CLI/API で状態を調べてから続けてください。判断できない場合は利用者に確認し、同じ更新を無条件に再送しないでください。";
 export class AgentService {
+  readonly coordinator = new Coordinator(this);
   readonly memory = new SessionMemory(this);
   readonly skills: SkillsLoader;
   private skillsExtension?: ReturnType<typeof skillsTools>["extension"];
+  private coordinatorSkills?: ReturnType<typeof skillsTools>["extension"];
   harness!: Harness;
   settings!: SettingsStore;
   remote!: RemoteMcp;
@@ -168,9 +174,11 @@ export class AgentService {
     await this.applySettings();
     this.registry.install(agentTools(this));
     this.registry.install(memoryTools(this));
+    this.registry.install(this.coordinator.extension);
     if (!this.options.storage)
       await finishDeletion(join(this.config.dataRoot, "control"), this.runner);
     await this.openHarness();
+    await this.coordinator.recover();
   }
   private async openHarness(): Promise<void> {
     const path = join(this.config.dataRoot, "control", conversationDatabase),
@@ -447,7 +455,8 @@ export class AgentService {
         guardedProvider(
           this.options.provider ??
             modelProvider({ ...model!, model: this.modelId! }),
-          (session, model) => this.reserve(session, model),
+          (session, model, reservation) =>
+            this.reserve(session, model, reservation),
         ),
       );
     }
@@ -478,7 +487,7 @@ export class AgentService {
   async testMcp(id: string) {
     return this.exclusive(async () => {
       this.assertHealthy();
-      if (this.active)
+      if (this.busy)
         throw new AppError(
           409,
           "実行中です。接続テストは応答終了後に行ってください",
@@ -543,6 +552,8 @@ export class AgentService {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ) {
+    if ((await this.conversation(id)).role === "coordinator")
+      throw new AppError(403, "アシスタントは MCP を実行できません");
     try {
       if (server.transport === "stdio") {
         const result = await this.runner.call(
@@ -657,7 +668,7 @@ export class AgentService {
     }
     return this.management();
   }
-  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+  exclusive<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.serial.then(operation);
     this.serial = result.catch(() => {});
     return result;
@@ -670,7 +681,7 @@ export class AgentService {
     return this.sanitize({
       ...(await this.skills.discover()).view,
       writable: await this.skills.writable(),
-      busy: !!this.active,
+      busy: this.busy,
     });
   }
   async skillDetail(name: string) {
@@ -693,7 +704,7 @@ export class AgentService {
   ) {
     return this.exclusive(async () => {
       this.assertHealthy();
-      if (this.active)
+      if (this.busy)
         throw new AppError(
           409,
           "実行中のセッションを停止してから Skills を変更してください",
@@ -708,13 +719,13 @@ export class AgentService {
   healthy(): boolean {
     return !this.fatal && !this.closing && !this.reopening;
   }
-  private fail(): void {
+  fail(): void {
     if (this.fatal) return;
     this.fatal = true;
     this.resolveClosed();
     this.notify();
   }
-  private assertHealthy(): void {
+  assertHealthy(): void {
     if (!this.healthy())
       throw new AppError(
         503,
@@ -749,8 +760,127 @@ export class AgentService {
       "$1$2[REDACTED]",
     );
   }
-  private notify(): void {
+  notify(): void {
     for (const listener of this.notifications) listener();
+    this.coordinator.kick();
+  }
+  get workBusy() {
+    return !!this.active;
+  }
+  get busy() {
+    return !!this.active || this.coordinator.busy;
+  }
+
+  async coordinatorModel(conversation: Conversation, signal: AbortSignal) {
+    const settings = this.settings.snapshot();
+    const connection = settings.models.find(
+      (m) =>
+        m.id ===
+        (conversation.modelConfigId ??
+          settings.defaultModel ??
+          settings.models[0]?.id),
+    );
+    if (conversation.modelConfigId && !connection)
+      throw new AppError(409, "選択したモデルがありません");
+    const modelId = this.selectedModel(connection, conversation.model);
+    if (
+      !modelId ||
+      (!this.options.provider && (!connection || !modelCredential(connection)))
+    )
+      throw new AppError(409, "設定画面でモデルの認証を完了してください");
+    const provider =
+      this.options.provider ??
+      modelProvider({ ...connection!, model: modelId });
+    const credentials = connection
+      ? this.settings.credentials(connection)
+      : new InMemoryCredentialStore();
+    const models = createModels({
+      credentials,
+      authContext: {
+        env: async () => undefined,
+        fileExists: async () => false,
+      },
+    });
+    models.setProvider(
+      guardedProvider(provider, (session, model, reservation) =>
+        this.coordinator.reserve(session, model, reservation),
+      ),
+    );
+    const model = models.getModel(provider.id, modelId);
+    if (!model) throw new AppError(409, "モデルを選び直してください");
+    if (
+      provider.id === "github-copilot" &&
+      !(
+        await copilotAccountModels(
+          models,
+          credentials,
+          AbortSignal.timeout(10000),
+        )
+      ).includes(modelId)
+    )
+      throw new AppError(409, "利用できないモデルです");
+    // The adapter has no credentials. All auth and refresh stay in this frozen
+    // admission's Models instance; worker settings cannot replace them.
+    const adapter = "agent-coordinator";
+    this.models.setProvider({
+      id: adapter,
+      name: "Coordinator",
+      auth: {
+        apiKey: { name: "Internal", resolve: async () => ({ auth: {} }) },
+      },
+      getModels: () => [{ ...model, provider: adapter }],
+      stream: (_model, context, options) =>
+        models.stream(model, context, {
+          ...options,
+          signal: AbortSignal.any([
+            signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        }),
+      streamSimple: (_model, context, options) =>
+        models.streamSimple(model, context, {
+          ...options,
+          signal: AbortSignal.any([
+            signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        }),
+    });
+    return {
+      provider: adapter,
+      model: modelId,
+      configId: connection?.id,
+      acceptsImages: model.input.includes("image"),
+    };
+  }
+  async prepareCoordinatorSkills(conversation: Conversation, text: string) {
+    const snapshot = await this.skills.discover();
+    const explicit = explicitSkill(text);
+    const versions = snapshot.versions();
+    const runtime = snapshot.catalog()
+      ? skillsTools(
+          this,
+          snapshot,
+          explicit ? this.redact(text) : undefined,
+          "coordinator-skills",
+        )
+      : undefined;
+    if (explicit) {
+      if (!runtime)
+        throw new AppError(409, "指定された Skill は利用できません");
+      await runtime.activate(explicit);
+      versions.explicit = explicit;
+    }
+    if (conversation.status === "interrupted" && conversation.skills)
+      snapshot.retain(conversation.skills);
+    if (this.coordinatorSkills) this.registry.uninstall(this.coordinatorSkills);
+    this.coordinatorSkills = runtime?.extension;
+    if (this.coordinatorSkills) this.registry.install(this.coordinatorSkills);
+    return {
+      extensions: this.coordinatorSkills ? [this.coordinatorSkills] : [],
+      catalog: this.redact(snapshot.catalog()),
+      versions,
+    };
   }
   async list(): Promise<Conversation[]> {
     this.assertHealthy();
@@ -844,6 +974,8 @@ export class AgentService {
     return this.exclusive(async () => {
       this.assertHealthy();
       const current = await this.conversation(id);
+      if (current.role === "coordinator" && change.archived)
+        throw new AppError(409, "アシスタントはアーカイブできません");
       if (
         change.archived &&
         (current.status === "running" || current.status === "stopping")
@@ -870,6 +1002,11 @@ export class AgentService {
     return this.exclusive(async () => {
       this.assertHealthy();
       const parent = await this.conversation(id);
+      if (parent.role === "coordinator")
+        throw new AppError(
+          409,
+          "アシスタントの訂正は新しい入力で送ってください",
+        );
       if (
         this.active ||
         parent.status === "running" ||
@@ -994,8 +1131,10 @@ export class AgentService {
       )?.conversations.find((item) => item.id === id);
       if (!conversation) throw new AppError(404, "セッションがありません");
       if (conversation.purgedAt) return { id };
+      if (conversation.role === "coordinator")
+        throw new AppError(409, "常設アシスタントは削除できません");
       if (
-        this.active ||
+        this.busy ||
         conversation.status === "running" ||
         conversation.status === "stopping"
       )
@@ -1032,6 +1171,8 @@ export class AgentService {
     signal?: AbortSignal,
   ) {
     const id = await this.toolConversation(piId);
+    if ((await this.conversation(id)).role === "coordinator")
+      throw new AppError(403, "アシスタントは作業ツールを実行できません");
     const credentials = this.active!.credentials;
     signal = AbortSignal.any([
       ...(signal ? [signal] : []),
@@ -1139,8 +1280,23 @@ export class AgentService {
     options: {
       continuing?: boolean;
       source?: { sessionId: string; entryId: number };
+      coordinator?: CoordinatorCommand;
     } = {},
   ): Promise<{ id: string }> {
+    if ((await this.conversation(id)).role === "coordinator") {
+      if (options.continuing || options.source)
+        throw new AppError(
+          409,
+          "アシスタントの訂正は新しい入力で送ってください",
+        );
+      return this.coordinator.send(
+        id,
+        requestId,
+        resume ? interrupted : text,
+        undefined,
+        attachments,
+      );
+    }
     if (
       options.continuing &&
       (resume || text || attachments.length || options.source)
@@ -1318,6 +1474,24 @@ export class AgentService {
         await pi.configure(
           {
             model: { provider: this.providerId, modelId: this.modelId },
+            extensions: this.registry
+              .snapshot()
+              .installed()
+              .filter(
+                (extension) =>
+                  !["coordinator", "coordinator-skills"].includes(
+                    extension.name,
+                  ),
+              ),
+            tools: conversation.coordinatorId
+              ? {
+                  remove: memoryTools(this).tools!.filter((tool) =>
+                    ["memory_save", "memory_update", "memory_forget"].includes(
+                      tool.name,
+                    ),
+                  ),
+                }
+              : null,
             instructions:
               this.instructions(id, skillSnapshot?.catalog()) +
               `\nAvailable credential environment variable names: ${Object.keys(admittedCredentials.env).join(", ") || "none"}. SSH authentication: ${admittedCredentials.keys.length ? "available automatically through SSH_AUTH_SOCK" : "not configured"}. Use these credentials without printing their values.`,
@@ -1343,6 +1517,12 @@ export class AgentService {
             record = state.conversations.find((item) => item.id === id)!;
           if (Object.keys(state.receipts).length >= 10000)
             throw new AppError(413, "入力の保存上限に達しました");
+          await this.coordinator.admitted(
+            tx,
+            record,
+            requestId,
+            options.coordinator,
+          );
           await pi.submit(
             tx,
             options.continuing
@@ -1367,6 +1547,12 @@ export class AgentService {
             record.requests = 0;
             record.deadlineAt =
               Date.now() + this.config.limits.runSeconds * 1000;
+            if (record.coordinatorId && record.budgetId)
+              record.deadlineAt = Math.min(
+                record.deadlineAt,
+                budgetFor(await tx.doc(CoordinatorDoc), record.budgetId)
+                  .deadline,
+              );
           }
           state.receipts[requestId] = { hash: digest, id };
         }, ctx);
@@ -1380,6 +1566,15 @@ export class AgentService {
       this.active!.version++;
       if (starting) {
         const active = this.active!;
+        clearTimeout(active.timer);
+        active.timer = setTimeout(
+          () => {
+            void this.stop(id, "実行時間の上限に達しました").catch(() =>
+              this.fail(),
+            );
+          },
+          Math.max(1, (await this.conversation(id)).deadlineAt! - Date.now()),
+        );
         this.monitor = this.monitorConversation(active, pi).catch(() => {
           this.fail();
         });
@@ -1422,6 +1617,7 @@ export class AgentService {
                   : "応答が中断されました"
             : "応答が終了しました";
           conversation.updatedAt = Date.now();
+          await this.coordinator.finished(tx, conversation);
         }, ctx);
         clearTimeout(active.timer);
         this.active = undefined;
@@ -1431,7 +1627,7 @@ export class AgentService {
       if (settled) return;
     }
   }
-  private async abortRetainingInput(pi: PiConversation): Promise<void> {
+  async abortRetainingInput(pi: PiConversation): Promise<void> {
     const inbox = await this.harness.snapshot(InboxDoc, pi.id, ctx);
     await pi.abort(ctx, { background: true });
     // Pi withdraws queued inputs on abort. Keep any unapplied text in the transcript without starting inference.
@@ -1464,10 +1660,32 @@ export class AgentService {
   async stop(
     id: string,
     detail = "応答を停止しました",
+    management?: { piId: ConversationId; version: number; epoch: number },
   ): Promise<{ id: string }> {
+    if ((await this.conversation(id)).role === "coordinator") {
+      if (management) throw new AppError(403, "管理権限がありません");
+      await this.coordinator.stop();
+      return { id };
+    }
     return this.exclusive(async () => {
       this.assertHealthy();
       const conversation = await this.conversation(id);
+      if (management) {
+        const actor = await this.coordinator.actor(management.piId);
+        if (
+          conversation.coordinatorId !== actor.id ||
+          conversation.directiveVersion !== management.version ||
+          conversation.controlEpoch !== management.epoch
+        )
+          throw new AppError(409, "管理対象または指示が更新されています");
+      }
+      await this.harness.commit(async (tx) => {
+        const current = (await tx.doc(ConversationsDoc)).conversations.find(
+          (c) => c.id === id,
+        )!;
+        await this.coordinator.pauseChild(tx, current);
+      }, ctx);
+      this.notify();
       if (this.active && this.active.id !== id) return { id };
       if (!this.active && conversation.status === "idle") return { id };
       const active = this.active;
@@ -1507,11 +1725,12 @@ export class AgentService {
   private async reserve(
     sessionId: string | undefined,
     modelId: string,
-  ): Promise<void> {
+    reservation: number,
+  ): Promise<void | ((usage: Usage) => Promise<void>)> {
     this.assertHealthy();
     const active = this.active;
     if (!active) throw new Error("No active conversation");
-    await this.harness.commit(async (tx) => {
+    const budgetId = await this.harness.commit(async (tx) => {
       const conversation = (await tx.doc(ConversationsDoc)).conversations.find(
         (item) => item.id === active.id,
       )!;
@@ -1527,10 +1746,27 @@ export class AgentService {
       )
         throw new Error("Dispatch limit reached");
       conversation.requests++;
+      if (conversation.coordinatorId && conversation.budgetId) {
+        await this.coordinator.reserveBudget(
+          tx,
+          conversation.budgetId,
+          reservation,
+        );
+        return conversation.budgetId;
+      }
     }, ctx);
+    if (budgetId)
+      return (usage: Usage) =>
+        this.coordinator.account(budgetId, reservation, usage);
   }
   async toolConversation(piId: ConversationId): Promise<string> {
     this.assertHealthy();
+    if (this.coordinator.busy) {
+      const parent = (await this.list()).find(
+        (c) => c.piId === piId && c.role === "coordinator",
+      );
+      if (parent) return (await this.coordinator.actor(piId)).id;
+    }
     const active = this.active;
     if (!active) throw new Error("No active conversation");
     const conversation = await this.conversation(active.id);
@@ -1541,6 +1777,14 @@ export class AgentService {
       conversation.deadlineAt <= Date.now()
     )
       throw new Error("Tool dispatch stopped");
+    if (conversation.coordinatorId && conversation.budgetId) {
+      const budget = budgetFor(
+        await this.coordinator.state(),
+        conversation.budgetId,
+      );
+      if (conversation.paused || budget.paused || budget.deadline <= Date.now())
+        throw new Error("Managed work stopped");
+    }
     return active.id;
   }
   async files(id: string) {
@@ -1571,6 +1815,27 @@ export class AgentService {
       throw new AppError(413, "ファイルの上限を超えています");
     return data;
   }
+  async attachmentImages(
+    id: string,
+    attachments: string[],
+  ): Promise<ImageContent[]> {
+    const images: ImageContent[] = [];
+    let total = 0;
+    for (const path of attachments) {
+      if (!safeRelative(path).startsWith("attachments/"))
+        throw new AppError(400, "添付ファイルを指定してください");
+      const mimeType = imageMime(path);
+      if (!mimeType) continue;
+      const result = await this.runner.call(id, "read_attachment", { path });
+      const bytes = Buffer.from(result.data ?? "", "base64");
+      total += bytes.length;
+      if (images.length >= maxMessageImages || total > maxMessageImageBytes)
+        throw new AppError(413, "画像の上限を超えています");
+      await validateImage(bytes, mimeType);
+      images.push({ type: "image", mimeType, data: bytes.toString("base64") });
+    }
+    return images;
+  }
   async upload(
     id: string,
     requestId: string,
@@ -1578,12 +1843,17 @@ export class AgentService {
     data: Buffer,
   ): Promise<{ path: string }> {
     return this.exclusive(async () => {
-      await this.conversation(id);
-      if (this.active && this.active.id !== id)
+      const session = await this.conversation(id);
+      if (
+        this.active &&
+        this.active.id !== id &&
+        session.role !== "coordinator"
+      )
         throw new AppError(409, "別のセッションが実行中です（busy）");
       if (data.length > this.config.limits.fileBytes)
         throw new AppError(413, "ファイルの上限を超えています");
-      if (!this.active) await this.workspace(id);
+      if (!this.active || session.role === "coordinator")
+        await this.workspace(id);
       const path = `attachments/${requestId}-${safeRelative(name)}`;
       await this.runner.call(id, "upload", {
         path,
@@ -1763,6 +2033,9 @@ export class AgentService {
     return {
       conversation,
       transcript,
+      ...(conversation.role === "coordinator"
+        ? { coordination: await this.coordinator.view() }
+        : {}),
       usage: conversationUsage(
         await this.harness.snapshot(UsageDoc, conversation.piId, ctx),
       ),
@@ -1811,6 +2084,7 @@ export class AgentService {
   async close(): Promise<void> {
     if (this.closing) return;
     try {
+      await this.coordinator.close();
       if (this.active && !this.fatal) await this.stop(this.active.id);
       this.closing = true;
       this.active?.controller.abort();
