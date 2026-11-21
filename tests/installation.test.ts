@@ -3,8 +3,27 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile } from "node:fs/promises";
+import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+test("an unavailable image decoder does not prevent loading the service", async (t) => {
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier === "sharp") throw new Error("Image decoder unavailable");
+      return nextResolve(specifier, context);
+    },
+  });
+  t.after(() => hooks.deregister());
+  const { AgentService } = await import("../src/service.js");
+  assert.equal(typeof AgentService.open, "function");
+  const { validateImage } = await import("../src/images.js");
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7xkAAAAASUVORK5CYII=",
+    "base64",
+  );
+  await assert.rejects(validateImage(png), { statusCode: 503 });
+});
 
 test("Linux flock refuses a duplicate writer before its command can touch SQLite", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-lock-")),
