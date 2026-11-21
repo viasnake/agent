@@ -15,8 +15,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { fixture, answer, call, until, TestRunner } from "./support.js";
-import { AgentDoc } from "@earendil-works/pi-durable";
+import { AgentDoc, defineDoc } from "@earendil-works/pi-durable";
 import { requestDeletion } from "../src/session-deletion.js";
+import { ConversationsDoc } from "../src/state.js";
 import type { WorkerRequest } from "../src/execution/protocol.js";
 
 test("service termination ignores deletion reopens and settles on normal close", async () => {
@@ -44,6 +45,168 @@ test("service termination ignores deletion reopens and settles on normal close",
     await f.service.close();
   }
   assert.equal(closed, true);
+});
+
+test("older managed conversations reopen as regular sessions and deletion purges their retired data", async () => {
+  let f = await fixture([answer("saved reply")]);
+  try {
+    const former = await f.service.create(randomUUID(), "Saved conversation");
+    const survivor = await f.service.create(randomUUID(), "Other conversation");
+    const { piId } = await f.service.conversation(former.id);
+    const attachment = await f.service.upload(
+      former.id,
+      randomUUID(),
+      "saved.txt",
+      Buffer.from("saved attachment"),
+    );
+    await f.service.send(former.id, randomUUID(), "saved input");
+    await until(
+      async () => (await f.service.conversation(former.id)).status === "idle",
+    );
+    const retiredFields = {
+      coordinatorId: former.id,
+      directiveVersion: 1,
+      controlEpoch: 0,
+      paused: false,
+      budgetId: "related",
+      dispatchSequence: 1,
+    };
+    const work = defineDoc({
+      kind: "agent.coordinator",
+      version: 1,
+      scope: "session",
+      initial: () => ({
+        id: former.id,
+        sequence: 1,
+        inputVersion: 1,
+        paused: false,
+        epoch: 0,
+        budgets: [
+          {
+            id: "related",
+            sourceSessionId: former.id,
+            sessionIds: [survivor.id],
+            objective: "retired-deleted-objective",
+          },
+        ],
+        commands: [
+          {
+            sequence: 1,
+            sessionId: survivor.id,
+            budgetId: "related",
+            text: "retired-deleted-command",
+            directiveVersion: 1,
+            controlEpoch: 0,
+          },
+        ],
+        events: [],
+        sources: [former.id],
+        checkpoint: { text: "retired-deleted-checkpoint", inputVersion: 1 },
+      }),
+      checkpointWhen: () => true,
+    });
+    const knowledge = defineDoc({
+      kind: "agent.knowledge",
+      version: 1,
+      scope: "session",
+      initial: () => ({
+        notes: [] as { body: string; sources: { sessionId: string }[] }[],
+      }),
+      checkpointWhen: () => true,
+    });
+    await f.service.harness.commit(async (tx) => {
+      const state = await tx.doc(ConversationsDoc);
+      Object.assign(state.conversations.find((c) => c.id === former.id)!, {
+        role: "coordinator",
+        budgetId: "related",
+      });
+      Object.assign(
+        state.conversations.find((c) => c.id === survivor.id)!,
+        retiredFields,
+      );
+      Object.assign(await tx.doc(AgentDoc, piId), {
+        model: { provider: "agent-coordinator", modelId: "faux-1" },
+        extensions: ["coordinator"],
+        tools: { remove: ["write"] },
+      });
+      (await tx.doc(work)).sequence++;
+      (await tx.doc(knowledge)).notes.push(
+        {
+          body: "retired-deleted-old-note",
+          sources: [{ sessionId: former.id }],
+        },
+        {
+          body: "unrelated private note",
+          sources: [{ sessionId: survivor.id }],
+        },
+      );
+    }, ctx);
+    await f.service.harness.commit(async (tx) => {
+      (await tx.doc(knowledge)).notes[0]!.body = "retired-deleted-current-note";
+    }, ctx);
+    await f.service.close();
+
+    f = await fixture(
+      [
+        call("write", {
+          path: "outputs/resumed.txt",
+          content: "regular tools",
+        }),
+        answer("continued"),
+      ],
+      { root: f.root },
+    );
+    const view = await f.service.view(former.id);
+    assert.equal(view.conversation.status, "idle");
+    assert.match(JSON.stringify(view.transcript), /saved reply/);
+    assert.equal(Object.hasOwn(view.conversation, "role"), false);
+    const formerWork = await f.service.view(survivor.id);
+    for (const field of Object.keys(retiredFields))
+      assert.equal(Object.hasOwn(formerWork.conversation, field), false);
+    assert.equal(
+      (await f.service.download(former.id, attachment.path)).toString(),
+      "saved attachment",
+    );
+    assert.equal(formerWork.transcript.length, 0);
+    assert.equal(
+      (await f.service.harness.snapshot(work, ctx))?.commands.length,
+      1,
+    );
+    assert.equal(
+      (await f.service.harness.snapshot(knowledge, ctx))?.notes.length,
+      2,
+    );
+    await f.service.send(former.id, randomUUID(), "explicit new input");
+    await until(
+      async () => (await f.service.conversation(former.id)).status === "idle",
+    );
+    assert.equal(
+      (await f.service.download(former.id, "outputs/resumed.txt")).toString(),
+      "regular tools",
+    );
+
+    await f.service.deleteConversation(former.id);
+    assert.deepEqual(
+      (await f.service.harness.snapshot(knowledge, ctx))?.notes.map(
+        (note) => note.body,
+      ),
+      ["unrelated private note"],
+    );
+    assert.equal(
+      (await f.service.harness.snapshot(work, ctx))?.commands.length,
+      0,
+    );
+    assert.equal((await f.service.view(survivor.id)).transcript.length, 0);
+    await f.service.close();
+    assert.doesNotMatch(
+      (
+        await readFile(join(f.root, "control/conversations-v1.sqlite"))
+      ).toString(),
+      /retired-deleted-/,
+    );
+  } finally {
+    await f.service.close();
+  }
 });
 
 test("purge removes old titles, text, images, memories and all workspace files while preserving unrelated data", async () => {

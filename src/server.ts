@@ -12,7 +12,6 @@ import { AppError } from "./security.js";
 import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 import { memoryId, memoryInput, memoryEdit, historyInput } from "./memory.js";
-import { knowledgeEdit } from "./knowledge.js";
 
 import {
   skillName,
@@ -348,50 +347,6 @@ export async function createServer(
   app.get("/api/history", async (request) =>
     safe(await service.memory.search(historyInput.parse(request.query))),
   );
-  app.post("/api/coordinator", async () => service.coordinator.ensure());
-  app.get("/api/coordinator", async () =>
-    safe(await service.coordinator.view()),
-  );
-  app.post("/api/coordinator/stop", async () => {
-    await service.coordinator.stopAll();
-    return { ok: true };
-  });
-  app.post("/api/coordinator/resume", async () => {
-    await service.coordinator.resume();
-    return { ok: true };
-  });
-  app.put("/api/conversations/:id/coordinator", async (request) => {
-    const { id } = identifier.parse(request.params);
-    const { enabled } = z
-      .object({ enabled: z.boolean() })
-      .strict()
-      .parse(request.body);
-    return service.coordinator.bind(id, enabled);
-  });
-  app.get("/api/knowledge", async (request) => {
-    const { query, offset } = z
-      .object({
-        query: z.string().max(200).default(""),
-        offset: z.coerce.number().int().min(0).max(128).default(0),
-      })
-      .parse(request.query);
-    return safe(await service.coordinator.knowledge.list(query, offset));
-  });
-  app.get("/api/knowledge/:id", async (request) =>
-    safe(
-      await service.coordinator.knowledge.read(
-        identifier.parse(request.params).id,
-      ),
-    ),
-  );
-  app.post("/api/knowledge", async (request) => {
-    const { requestId: receipt, ...change } = knowledgeEdit
-      .extend({ requestId })
-      .parse(request.body);
-    return safe(
-      await service.coordinator.knowledge.update(change, [], receipt),
-    );
-  });
   app.get("/api/conversations", async () =>
     safe({ conversations: (await service.list()).reverse() }),
   );

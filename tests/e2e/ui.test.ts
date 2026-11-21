@@ -114,9 +114,6 @@ test("real browser conversation: no category, attachments, response-loss retry, 
   });
   try {
     await page.goto(origin);
-    await page
-      .getByRole("button", { name: "新しいセッション", exact: true })
-      .click();
     await page.locator("#message").waitFor();
     assert.equal(
       await page.getByText("以前の記録", { exact: true }).count(),
@@ -131,6 +128,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       "Serve the pinned Bootstrap CSS without CDN requests",
     );
     await page.locator("#app").waitFor({ state: "visible" });
+    assert.equal((await f.service.list()).length, 0);
     assert.equal(
       await page.locator('input[type="password"], #login, #logout').count(),
       0,
@@ -181,9 +179,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       await readFile((await uploaded.path())!, "utf8"),
       "name,total\n Alice,12\n",
     );
-    const conversations = (await f.service.list()).filter(
-      (c) => c.role !== "coordinator",
-    );
+    const conversations = await f.service.list();
     assert.equal(conversations.length, 1);
     const id = conversations[0]!.id;
     const downloadPromise = page.waitForEvent("download");
@@ -324,10 +320,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /note.md/ }).waitFor();
     await page.getByRole("tab", { name: "会話", exact: true }).click();
-    assert.equal(
-      (await f.service.list()).filter((c) => c.role !== "coordinator").length,
-      1,
-    );
+    assert.equal((await f.service.list()).length, 1);
     await page.getByRole("link", { name: "文章を取得", exact: true }).waitFor();
     assert.match(
       (await page
@@ -372,10 +365,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
     ]);
     await page.getByRole("button", { name: "再開", exact: true }).click();
     await page.getByText("再開しました。", { exact: true }).waitFor();
-    assert.equal(
-      (await f.service.list()).filter((c) => c.role !== "coordinator").length,
-      1,
-    );
+    assert.equal((await f.service.list()).length, 1);
     await mkdir("test-results", { recursive: true });
     await page.screenshot({
       path: "test-results/conversation.png",
@@ -424,10 +414,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       0,
     );
     await page.getByRole("link", { name: /note.md/ }).waitFor();
-    assert.equal(
-      (await f.service.list()).filter((c) => c.role !== "coordinator").length,
-      1,
-    );
+    assert.equal((await f.service.list()).length, 1);
     assert.equal((await f.service.conversation(id)).status, "idle");
     assert.deepEqual(errors, []);
     const pi = await f.service.piConversation(id);
@@ -675,10 +662,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       await page.locator("#message").inputValue(),
       "削除をキャンセルしたら保持",
     );
-    assert.equal(
-      (await f.service.list()).filter((c) => c.role !== "coordinator").length,
-      2,
-    );
+    assert.equal((await f.service.list()).length, 2);
     // Reproduce the saved create receipt left by a failed first send.
     await page.evaluate(async (id) => {
       const digest = Array.from(
@@ -718,10 +702,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       .click();
     await deletion.getByRole("button", { name: "削除", exact: true }).click();
     await deletion.getByRole("alert").waitFor();
-    assert.equal(
-      (await f.service.list()).filter((c) => c.role !== "coordinator").length,
-      1,
-    );
+    assert.equal((await f.service.list()).length, 1);
     assert.equal(
       await page.locator("#message").inputValue(),
       "削除をキャンセルしたら保持",
@@ -733,10 +714,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       .filter({ hasText: "新しいセッション" })
       .waitFor();
     await selectA.waitFor({ state: "detached" });
-    assert.equal(
-      (await f.service.list()).filter((c) => c.role !== "coordinator").length,
-      1,
-    );
+    assert.equal((await f.service.list()).length, 1);
     assert.equal(await page.locator("#message").inputValue(), "");
     assert.equal(
       await page.evaluate(() => document.activeElement?.id),
@@ -746,15 +724,10 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     await selectB.waitFor();
     assert.equal(await selectA.count(), 0);
     f.faux.setResponses([answer("新しいセッションで応答")]);
-    await page
-      .getByRole("button", { name: "新しいセッション", exact: true })
-      .click();
     await page.locator("#message").fill("会話 A");
     await page.locator("#send").click();
     await page.getByText("新しいセッションで応答", { exact: true }).waitFor();
-    const sessions = (await f.service.list()).filter(
-      (c) => c.role !== "coordinator",
-    );
+    const sessions = await f.service.list();
     assert.equal(sessions.length, 2);
     assert.ok(sessions.every((session) => session.id !== a.id));
     assert.deepEqual(errors, []);

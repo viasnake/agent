@@ -3,41 +3,27 @@ import type {
   Provider,
   AssistantMessage,
   AssistantMessageEventStream,
-  AssistantMessageEvent,
-  Usage,
 } from "@earendil-works/pi-ai";
 
 // Generation hooks may be skipped on failure. The provider boundary must refuse dispatch itself.
 export function guardedProvider(
   provider: Provider,
-  reserve: (
-    sessionId: string | undefined,
-    modelId: string,
-    tokenReservation: number,
-  ) => Promise<void | ((usage: Usage) => Promise<void>)>,
+  reserve: (sessionId: string | undefined, modelId: string) => Promise<void>,
 ): Provider {
   function guarded(
     start: () => AssistantMessageEventStream,
     sessionId: string | undefined,
     modelId: string,
-    tokenReservation: number,
   ): AssistantMessageEventStream {
     const stream = createAssistantMessageEventStream();
     void (async () => {
       try {
-        const account = await reserve(sessionId, modelId, tokenReservation);
+        await reserve(sessionId, modelId);
         const upstream = start();
-        let terminal: AssistantMessageEvent | undefined;
         for await (const event of upstream) {
-          if (event.type === "done" || event.type === "error") terminal = event;
-          else stream.push(event);
+          stream.push(event);
         }
-        const result = await upstream.result();
-        // A terminal event settles Pi immediately. Persist usage against the
-        // reserved request before releasing the slot or admitting follow-ups.
-        await account?.(result.usage);
-        if (terminal) stream.push(terminal);
-        stream.end(result);
+        stream.end(await upstream.result());
       } catch {
         // No request was dispatched when admission fails; don't expose host exceptions to prompts.
         const error: AssistantMessage = {
@@ -92,7 +78,6 @@ export function guardedProvider(
         },
         options?.sessionId,
         model.id,
-        Buffer.byteLength(JSON.stringify(context)) + 8192,
       ),
     streamSimple: (model, context, options) =>
       guarded(
@@ -114,7 +99,6 @@ export function guardedProvider(
         },
         options?.sessionId,
         model.id,
-        Buffer.byteLength(JSON.stringify(context)) + 8192,
       ),
   };
 }

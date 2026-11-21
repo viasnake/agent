@@ -23,13 +23,62 @@ import type { State } from "./state.js";
 import type { Memory } from "./memory.js";
 import { hash } from "./security.js";
 import { worktreePlan } from "./execution/worktrees.js";
-import { withoutSession } from "./coordinator-state.js";
-import type { CoordinatorState } from "./coordinator-state.js";
-import type { KnowledgeState } from "./knowledge.js";
 
 const markerName = "session-deletion.json";
 const stagingName = "conversations-delete.sqlite";
 export const conversationDatabase = "conversations-v1.sqlite";
+
+type RetiredDelivery = { sessionId: string; budgetId: string };
+type RetiredWork = {
+  budgets: { id: string; sourceSessionId: string; sessionIds: string[] }[];
+  commands: RetiredDelivery[];
+  events: RetiredDelivery[];
+  activeEvent?: RetiredDelivery;
+  sources?: string[];
+  checkpoint?: unknown;
+};
+type RetiredKnowledge = { notes: { sources: { sessionId: string }[] }[] };
+
+// These documents are inert. Still erase text derived from deleted sessions when rebuilding the database.
+function forgetRetiredSources(
+  kind: string,
+  value: JsonObject,
+  purged: Set<string>,
+): JsonObject {
+  if (kind === "agent.knowledge") {
+    const { notes } = value as unknown as RetiredKnowledge;
+    return {
+      ...value,
+      notes: notes.filter(
+        (note) => !note.sources.some((source) => purged.has(source.sessionId)),
+      ),
+    };
+  }
+  if (kind === "agent.coordinator") {
+    const {
+      activeEvent,
+      checkpoint: _,
+      ...work
+    } = value as unknown as RetiredWork;
+    const budgets = work.budgets.filter(
+      (budget) =>
+        !purged.has(budget.sourceSessionId) &&
+        !budget.sessionIds.some((id) => purged.has(id)),
+    );
+    const kept = new Set(budgets.map((budget) => budget.id));
+    const keep = (entry: RetiredDelivery) =>
+      !purged.has(entry.sessionId) && kept.has(entry.budgetId);
+    return {
+      ...work,
+      budgets,
+      commands: work.commands.filter(keep),
+      events: work.events.filter(keep),
+      sources: work.sources?.filter((id) => !purged.has(id)) ?? [],
+      ...(activeEvent && keep(activeEvent) ? { activeEvent } : {}),
+    };
+  }
+  return value;
+}
 
 async function syncDirectory(path: string) {
   const directory = await open(path, "r");
@@ -125,24 +174,6 @@ export async function copyWithoutSession(
         }
       : item,
   );
-  const coordination = await document(source, "agent.coordinator");
-  if (coordination) {
-    const budgets = new Set(
-      withoutSession(
-        coordination.value as unknown as CoordinatorState,
-        purged,
-      ).budgets.map((b) => b.id),
-    );
-    for (const session of state.conversations)
-      if (session.budgetId && !budgets.has(session.budgetId)) {
-        delete session.budgetId;
-        delete session.dispatchSequence;
-        if (session.coordinatorId) {
-          session.paused = true;
-          session.controlEpoch = (session.controlEpoch ?? 0) + 1;
-        }
-      }
-  }
 
   const records = new Map<
     ConversationId,
@@ -266,19 +297,8 @@ export async function copyWithoutSession(
       present.add(record.id);
       if (record.kind === "agent.conversations")
         stored.value = state as unknown as JsonObject;
-      if (record.kind === "agent.coordinator")
-        stored.value = withoutSession(
-          stored.value as unknown as CoordinatorState,
-          purged,
-        ) as unknown as JsonObject;
-      if (record.kind === "agent.knowledge")
-        stored.value = {
-          ...stored.value,
-          notes: (stored.value as unknown as KnowledgeState).notes.filter(
-            (note) =>
-              !note.sources.some((source) => purged.has(source.sessionId)),
-          ),
-        } as unknown as JsonObject;
+      if (scope.kind === "session")
+        stored.value = forgetRetiredSources(record.kind, stored.value, purged);
       if (record.kind === "agent.memories") {
         const notes = (stored.value as unknown as { notes: Memory[] }).notes;
         stored.value = {
