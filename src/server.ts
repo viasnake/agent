@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
+import websocket from "@fastify/websocket";
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,8 @@ import { AppError } from "./security.js";
 import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 import { memoryId, memoryInput, memoryEdit, historyInput } from "./memory.js";
+import { terminalFrameBytes } from "./execution/terminal.js";
+import { serveTerminal, terminalProtocol } from "./terminal-socket.js";
 
 import {
   skillName,
@@ -105,6 +108,21 @@ export async function createServer(
   });
   await app.register(cookie);
   await app.register(rateLimit, { max: 180, timeWindow: "1 minute" });
+  await app.register(websocket, {
+    options: {
+      maxPayload: terminalFrameBytes,
+      handleProtocols: (protocols) =>
+        protocols.has(terminalProtocol) ? terminalProtocol : false,
+    },
+    async preClose() {
+      for (const client of app.websocketServer.clients) client.terminate();
+      await new Promise<void>((resolve, reject) =>
+        app.websocketServer.close((error) =>
+          error ? reject(error) : resolve(),
+        ),
+      );
+    },
+  });
   const sessions = new Map<string, Session>();
   const allowedOrigins = new Set(service.config.server.origins),
     hosts = new Set([...allowedOrigins].map((origin) => new URL(origin).host));
@@ -116,13 +134,15 @@ export async function createServer(
     for (const close of streamClosers) close();
   });
   app.addHook("onRequest", async (request, reply) => {
+    const terminalPage = request.url.split("?", 1)[0] === "/terminal";
     reply
       .header("X-Content-Type-Options", "nosniff")
       .header("Referrer-Policy", "no-referrer")
       .header("Cache-Control", "no-store")
       .header(
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
+        // The terminal renderer generates style elements for its character grid.
+        `default-src 'none'; script-src 'self'; style-src 'self'${terminalPage ? " 'unsafe-inline'" : ""}; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'`,
       );
     if (request.url === "/healthz") return;
     if (
@@ -138,7 +158,7 @@ export async function createServer(
       throw new AppError(403, "Origin の確認が必要です");
     const site = request.headers["sec-fetch-site"];
     if (
-      request.url.startsWith("/api/") &&
+      (request.url.startsWith("/api/") || terminalPage) &&
       site &&
       site !== "same-origin" &&
       site !== "none"
@@ -205,6 +225,41 @@ export async function createServer(
     }
     return { csrf: sessions.get(token)!.csrf };
   });
+  app.get(
+    "/api/terminal",
+    {
+      websocket: true,
+      preValidation: async (request) => {
+        const origin = request.headers.origin;
+        const session = sessions.get(request.cookies.agent_session ?? "");
+        const protocols = request.headers["sec-websocket-protocol"]
+          ?.split(",")
+          .map((part) => part.trim());
+        if (
+          closing ||
+          !request.ws ||
+          !origin ||
+          !allowedOrigins.has(origin) ||
+          new URL(origin).host !== request.headers.host ||
+          !session ||
+          session.expires <= Date.now() ||
+          protocols?.length !== 2 ||
+          !protocols.includes(terminalProtocol) ||
+          !protocols.includes(`csrf.${session.csrf}`)
+        )
+          throw new AppError(403, "ターミナルの接続が許可されていません");
+      },
+    },
+    (socket, request) => {
+      const token = request.cookies.agent_session!;
+      const session = sessions.get(token)!;
+      serveTerminal(
+        socket,
+        service,
+        () => sessions.get(token) === session && session.expires > Date.now(),
+      );
+    },
+  );
   app.get("/api/model-options", async () => service.conversationModelOptions());
   app.get("/api/skills", async (request) => {
     z.object({}).strict().parse(request.query);
@@ -675,6 +730,9 @@ export async function createServer(
     ["/app.js", "app.js", "text/javascript; charset=utf-8"],
     ["/style.css", "style.css", "text/css; charset=utf-8"],
     ["/bootstrap.css", "bootstrap.css", "text/css; charset=utf-8"],
+    ["/terminal", "terminal.html", "text/html; charset=utf-8"],
+    ["/terminal.js", "terminal.js", "text/javascript; charset=utf-8"],
+    ["/terminal.css", "terminal.css", "text/css; charset=utf-8"],
   ]) {
     app.get(path!, async (_request, reply) =>
       reply.type(type!).send(await readFile(webRoot + name!)),

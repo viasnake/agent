@@ -7,8 +7,8 @@ if (process.argv.includes("--clean")) {
 } else {
   await mkdir("dist/web", { recursive: true });
   await build({
-    entryPoints: ["web/app.tsx"],
-    outfile: "dist/web/app.js",
+    entryPoints: ["web/app.tsx", "web/terminal.ts"],
+    outdir: "dist/web",
     bundle: true,
     format: "esm",
     platform: "browser",
@@ -25,6 +25,6 @@ if (process.argv.includes("--clean")) {
     "node_modules/bootstrap/LICENSE",
     "dist/web/bootstrap.LICENSE",
   );
-  for (const name of ["index.html", "style.css"])
+  for (const name of ["index.html", "style.css", "terminal.html"])
     await copyFile(`web/${name}`, `dist/web/${name}`);
 }

@@ -1,13 +1,17 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { operationGroup, removeGroup } from "./cgroup.js";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { readInstallation } from "../installation.js";
 import { AppError } from "../security.js";
 import { PROTOCOL_BYTES, replySchema } from "./protocol.js";
 import type { Runner, WorkerRequest, WorkerResult } from "./protocol.js";
+import { relayWorkerTerminal } from "./terminal.js";
+import type { TerminalIO } from "./terminal.js";
+
+export class WorkerCleanupError extends Error {}
 
 async function trusted(path: string): Promise<void> {
   for (let current = path; current !== "/"; current = dirname(current)) {
@@ -26,6 +30,7 @@ class WorkerProcess implements Runner {
   private opening?: Promise<void>;
   private buffer = Buffer.alloc(0);
   private broken = false;
+  private terminalMode = false;
   ready(): Promise<void> {
     return (this.opening ??= this.open());
   }
@@ -74,6 +79,7 @@ class WorkerProcess implements Runner {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child.stdout.on("data", (data: Buffer) => {
+      if (this.terminalMode) return;
       this.buffer = Buffer.concat([this.buffer, data]);
       if (this.buffer.length > PROTOCOL_BYTES) {
         this.fail();
@@ -150,10 +156,13 @@ class WorkerProcess implements Runner {
         this.pending.set(id, { resolve, reject });
         signal?.addEventListener("abort", cancel, { once: true });
         if (signal?.aborted) cancel();
-        timer = setTimeout(() => {
-          cancel();
-          this.fail();
-        }, 330_000);
+        timer = setTimeout(
+          () => {
+            cancel();
+            this.fail();
+          },
+          op === "health" ? 10_000 : 330_000,
+        );
         this.child!.stdin.write(wire, (error) => {
           if (error) this.fail();
         });
@@ -162,6 +171,13 @@ class WorkerProcess implements Runner {
       if (timer) clearTimeout(timer);
       signal?.removeEventListener("abort", cancel);
     }
+  }
+  async terminal(io: TerminalIO): Promise<void> {
+    const child = this.child;
+    if (!child || this.broken || this.pending.size || this.buffer.length)
+      throw new Error("Worker terminal is unavailable");
+    this.terminalMode = true;
+    await relayWorkerTerminal(child, io);
   }
   async close(): Promise<void> {
     if (
@@ -232,20 +248,37 @@ export class WorkerClient implements Runner {
     args: Record<string, unknown>,
     signal: AbortSignal,
   ) {
+    return this.runOperation(signal, (worker) => worker.call(id, op, args));
+  }
+
+  async terminal(io: TerminalIO, signal: AbortSignal): Promise<void> {
+    await trusted("/opt/agent/scripts/terminal-pty.py");
+    await this.runOperation(signal, (worker) => worker.terminal(io));
+  }
+
+  private async runOperation<T>(
+    signal: AbortSignal,
+    run: (worker: WorkerProcess) => Promise<T>,
+  ): Promise<T> {
+    if (this.broken)
+      throw new WorkerCleanupError(
+        "Worker cleanup failed; restart the service",
+      );
+    signal.throwIfAborted();
     const group = await operationGroup();
     const worker = new WorkerProcess(group);
     try {
       await worker.ready();
       signal.throwIfAborted();
-      // Membership is confirmed before cancellation can kill this cgroup.
-      const cancel = () => {
-        void writeFile(join(group, "cgroup.kill"), "1").catch(() =>
-          worker.close().catch(() => {}),
-        );
-      };
+      // Cancellation goes directly to cgroup cleanup even if the worker
+      // stopped responding or still has descendants holding its pipes open.
+      let cancel!: () => void;
+      const cancelled = new Promise<never>((_, reject) => {
+        cancel = () => reject(new AppError(409, "処理は停止されています"));
+      });
       signal.addEventListener("abort", cancel, { once: true });
       try {
-        return await worker.call(id, op, args);
+        return await Promise.race([run(worker), cancelled]);
       } finally {
         signal.removeEventListener("abort", cancel);
       }
@@ -254,7 +287,7 @@ export class WorkerClient implements Runner {
         await removeGroup(group);
       } catch (error) {
         this.broken = true;
-        throw error;
+        throw new WorkerCleanupError("Worker cleanup failed", { cause: error });
       }
       await worker.close();
     }

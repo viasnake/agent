@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>ターミナル</title>
+    <link rel="stylesheet" href="/bootstrap.css" />
+    <link rel="stylesheet" href="/terminal.css" />
+    <script type="module" src="/terminal.js"></script>
+  </head>
+  <body class="terminal-page d-flex flex-column">
+    <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3">
+      <h1 class="h5 m-0">ターミナル</h1>
+      <span class="small fg-2">agent-work</span>
+      <span id="status" class="small fg-2 ms-auto" role="status">接続中…</span>
+      <button
+        id="connection"
+        type="button"
+        class="btn-outline theme-secondary btn-sm"
+      >
+        切断
+      </button>
+    </header>
+    <main id="terminal" class="flex-grow-1" aria-label="ターミナル"></main>
+  </body>
+</html>
