@@ -320,6 +320,8 @@ export class Worker {
         createCodingTools().tools as readonly ToolRegistration[]
       ).find((tool) => tool.name === name)!;
       const result = await tool.execute(input, api, context);
+      if (result.sleep || result.wait)
+        throw new Error("Standard tools must return a result");
       output.end();
       return {
         result: {

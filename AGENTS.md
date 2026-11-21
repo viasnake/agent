@@ -4,7 +4,7 @@
 
 This is a single-user, web-accessible Pi Durable application on prepared Ubuntu
 Server 26.04 with systemd. The application has a thin TypeScript HTTP service,
-Pi Durable 1.5.0, SQLite and separate control/work users. Machine provisioning,
+Pi Durable 1.6.0, SQLite and separate control/work users. Machine provisioning,
 virtualization, disks, OS initialization and host networking belong outside this
 repository. Agent does not depend on or invoke a VM manager, including Devbox.
 The user-facing unit is a session containing a Pi conversation and its working
@@ -309,7 +309,7 @@ between billing sources or to ambient credentials. Persist the installation UUID
 access/refresh rotation and expiry under control ownership; serialize refresh and
 reject writes from a replaced credential version. Login is session-bound, single-use
 and bounded to ten minutes. Use the public Pi OAuth interface, not SDK patches.
-Pi 1.5.0 registers a new dynamic client on each login and does not expose a validated
+Pi 1.6.0 registers a new dynamic client on each login and does not expose a validated
 ID-token identity. Do not display account identity or claim returning-account
 verification; model authorization uses its scoped access token. Keep this SDK
 limitation distinct from successful local OAuth transport tests.

@@ -32,6 +32,8 @@ test("conversation models are account-specific, cached, secret-free and never re
           models: [
             { slug: "gpt-6.1-sol", visibility: "list" },
             { slug: "gpt-6.1-sol", visibility: "list" },
+            { slug: "gpt-6.2-sol", visibility: "list" },
+            { slug: "gpt-6.2-astra", visibility: "hidden" },
             { slug: "gpt-4.1", visibility: "hidden" },
             { slug: "unimplemented-model", visibility: "list" },
           ],
@@ -39,7 +41,11 @@ test("conversation models are account-specific, cached, secret-free and never re
       }
       assert.equal(key, "Bearer sk-fixture-api-key");
       return Response.json({
-        data: [{ id: "gpt-4.1-mini" }, { id: "non-chat-model" }],
+        data: [
+          { id: "gpt-4.1-mini" },
+          { id: "gpt-6.2-astra" },
+          { id: "non-chat-model" },
+        ],
       });
     },
   );
@@ -102,11 +108,23 @@ test("conversation models are account-specific, cached, secret-free and never re
       modelChoices(first).map((m) => [m.group, m.model]),
       [
         ["ChatGPT", "gpt-6.1-sol"],
+        ["ChatGPT", "gpt-6.2-sol"],
         ["API", "gpt-4.1-mini"],
+        ["API", "gpt-6.2-astra"],
       ],
     );
     assert.ok(!JSON.stringify(first).includes("fixture-oauth"));
     assert.ok(!JSON.stringify(first).includes("sk-fixture"));
+    const latest = await f.service.create(
+      randomUUID(),
+      "latest",
+      oauth,
+      "gpt-6.2-sol",
+    );
+    assert.equal(
+      (await f.service.conversation(latest.id)).model,
+      "gpt-6.2-sol",
+    );
     await f.service.conversationModelOptions();
     assert.equal(calls.length, 2);
     // A saved legacy selection must not reintroduce a hidden model into the picker.
@@ -122,7 +140,7 @@ test("conversation models are account-specific, cached, secret-free and never re
     assert.equal(failedOptions.models[0]!.error, "接続失敗（HTTP 403）");
     assert.deepEqual(
       modelChoices(failedOptions).map((m) => m.model),
-      ["gpt-4.1-mini"],
+      ["gpt-4.1-mini", "gpt-6.2-astra"],
     );
     assert.equal(
       (await f.service.conversation(conversation.id)).model,

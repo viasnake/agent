@@ -56,8 +56,11 @@ sudo systemctl enable --now "agent-git-refresh@$name.timer"
 ```sh
 git pull --ff-only
 sudo systemctl stop agent.service
+# 1.5.x から更新する場合は、SQLite のバックアップ機能でデータ領域の control/conversations-v1.sqlite を保存
 bash install/install.sh --update
 ```
+
+Pi Durable 1.6.0 から 1.5.x に戻す場合は、更新前の会話データベースを復元してください。
 
 ## テスト
 
