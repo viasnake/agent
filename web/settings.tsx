@@ -7,7 +7,6 @@ import { Icon } from "./icons.js";
 import { CredentialSettings } from "./credentials.js";
 import { Skills } from "./skills.js";
 import { MemoryNotes } from "./memory.js";
-import { KnowledgeNotes } from "./knowledge.js";
 import type { MemoryDraft, MemorySource } from "./memory.js";
 import { useNotify } from "./notifications.js";
 import { useEffect, useRef, useState } from "react";
@@ -131,7 +130,6 @@ export function Settings({
   );
   const [visited, setVisited] = useState(() => new Set<Tab>([tab]));
   const [memoryDirty, setMemoryDirty] = useState(false);
-  const [knowledgeDirty, setKnowledgeDirty] = useState(false);
   const [skillsDirty, setSkillsDirty] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const navigation = useRef<HTMLElement>(null);
@@ -140,7 +138,7 @@ export function Settings({
   const [environments, setEnvironments] = useState<
     Record<string, EnvironmentRow[]>
   >({});
-  const unsaved = dirty || memoryDirty || knowledgeDirty || skillsDirty;
+  const unsaved = dirty || memoryDirty || skillsDirty;
   function canLeave() {
     return confirmSettingsExit(unsaved);
   }
@@ -463,12 +461,6 @@ export function Settings({
               )}
               {visited.has("memory") && (
                 <div hidden={tab !== "memory"}>
-                  <KnowledgeNotes
-                    onDirtyChange={setKnowledgeDirty}
-                    onSelect={async (source) => {
-                      if (canLeave()) await onSelectSource(source);
-                    }}
-                  />
                   <MemoryNotes
                     initial={memoryDraft ?? undefined}
                     onDirtyChange={setMemoryDirty}

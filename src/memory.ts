@@ -385,7 +385,7 @@ export class SessionMemory {
     return { id };
   }
 
-  async search(input: z.input<typeof historyInput>, allowed?: Set<string>) {
+  async search(input: z.input<typeof historyInput>) {
     const value = historyInput.parse(input);
     try {
       localDate(Date.now(), value.timezone);
@@ -419,7 +419,6 @@ export class SessionMemory {
       }
     }
     const sessions = (await this.service.list())
-      .filter((c) => !allowed || allowed.has(c.id))
       .sort((a, b) => a.id.localeCompare(b.id))
       .filter((session) => !start || session.id >= start.sessionId);
     const matches: {

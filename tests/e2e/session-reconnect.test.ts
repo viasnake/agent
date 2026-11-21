@@ -9,6 +9,7 @@ import { createServer } from "../../src/server.js";
 test("deletion renews a browser session after server restart without losing a draft", async () => {
   const f = await fixture();
   const target = await f.service.create(randomUUID(), "削除するセッション");
+  const visible = await f.service.create(randomUUID(), "表示中のセッション");
   const probe = await createServer(f.service);
   const origin = await probe.listen({ host: "127.0.0.1", port: 0 });
   await probe.close();
@@ -24,9 +25,15 @@ test("deletion renews a browser session after server restart without losing a dr
   const page = await browser.newPage();
   try {
     await page.goto(origin);
+    const subscription = page.waitForResponse(
+      (response) =>
+        response.url() === `${origin}/api/conversations/${visible.id}/events` &&
+        response.ok(),
+    );
     await page
-      .getByRole("button", { name: "削除するセッション", exact: true })
-      .waitFor();
+      .getByRole("button", { name: "表示中のセッション", exact: true })
+      .click();
+    await subscription;
     await page.locator("#message").fill("保持する下書き");
     await page
       .getByRole("button", {
@@ -55,7 +62,7 @@ test("deletion renews a browser session after server restart without losing a dr
     }
     assert.ok(
       performance.now() - started < 5000,
-      "server shutdown closes the active assistant subscription",
+      "server shutdown closes the active conversation subscription",
     );
     server = await createServer(f.service, resolve("dist/web") + "/");
     await listen();
