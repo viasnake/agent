@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { TerminalIO } from "./terminal.js";
+import { gitIdentityView } from "./git-identity.js";
 export const requestSchema = z
   .object({
     id: z.string().uuid(),
@@ -18,6 +19,7 @@ export const requestSchema = z
       "cleanup",
       "delete_workspace",
       "worktrees",
+      "git_identity",
     ]),
     args: z.record(z.string(), z.unknown()),
   })
@@ -39,7 +41,15 @@ export type WorkerResult = {
   truncated?: boolean;
   tools?: ToolInfo[];
   result?: ToolExecutionResult;
+  gitIdentity?: z.infer<typeof gitIdentityView> | { conflict: true };
 };
+export const executableOperations = new Set<WorkerRequest["op"]>([
+  "tool",
+  "mcp_call",
+  "mcp_list",
+  "worktrees",
+  "git_identity",
+]);
 export const replySchema = z
   .object({
     id: z.string().uuid(),
@@ -76,6 +86,12 @@ export const replySchema = z
           .custom<ToolExecutionResult>(
             (v) => v !== null && typeof v === "object",
           )
+          .optional(),
+        gitIdentity: z
+          .union([
+            gitIdentityView,
+            z.object({ conflict: z.literal(true) }).strict(),
+          ])
           .optional(),
       })
       .strict()

@@ -54,6 +54,7 @@ import { AppError, hash, safeRelative } from "./security.js";
 import { WorkerCleanupError, WorkerClient } from "./execution/client.js";
 import type { Runner } from "./execution/protocol.js";
 import type { TerminalIO } from "./execution/terminal.js";
+import { gitIdentityInput } from "./execution/git-identity.js";
 import { guardedProvider } from "./provider.js";
 import { conversationUsage } from "./usage.js";
 import { agentTools, mcpTools } from "./tools.js";
@@ -284,6 +285,30 @@ export class AgentService {
     this.accountCatalogs.clear();
     this.notify();
     return this.management();
+  }
+  async workGitIdentity(input?: unknown) {
+    this.assertHealthy();
+    const change =
+      input === undefined ? undefined : gitIdentityInput.parse(input);
+    let result;
+    try {
+      await this.runner.ready();
+      ({ gitIdentity: result } = await this.runner.call(
+        randomUUID(),
+        "git_identity",
+        change ? { input: change } : {},
+      ));
+    } catch (error) {
+      if (error instanceof WorkerCleanupError) this.fail();
+      throw new AppError(
+        503,
+        "作業ユーザーの Git 設定を処理できません。ターミナルで設定ファイルを確認してください",
+      );
+    }
+    if (!result) throw new Error("Missing Git identity");
+    if ("conflict" in result)
+      throw new AppError(409, "Git 設定が更新中か、変更されています");
+    return result;
   }
   async disconnectMcp(id: string) {
     this.remote.cancel(id);

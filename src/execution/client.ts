@@ -6,7 +6,11 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { readInstallation } from "../installation.js";
 import { AppError } from "../security.js";
-import { PROTOCOL_BYTES, replySchema } from "./protocol.js";
+import {
+  executableOperations,
+  PROTOCOL_BYTES,
+  replySchema,
+} from "./protocol.js";
 import type { Runner, WorkerRequest, WorkerResult } from "./protocol.js";
 import { relayWorkerTerminal } from "./terminal.js";
 import type { TerminalIO } from "./terminal.js";
@@ -225,7 +229,7 @@ export class WorkerClient implements Runner {
       await current?.finished.catch(() => {});
       return { cleanup: !this.broken };
     }
-    if (!["tool", "mcp_call", "mcp_list", "worktrees"].includes(op))
+    if (!executableOperations.has(op))
       return this.files.call(id, op, args, signal);
     if (this.operations.has(id))
       throw new Error("Session tool already running");
