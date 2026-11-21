@@ -60,18 +60,25 @@ export function conversationThread(entries: Entry[], view: View | null) {
   const liveTools = new Map(progress?.tools.map((tool) => [tool.callId, tool]));
   const runningTools = new Set<string>();
   type Part = Exclude<ThreadMessageLike["content"], string>[number];
-  const messages = history.flatMap(({ id, message }): ThreadMessageLike[] => {
-    if (
-      message.role !== "user" &&
-      message.role !== "assistant" &&
-      message.role !== "toolResult"
-    )
-      return [];
-    const content: Part[] = [];
+  const messages: ThreadMessageLike[] = [];
+  let activity: Part[] = [];
+  let previousMessage = "start";
+  const flushActivity = () => {
+    if (!activity.length) return;
+    // Anchor the disclosure before new tool or reasoning parts arrive.
+    messages.push({
+      id: `activity-${previousMessage}`,
+      role: "assistant",
+      content: activity,
+      metadata: { custom: { activity: true } },
+    });
+    activity = [];
+  };
+  for (const { id, message } of history) {
     if (message.role === "toolResult") {
       // A result's call can be outside the loaded history page.
-      if (matchedResults.has(message)) return [];
-      content.push({
+      if (matchedResults.has(message)) continue;
+      activity.push({
         type: "tool-call",
         toolCallId: message.toolCallId ?? id,
         toolName: message.toolName ?? "",
@@ -80,53 +87,56 @@ export function conversationThread(entries: Entry[], view: View | null) {
         result: message.content,
         isError: message.isError,
       });
-    } else {
-      if (message.content.trim())
-        content.push({ type: "text", text: message.content });
-      if (message.visibleInTranscript)
-        for (const image of message.images ?? [])
-          content.push({ type: "image", image: image.url });
-      if (message.reasoning.trim())
-        content.push({ type: "reasoning", text: message.reasoning });
-      for (const call of message.toolCalls) {
-        const result = results.get(call);
-        const live =
-          unanswered.get(call.id) === call ? liveTools.get(call.id) : undefined;
-        if (live?.status === "running") runningTools.add(toolLabel(call.name));
-        content.push({
-          type: "tool-call",
-          toolCallId: call.id,
-          toolName: call.name,
-          args: {},
-          argsText: call.argsText,
-          result: result?.content ?? (live?.output || undefined),
-          isError: result?.isError,
-          isPreliminary: !result && !!live?.output,
-          artifact: live?.status,
-        });
-      }
+      continue;
     }
-    if (!content.length) return [];
-    return [
-      {
-        id,
-        role: message.role === "user" ? "user" : "assistant",
-        createdAt: message.timestamp ? new Date(message.timestamp) : undefined,
-        content,
-        metadata: { custom: { finalAnswer: message.visibleInTranscript } },
-      },
-    ];
-  });
-  if (progress?.generating && (progress.partial || progress.reasoning)) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
     const content: Part[] = [];
-    if (progress.partial)
-      content.push({ type: "text", text: progress.partial });
-    if (progress.reasoning)
-      content.push({ type: "reasoning", text: progress.reasoning });
+    if (message.content.trim())
+      (message.visibleInTranscript ? content : activity).push({
+        type: "text",
+        text: message.content,
+      });
+    if (message.reasoning.trim())
+      activity.push({ type: "reasoning", text: message.reasoning });
+    for (const call of message.toolCalls) {
+      const result = results.get(call);
+      const live =
+        unanswered.get(call.id) === call ? liveTools.get(call.id) : undefined;
+      if (live?.status === "running") runningTools.add(toolLabel(call.name));
+      activity.push({
+        type: "tool-call",
+        toolCallId: call.id,
+        toolName: call.name,
+        args: {},
+        argsText: call.argsText,
+        result: result?.content ?? (live?.output || undefined),
+        isError: result?.isError,
+        isPreliminary: !result && !!live?.output,
+        artifact: live?.status,
+      });
+    }
+    if (!message.visibleInTranscript) continue;
+    flushActivity();
+    previousMessage = id;
+    for (const image of message.images ?? [])
+      content.push({ type: "image", image: image.url });
+    if (!content.length) continue;
+    messages.push({
+      id,
+      role: message.role,
+      createdAt: message.timestamp ? new Date(message.timestamp) : undefined,
+      content,
+      metadata: { custom: { finalAnswer: message.role === "assistant" } },
+    });
+  }
+  if (progress?.generating && progress.reasoning)
+    activity.push({ type: "reasoning", text: progress.reasoning });
+  flushActivity();
+  if (progress?.generating && progress.partial.trim()) {
     messages.push({
       id: "streaming",
       role: "assistant",
-      content,
+      content: [{ type: "text", text: progress.partial }],
       status: { type: "running" },
     });
   }
@@ -358,37 +368,57 @@ function UserText({ text }: { text: string }) {
 }
 export function AssistantMessage() {
   const id = useAuiState((state) => state.message.id);
+  const activity = useAuiState(
+    (state) => state.message.metadata.custom.activity === true,
+  );
   const finalAnswer = useAuiState(
     (state) => state.message.metadata.custom.finalAnswer === true,
   );
   const { activeEntry } = useContext(MessageActions);
+  if (activity)
+    return (
+      <MessagePrimitive.Root>
+        <details className="run-details mb-3" data-aui-quote-selectable="false">
+          <summary className="small fg-2">実行の詳細</summary>
+          <div className="d-grid gap-2 pt-2">
+            <AssistantParts finalAnswer={false} />
+          </div>
+        </details>
+      </MessagePrimitive.Root>
+    );
   return (
     <MessagePrimitive.Root
       data-entry-id={id === "streaming" ? undefined : id.split("-")[0]}
       className={`message assistant-message ${activeEntry === Number(id.split("-")[0]) ? "search-current" : ""}`}
     >
       <div className="visually-hidden">アシスタント</div>
-      <MessagePrimitive.Parts>
-        {({ part }) => {
-          if (part.type === "text")
-            return <MarkdownText text={part.text} finalAnswer={finalAnswer} />;
-          if (part.type === "image") return <ImagePreview image={part.image} />;
-          if (part.type === "tool-call") return <ToolActivity {...part} />;
-          if (part.type === "reasoning")
-            return (
-              <details
-                className="activity-details"
-                data-aui-quote-selectable="false"
-              >
-                <summary>思考の詳細</summary>
-                <pre>{part.text}</pre>
-              </details>
-            );
-          return null;
-        }}
-      </MessagePrimitive.Parts>
+      <AssistantParts finalAnswer={finalAnswer} />
       {finalAnswer && <MessageFooter />}
     </MessagePrimitive.Root>
+  );
+}
+
+function AssistantParts({ finalAnswer }: { finalAnswer: boolean }) {
+  return (
+    <MessagePrimitive.Parts>
+      {({ part }) => {
+        if (part.type === "text")
+          return <MarkdownText text={part.text} finalAnswer={finalAnswer} />;
+        if (part.type === "image") return <ImagePreview image={part.image} />;
+        if (part.type === "tool-call") return <ToolActivity {...part} />;
+        if (part.type === "reasoning")
+          return (
+            <details
+              className="activity-details"
+              data-aui-quote-selectable="false"
+            >
+              <summary>思考の詳細</summary>
+              <pre>{part.text}</pre>
+            </details>
+          );
+        return null;
+      }}
+    </MessagePrimitive.Parts>
   );
 }
 

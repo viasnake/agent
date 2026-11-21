@@ -94,6 +94,7 @@ printf 'CSV verified'`,
       ],
       { stopReason: "toolUse" },
     ),
+    call("read", { path: "outputs/clean.csv" }),
     answer(
       [
         "## CSV の整形",
@@ -280,8 +281,20 @@ printf 'CSV verified'`,
         extension === "PNG" ? "構成 図.png" : "figure.svg",
       );
     }
-    await page.getByText("途中経過の報告です。", { exact: true }).waitFor();
-    const tool = page.locator(".tool-card").first();
+    const runDetails = page.locator(".run-details");
+    const runSummary = runDetails.locator(":scope > summary");
+    const intermediate = page.getByText("途中経過の報告です。", {
+      exact: true,
+    });
+    await runSummary.waitFor();
+    assert.equal(await runDetails.count(), 1);
+    assert.equal(await intermediate.isVisible(), false);
+    assert.equal(await runDetails.locator(".tool-card:visible").count(), 0);
+    await runSummary.focus();
+    await page.keyboard.press("Enter");
+    await intermediate.waitFor();
+    assert.equal(await runDetails.locator(".tool-card:visible").count(), 2);
+    const tool = runDetails.locator(".tool-card").first();
     await page.getByText("思考の詳細", { exact: true }).click();
     await page.getByText("添付 CSV を確認します。", { exact: true }).waitFor();
     await page.getByText("思考の詳細", { exact: true }).click();
@@ -289,6 +302,8 @@ printf 'CSV verified'`,
     await page.keyboard.press("Enter");
     await tool.getByText("CSV verified", { exact: true }).waitFor();
     await tool.locator("summary").click();
+    await runSummary.press("Enter");
+    await intermediate.waitFor({ state: "hidden" });
     for (const route of [
       `/api/conversations/${id}/search?q=`,
       "/api/history?query=",
@@ -340,7 +355,7 @@ printf 'CSV verified'`,
       await page.getByRole("tab", { name: "会話", exact: true }).click();
       await assertReadable(
         page.locator(
-          ".session-row.selected, #state, #connection, .user-bubble, .markdown, .markdown pre, .markdown th, .markdown td, .activity-details summary, .tool-card summary .fg-2, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
+          ".session-row.selected, #state, #connection, .user-bubble, .markdown:visible, .markdown pre:visible, .markdown th, .markdown td, .run-details > summary, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
         ),
       );
       await assertReadable(page.locator("#message"), "::placeholder");
@@ -380,9 +395,15 @@ printf 'CSV verified'`,
     await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
     await page.getByRole("tab", { name: "会話", exact: true }).click();
-    await tool.locator("summary").click();
-    await tool.getByText("CSV verified", { exact: true }).waitFor();
-    await tool.locator("summary").click();
+    const savedRun = runDetails.first();
+    const savedSummary = savedRun.locator(":scope > summary");
+    await savedSummary.waitFor();
+    assert.equal(await savedRun.getAttribute("open"), null);
+    await savedSummary.click();
+    const savedTool = savedRun.locator(".tool-card").first();
+    await savedTool.locator("summary").click();
+    await savedTool.getByText("CSV verified", { exact: true }).waitFor();
+    await savedSummary.click();
     f.faux.setResponses([
       call("write", {
         path: "outputs/note.md",
@@ -429,11 +450,14 @@ printf 'CSV verified'`,
       ),
     );
     await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
-    await page
+    await page.locator("#live").getByText("コマンドを実行中…").waitFor();
+    const activeRun = runDetails.last();
+    assert.equal(await activeRun.getAttribute("open"), null);
+    await activeRun.locator(":scope > summary").click();
+    await activeRun
       .getByText("実行途中のメッセージです。", { exact: true })
       .waitFor();
-    await page.locator("#live").getByText("コマンドを実行中…").waitFor();
-    const activeTool = page.locator(".tool-card").last();
+    const activeTool = activeRun.locator(".tool-card").last();
     await activeTool.getByText("実行中", { exact: true }).waitFor();
     await activeTool.locator("summary").click();
     await activeTool
