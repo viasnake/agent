@@ -80,8 +80,10 @@ prepare_runtimes "$runtime_root"
 export PATH="$runtime_root/node/bin:$runtime_root/python/bin:/usr/bin:/bin"
 unset NODE_OPTIONS NODE_PATH PYTHONHOME PYTHONPATH
 cd "$source_root"
-npm ci --ignore-scripts --no-audit --no-fund
-npm run build
+# The pinned Node.js already supplies the DOMException used by fetch-blob.
+npm ci --ignore-scripts --no-audit --no-fund --no-update-notifier --no-color 2>&1 |
+  sed -u "/^npm warn deprecated node-domexception@1\.0\.0: Use your platform's native DOMException instead$/d"
+npm --no-update-notifier run build
 if [[ "$build_only" == 1 ]]; then
   echo 'Build complete; no installation or service changes were made'
   exit 0
