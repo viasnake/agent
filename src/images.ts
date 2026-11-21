@@ -1,4 +1,3 @@
-import sharp from "sharp";
 import { extname } from "node:path";
 import { AppError } from "./security.js";
 const maxImageBytes = 5_000_000;
@@ -51,6 +50,10 @@ export async function validateImage(
     );
   if (signature === "image/png" && hasApngAnimationControl(bytes))
     throw new AppError(400, "画像は各辺2048px以下の静止画像にしてください");
+  // A CPU without native or WebAssembly image support can still run the service.
+  const { default: sharp } = await import("sharp").catch(() => {
+    throw new AppError(503, "この環境では画像入力を利用できません");
+  });
   try {
     const options = {
       failOn: "warning" as const,
