@@ -73,6 +73,10 @@ async function assertReadable(locator: Locator, pseudo?: string) {
 }
 
 test("real browser conversation: attachments, final answers with local images, downloads, reconnect and continuation", async () => {
+  let continueRun!: () => void;
+  const holdRead = new Promise<void>((resolve) => {
+    continueRun = resolve;
+  });
   const png = await sharp({
     create: { width: 36, height: 24, channels: 3, background: "#4a8" },
   })
@@ -94,7 +98,13 @@ printf 'CSV verified'`,
       ],
       { stopReason: "toolUse" },
     ),
-    call("read", { path: "outputs/clean.csv" }),
+    async () => {
+      await holdRead;
+      return fauxAssistantMessage(
+        fauxToolCall("read", { path: "outputs/clean.csv" }),
+        { stopReason: "toolUse" },
+      );
+    },
     answer(
       [
         "## CSV の整形",
@@ -194,6 +204,13 @@ printf 'CSV verified'`,
     await page.getByRole("button", { name: "通知を閉じる" }).click();
     await page.locator("#error").waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "送る", exact: true }).click();
+    const runDetails = page.locator(".run-details");
+    const runSummary = runDetails.locator(":scope > summary");
+    const intermediate = runDetails.getByText("途中経過の報告です。", {
+      exact: true,
+    });
+    await intermediate.waitFor();
+    continueRun();
     await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
     const uploadedLink = page.getByRole("link", { name: /input.csv.*添付/ });
@@ -281,11 +298,6 @@ printf 'CSV verified'`,
         extension === "PNG" ? "構成 図.png" : "figure.svg",
       );
     }
-    const runDetails = page.locator(".run-details");
-    const runSummary = runDetails.locator(":scope > summary");
-    const intermediate = page.getByText("途中経過の報告です。", {
-      exact: true,
-    });
     await runSummary.waitFor();
     assert.equal(await runDetails.count(), 1);
     assert.equal(await intermediate.isVisible(), false);
@@ -452,8 +464,6 @@ printf 'CSV verified'`,
     await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
     await page.locator("#live").getByText("コマンドを実行中…").waitFor();
     const activeRun = runDetails.last();
-    assert.equal(await activeRun.getAttribute("open"), null);
-    await activeRun.locator(":scope > summary").click();
     await activeRun
       .getByText("実行途中のメッセージです。", { exact: true })
       .waitFor();
@@ -594,6 +604,7 @@ printf 'CSV verified'`,
     const home = await mkdtemp(join(tmpdir(), "agent-ui-download-"));
     await download.saveAs(join(home, "clean.csv"));
   } finally {
+    continueRun();
     await context.close();
     await browser.close();
     await server.close();

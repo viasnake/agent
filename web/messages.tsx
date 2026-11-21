@@ -63,14 +63,14 @@ export function conversationThread(entries: Entry[], view: View | null) {
   const messages: ThreadMessageLike[] = [];
   let activity: Part[] = [];
   let previousMessage = "start";
-  const flushActivity = () => {
+  const flushActivity = (open = false) => {
     if (!activity.length) return;
     // Anchor the disclosure before new tool or reasoning parts arrive.
     messages.push({
       id: `activity-${previousMessage}`,
       role: "assistant",
       content: activity,
-      metadata: { custom: { activity: true } },
+      metadata: { custom: { activity: true, activityOpen: open } },
     });
     activity = [];
   };
@@ -131,7 +131,10 @@ export function conversationThread(entries: Entry[], view: View | null) {
   }
   if (progress?.generating && progress.reasoning)
     activity.push({ type: "reasoning", text: progress.reasoning });
-  flushActivity();
+  flushActivity(
+    view?.conversation.status === "running" ||
+      view?.conversation.status === "stopping",
+  );
   if (progress?.generating && progress.partial.trim()) {
     messages.push({
       id: "streaming",
@@ -371,6 +374,9 @@ export function AssistantMessage() {
   const activity = useAuiState(
     (state) => state.message.metadata.custom.activity === true,
   );
+  const activityOpen = useAuiState(
+    (state) => state.message.metadata.custom.activityOpen === true,
+  );
   const finalAnswer = useAuiState(
     (state) => state.message.metadata.custom.finalAnswer === true,
   );
@@ -378,7 +384,11 @@ export function AssistantMessage() {
   if (activity)
     return (
       <MessagePrimitive.Root>
-        <details className="run-details mb-3" data-aui-quote-selectable="false">
+        <details
+          className="run-details mb-3"
+          data-aui-quote-selectable="false"
+          open={activityOpen}
+        >
           <summary className="small fg-2">実行の詳細</summary>
           <div className="d-grid gap-2 pt-2">
             <AssistantParts finalAnswer={false} />
