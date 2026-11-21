@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
+import type { TerminalIO } from "./terminal.js";
 export const requestSchema = z
   .object({
     id: z.string().uuid(),
@@ -84,6 +85,7 @@ export const replySchema = z
   .strict();
 export interface Runner {
   ready(): Promise<void>;
+  terminal?(io: TerminalIO, signal: AbortSignal): Promise<void>;
   call(
     conversationId: string,
     op: WorkerRequest["op"],

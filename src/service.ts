@@ -51,8 +51,9 @@ import type { McpStatus, RemoteOptions } from "./mcp.js";
 import { ConversationsDoc } from "./state.js";
 import type { Conversation } from "./state.js";
 import { AppError, hash, safeRelative } from "./security.js";
-import { WorkerClient } from "./execution/client.js";
+import { WorkerCleanupError, WorkerClient } from "./execution/client.js";
 import type { Runner } from "./execution/protocol.js";
+import type { TerminalIO } from "./execution/terminal.js";
 import { guardedProvider } from "./provider.js";
 import { conversationUsage } from "./usage.js";
 import { agentTools, mcpTools } from "./tools.js";
@@ -131,6 +132,7 @@ export class AgentService {
   readonly notifications = new Set<() => void>();
   private registry: Registry = createRegistry();
   private readonly runs = new Map<string, Active>();
+  private terminalRun?: { controller: AbortController; done: Promise<void> };
   private serial: Promise<unknown> = Promise.resolve();
   private closing = false;
   private reopening = false;
@@ -453,7 +455,7 @@ export class AgentService {
   async testMcp(id: string) {
     return this.exclusive(async () => {
       this.assertHealthy();
-      if (this.busy)
+      if (this.runs.size)
         throw new AppError(
           409,
           "実行中です。接続テストは応答終了後に行ってください",
@@ -668,7 +670,7 @@ export class AgentService {
       if (this.busy)
         throw new AppError(
           409,
-          "実行中のセッションを停止してから Skills を変更してください",
+          "実行中のセッションやターミナルを停止してから Skills を変更してください",
         );
       if (change.kind === "create") await this.skills.create(change.input);
       else if (change.kind === "update")
@@ -725,7 +727,31 @@ export class AgentService {
     for (const listener of this.notifications) listener();
   }
   get busy() {
-    return this.runs.size > 0;
+    return this.runs.size > 0 || this.terminalRun !== undefined;
+  }
+  async terminal(io: TerminalIO, signal: AbortSignal): Promise<void> {
+    const run = await this.exclusive(async () => {
+      this.assertHealthy();
+      signal.throwIfAborted();
+      if (!this.runner.terminal)
+        throw new AppError(503, "ターミナルを利用できません");
+      if (this.terminalRun)
+        throw new AppError(409, "別のターミナルが開いています");
+      const controller = new AbortController();
+      const done = this.runner.terminal(
+        io,
+        AbortSignal.any([controller.signal, signal]),
+      );
+      return (this.terminalRun = { controller, done });
+    });
+    try {
+      await run.done;
+    } catch (error) {
+      if (error instanceof WorkerCleanupError) this.fail();
+      throw error;
+    } finally {
+      this.terminalRun = undefined;
+    }
   }
   private async sessionModel(
     conversation: Conversation,
@@ -1097,7 +1123,7 @@ export class AgentService {
       )
         throw new AppError(
           409,
-          "実行中のセッションを停止してから削除してください",
+          "実行中のセッションやターミナルを停止してから削除してください",
         );
       if (this.options.storage)
         throw new AppError(503, "この保存方式では完全削除を利用できません");
@@ -1899,6 +1925,8 @@ export class AgentService {
         for (const signer of active.signers) await signer.close();
       }
       this.closing = true;
+      this.terminalRun?.controller.abort();
+      await this.terminalRun?.done.catch(() => {});
       await this.modelAuth.close();
       this.notify();
       await this.harness.close(ctx);

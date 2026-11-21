@@ -1,0 +1,18 @@
+.terminal-page {
+  height: 100dvh;
+  margin: 0;
+  color: var(--bs-fg-body);
+  background: var(--bs-bg-1);
+}
+
+.terminal-page header {
+  border-bottom: 1px solid var(--bs-border-muted);
+}
+
+#terminal {
+  min-height: 0;
+  min-width: 0;
+  padding: 8px 12px;
+  overflow: hidden;
+  background: var(--bs-bg-body);
+}

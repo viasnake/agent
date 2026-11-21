@@ -329,6 +329,12 @@ by default for VM port forwarding without filtering socket-peer IPs. The VM netw
 and host-loopback forwarding provide the network access boundary; do not expose
 the unauthenticated service directly to other networks. Browser origins remain
 exact configured loopback URLs. Forwarding itself is outside Agent.
+The browser terminal opens one manual PTY in the work user's HOME with the ordinary
+worker environment. Reuse the fixed launcher, verified work UID and dedicated
+cgroup. Bind the WebSocket to the same-origin CSRF session, bound its lifetime and
+buffers, and drain the cgroup on disconnect, expiry and shutdown. Terminal bytes
+stay out of transcripts, service logs and shell history files. Keep idle-only
+deletion and Skill changes blocked until terminal cleanup completes.
 Keep the control HTTP port outside work-side preview ports 3000-3999 and retain
 worker egress restrictions. Model API credentials remain control-only. Preserve
 legacy UI password files without reading, migrating or deleting them.

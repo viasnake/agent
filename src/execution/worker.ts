@@ -11,6 +11,8 @@ import {
   rm,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
   BACKGROUND_CONTEXT,
@@ -66,6 +68,29 @@ export class Worker {
       TMPDIR: join(this.options.root, "tmp"),
       LANG: "C.UTF-8",
     };
+  }
+  terminal(): void {
+    const environment = this.env();
+    const python = this.options.production
+      ? "/opt/agent-python/bin/python3"
+      : "/usr/bin/python3";
+    const helper = fileURLToPath(
+      new URL("../../../scripts/terminal-pty.py", import.meta.url),
+    );
+    const child = spawn(python, ["-I", "-B", helper], {
+      cwd: environment.HOME,
+      env: { ...environment, TERM: "xterm-256color", HISTFILE: "/dev/null" },
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    process.stdin.pipe(child.stdin);
+    child.stdout.pipe(process.stdout, { end: false });
+    // A shell can exit while the browser is still sending keystrokes.
+    child.stdin.on("error", () => {});
+    child.once("error", () => process.exit(1));
+    child.once("close", (code) => {
+      process.stdin.pause();
+      process.stdout.write("", () => process.exit(code ?? 1));
+    });
   }
   private async path(
     id: string,
@@ -569,13 +594,14 @@ export async function serveWorker(options: WorkerOptions): Promise<void> {
   const worker = new Worker(options),
     controllers = new Map<string, AbortController>();
   let buffer = Buffer.alloc(0),
-    activeTool = false;
+    activeTool = false,
+    terminal = false;
   const reply = (value: unknown) => {
     const wire = JSON.stringify(value) + "\n";
     if (Buffer.byteLength(wire) > PROTOCOL_BYTES) process.exit(1);
     process.stdout.write(wire);
   };
-  process.stdin.on("data", (chunk: Buffer) => {
+  const receive = (chunk: Buffer) => {
     buffer = Buffer.concat([buffer, chunk]);
     if (buffer.length > PROTOCOL_BYTES) process.exit(1);
     let end: number;
@@ -584,6 +610,14 @@ export async function serveWorker(options: WorkerOptions): Promise<void> {
       buffer = buffer.subarray(end + 1);
       try {
         const value = JSON.parse(line.toString("utf8"));
+        if (value.type === "terminal") {
+          if (controllers.size || buffer.length) process.exit(1);
+          terminal = true;
+          // The relay continues reading from the same stream after handshake.
+          process.stdin.removeListener("data", receive);
+          worker.terminal();
+          return;
+        }
         if (value.type === "cancel") {
           controllers.get(z.string().uuid().parse(value.id))?.abort();
           continue;
@@ -619,8 +653,10 @@ export async function serveWorker(options: WorkerOptions): Promise<void> {
         process.exit(1);
       }
     }
-  });
+  };
+  process.stdin.on("data", receive);
   await new Promise<void>((resolve) => process.stdin.once("end", resolve));
+  if (terminal) return;
   for (const controller of controllers.values()) controller.abort();
   await worker.cleanup();
   process.exit(0);

@@ -1207,6 +1207,7 @@ button {
     margin-top: auto;
   }
   .sidebar-collapsed .sidebar .new-conversation,
+  .sidebar-collapsed .sidebar .sidebar-terminal,
   .sidebar-collapsed .sidebar .sidebar-settings {
     width: 44px;
     height: 44px;
@@ -1227,11 +1228,16 @@ button {
   width: 17px;
   height: 17px;
 }
-.sidebar-footer > button {
+.sidebar-footer > button,
+.sidebar-footer > a {
   display: flex;
   align-items: center;
   gap: 8px;
   min-height: 44px;
+}
+.sidebar-footer .sidebar-terminal {
+  grid-column: 1 / -1;
+  text-decoration: none;
 }
 .sidebar-footer .sidebar-settings {
   justify-content: flex-start;

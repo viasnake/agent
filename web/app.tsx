@@ -994,6 +994,17 @@ function App() {
           }
         />
         <div className="sidebar-footer">
+          <a
+            className="sidebar-terminal btn-text theme-secondary btn-sm"
+            href="/terminal"
+            target="_blank"
+            rel="noopener"
+            aria-label="ターミナル"
+            title="ターミナル"
+          >
+            <Icon name="terminal" />
+            <span className="sidebar-label-text">ターミナル</span>
+          </a>
           <button
             className="sidebar-settings btn-text theme-secondary btn-sm"
             aria-label="設定"

@@ -162,7 +162,9 @@ export function Skills({
         </p>
       )}
       {view?.busy && (
-        <p role="status">変更するには実行中のセッションを停止してください</p>
+        <p role="status">
+          変更するには実行中のセッションやターミナルを停止してください
+        </p>
       )}
       {view?.errors.map((message) => (
         <p key={message} role="alert">
