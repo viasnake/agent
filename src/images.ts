@@ -50,16 +50,31 @@ export async function validateImage(
     );
   if (signature === "image/png" && hasApngAnimationControl(bytes))
     throw new AppError(400, "画像は各辺2048px以下の静止画像にしてください");
-  // A CPU without native or WebAssembly image support can still run the service.
-  const { default: sharp } = await import("sharp").catch(() => {
-    throw new AppError(503, "この環境では画像入力を利用できません");
-  });
+  // Sharp's native and WebAssembly builds can both be unavailable on older CPUs.
+  const sharp = await import("sharp").catch(() => undefined);
   try {
+    if (!sharp) {
+      const { decodePortableImage } = await import("./portable-image.js").catch(
+        () => {
+          throw new AppError(503, "この環境では画像処理を利用できません");
+        },
+      );
+      await decodePortableImage(bytes, signature, {
+        maxWidth: maxImageSide,
+        maxHeight: maxImageSide,
+        maxPixels: maxImagePixels,
+        maxInputBytes: maxImageBytes,
+        maxFrames: 1,
+        maxDecodedBytes: 64 * 1024 * 1024,
+      });
+      return { mimeType: signature };
+    }
     const options = {
       failOn: "warning" as const,
       limitInputPixels: maxImagePixels,
     };
-    const metadata = await sharp(bytes, options).metadata();
+    const image = sharp.default(bytes, options);
+    const metadata = await image.metadata();
     if (
       metadata.format !==
         ({ "image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp" }[
@@ -73,7 +88,7 @@ export async function validateImage(
       (metadata.pages ?? 1) !== 1
     )
       throw new AppError(400, "画像は各辺2048px以下の静止画像にしてください");
-    await sharp(bytes, options).raw().toBuffer();
+    await image.raw().toBuffer();
     return { mimeType: signature };
   } catch (error) {
     if (error instanceof AppError) throw error;
