@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,9 @@ import { join } from "node:path";
 test("an unavailable image decoder does not prevent loading the service", async (t) => {
   const hooks = registerHooks({
     resolve(specifier, context, nextResolve) {
-      if (specifier === "sharp") throw new Error("Image decoder unavailable");
+      if (specifier === "sharp" || specifier === "./portable-image.js") {
+        throw new Error("Image decoder unavailable");
+      }
       return nextResolve(specifier, context);
     },
   });
@@ -23,6 +26,60 @@ test("an unavailable image decoder does not prevent loading the service", async 
     "base64",
   );
   await assert.rejects(validateImage(png), { statusCode: 503 });
+});
+
+test("session output previews validate and return the original images when Sharp cannot load", async (t) => {
+  const { default: sharp } = await import("sharp");
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (
+        specifier === "sharp" &&
+        context.parentURL?.endsWith("/src/images.js")
+      ) {
+        throw new Error("Sharp cannot load on this CPU");
+      }
+      return nextResolve(specifier, context);
+    },
+  });
+  t.after(() => hooks.deregister());
+  const { fixture } = await import("./support.js");
+  const { createServer } = await import("../src/server.js");
+  const f = await fixture([], { noModel: true });
+  const app = await createServer(f.service);
+  t.after(async () => {
+    await app.close();
+    await f.service.close();
+    await rm(f.root, { recursive: true });
+  });
+  const { id } = await f.service.create(randomUUID(), "Image previews");
+  await f.service.upload(id, randomUUID(), "setup.txt", Buffer.from("fixture"));
+  const headers: Record<string, string> = { host: "127.0.0.1:8080" };
+  const session = await app.inject({ url: "/api/session", headers });
+  headers.cookie = session.headers["set-cookie"]!.toString().split(";")[0]!;
+  const image = (width: number) =>
+    sharp({ create: { width, height: 8, channels: 3, background: "red" } });
+  const preview = async (format: string, bytes: Buffer) => {
+    const path = `outputs/diagram.${format}`;
+    await writeFile(join(f.root, "work/conversations", id, path), bytes);
+    return app.inject({
+      url: `/api/conversations/${id}/file-image?path=${encodeURIComponent(path)}`,
+      headers,
+    });
+  };
+  for (const format of ["png", "jpeg", "webp"] as const) {
+    const bytes = await image(2048)[format]().toBuffer();
+    const response = await preview(format, bytes);
+    assert.equal(response.statusCode, 200, format);
+    assert.equal(response.headers["content-type"], `image/${format}`);
+    assert.deepEqual(response.rawPayload, bytes);
+  }
+  assert.equal(
+    (await preview("png", await image(2049).png().toBuffer())).statusCode,
+    400,
+  );
+  const damaged = await image(8).png().toBuffer();
+  damaged[damaged.indexOf("IDAT") + 4] = 0;
+  assert.equal((await preview("png", damaged)).statusCode, 400);
 });
 
 test("Linux flock refuses a duplicate writer before its command can touch SQLite", async () => {

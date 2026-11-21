@@ -30,6 +30,7 @@
     "@img/sharp-wasm32": "0.35.5",
     "@modelcontextprotocol/sdk": "1.32.2",
     "fastify": "5.12.8",
+    "purejsimage": "0.17.0",
     "sharp": "0.35.5",
     "yaml": "2.9.0",
     "zod": "4.6.5"
