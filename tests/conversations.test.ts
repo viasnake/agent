@@ -5,6 +5,7 @@ import { mcpToolName } from "../src/tools.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import {
   readFile,
   writeFile,
@@ -245,6 +246,11 @@ test("configured stdio MCP tool is listed and called using the real official cli
       async () => (await f.service.conversation(id)).status === "idle",
     );
     assert.match(JSON.stringify(await f.service.view(id)), /Hello Pi/);
+    const { schemaVersion: _, ...settings } = f.service.settings.public();
+    await f.service.saveSettings({ ...settings, mcp: [] });
+    const [tool] = (await f.service.usageStatistics({ id }, ctx)).tools;
+    assert.equal(tool?.calls, 1);
+    assert.equal(tool?.label, "fixture/greet");
   } finally {
     await f.service.close();
   }

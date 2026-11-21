@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { test } from "node:test";
+import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { settingsInput } from "../src/settings.js";
 import { fixture, until } from "./support.js";
 
@@ -160,6 +161,10 @@ test("web search uses the admitted OpenAI connection and returns provider citati
         view.usage.tools.find(({ name }) => name === "web_search")?.totalTokens,
         10,
       );
+      const recorded = await service.usageStatistics({ id }, ctx);
+      assert.equal(recorded.tools[0]?.name, "web_search");
+      assert.equal(recorded.tools[0]?.calls, 1);
+      assert.equal(recorded.tools[0]?.totalTokens, 10);
     });
   }
 });

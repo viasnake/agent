@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
+import type { Context } from "@earendil-works/chord/context";
 import { createModels, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type {
   Provider,
@@ -56,8 +57,8 @@ import type { Runner } from "./execution/protocol.js";
 import type { TerminalIO } from "./execution/terminal.js";
 import { gitIdentityInput } from "./execution/git-identity.js";
 import { guardedProvider } from "./provider.js";
-import { conversationUsage } from "./usage.js";
-import { agentTools, mcpTools } from "./tools.js";
+import { conversationUsage, recordedUsage, type UsagePeriod } from "./usage.js";
+import { agentTools, mcpToolLabel, mcpToolName, mcpTools } from "./tools.js";
 import { searchOpenAI, webSearchTool } from "./web-search.js";
 import {
   conversationDatabase,
@@ -1859,6 +1860,32 @@ ${this.config.instructions}${this.redact(catalog)}`;
       cursor = page.next;
     }
     throw new AppError(413, "会話の保存上限を超えています");
+  }
+  async usageStatistics(
+    target: { id: string } | UsagePeriod,
+    context: Context,
+  ) {
+    const harness = this.harness;
+    const sessions =
+      "id" in target ? [await this.conversation(target.id)] : await this.list();
+    const labels = new Map<string, string>();
+    for (const server of this.settings.snapshot().mcp)
+      for (const tool of this.mcpStatuses.get(server.id)?.tools ?? [])
+        labels.set(
+          mcpToolName(server.id, tool.name),
+          mcpToolLabel(server, tool.name),
+        );
+    const result = await recordedUsage(
+      harness,
+      sessions.map((session) => session.piId),
+      context,
+      labels,
+      "id" in target ? undefined : target,
+    );
+    this.assertHealthy();
+    if (this.harness !== harness)
+      throw new AppError(503, "セッションが更新されました。再試行してください");
+    return result;
   }
   async view(id: string, cursor?: Cursor) {
     const conversation = await this.conversation(id),

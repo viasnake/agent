@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { UsageDoc, type UsageState } from "@earendil-works/pi-durable";
+import {
+  ToolResultEntry,
+  UsageDoc,
+  type UsageState,
+} from "@earendil-works/pi-durable";
 import { conversationUsage } from "../src/usage.js";
 import { fixture, answer, until } from "./support.js";
 
@@ -143,6 +147,10 @@ test("session usage is read-only, cumulative beyond history pages, persistent an
     );
     assert.deepEqual(latest.usage, own);
     assert.deepEqual((await f.service.view(id, latest.cursor)).usage, own);
+    assert.equal(
+      (await f.service.usageStatistics({ id }, ctx)).models[0]?.calls,
+      2,
+    );
     assert.equal(f.faux.state.callCount, 2);
 
     const response = first.transcript.find((entry) =>
@@ -172,6 +180,125 @@ test("session usage is read-only, cumulative beyond history pages, persistent an
     await f.service.deleteConversation(id);
     assert.deepEqual((await f.service.view(branch.id)).usage, branchUsage);
     await assert.rejects(f.service.view(id), { statusCode: 404 });
+  } finally {
+    await f.service.close();
+  }
+});
+
+test("period statistics use local dates and count owned tool results across archived sessions and forks", async () => {
+  const f = await fixture();
+  try {
+    const parent = await f.service.create(randomUUID(), "Parent");
+    const pi = await f.service.piConversation(parent.id);
+    async function record(
+      session: typeof pi,
+      toolName: string,
+      timestamp: string,
+      isError = false,
+    ) {
+      await session.submit(
+        {
+          type: "write",
+          entry: {
+            kind: ToolResultEntry.kind,
+            model: [
+              {
+                role: "toolResult",
+                toolCallId: randomUUID(),
+                toolName,
+                content: [{ type: "text", text: "Sensitive tool output" }],
+                isError,
+                timestamp: Date.parse(timestamp),
+              },
+            ],
+            data: { diagnostics: [] },
+          },
+        },
+        ctx,
+      );
+    }
+    await record(pi, "read", "2026-01-01T14:59:59.999Z");
+    await record(pi, "bash", "2026-01-01T15:00:00.000Z");
+    await pi.submit(
+      {
+        type: "write",
+        entry: {
+          kind: "test.history",
+          model: [
+            {
+              role: "user",
+              content: "Branch here",
+              timestamp: Date.parse("2026-01-01T15:01:00Z"),
+            },
+          ],
+        },
+      },
+      ctx,
+    );
+    const cutoff = (
+      await pi.entries({ order: "descending" }, 1, undefined, ctx)
+    ).items[0]!.id;
+    const branch = await f.service.branch(
+      parent.id,
+      randomUUID(),
+      cutoff,
+      "fork",
+    );
+    const fork = await f.service.piConversation(branch.id);
+    await record(fork, "bash", "2026-01-02T14:59:59.999Z", true);
+    await record(fork, "read", "2026-01-02T15:00:00.000Z");
+    await f.service.updateConversation(parent.id, { archived: true });
+
+    const range = {
+      from: "2026-01-02",
+      to: "2026-01-02",
+      timezone: "Asia/Tokyo",
+    };
+    const all = await f.service.usageStatistics(range, ctx);
+    assert.deepEqual(all.days, [
+      {
+        date: "2026-01-02",
+        modelCalls: 0,
+        toolCalls: 2,
+        toolErrors: 1,
+        totalTokens: 0,
+      },
+    ]);
+    assert.deepEqual(
+      all.tools.map(({ name, calls, errors }) => ({ name, calls, errors })),
+      [{ name: "bash", calls: 2, errors: 1 }],
+    );
+    assert.doesNotMatch(JSON.stringify(all), /Sensitive tool output/);
+    const own = await f.service.usageStatistics({ id: branch.id }, ctx);
+    assert.deepEqual(
+      own.tools.map(({ name, calls }) => [name, calls]),
+      [
+        ["bash", 1],
+        ["read", 1],
+      ],
+    );
+    const utc = await f.service.usageStatistics(
+      { ...range, timezone: "UTC" },
+      ctx,
+    );
+    assert.deepEqual(
+      utc.tools.map(({ name, calls }) => [name, calls]),
+      [
+        ["bash", 1],
+        ["read", 1],
+      ],
+    );
+    assert.equal(f.faux.state.callCount, 0);
+    assert.equal(
+      (await f.service.conversation(branch.id)).workspaceCreated,
+      false,
+    );
+
+    await f.service.deleteConversation(parent.id);
+    assert.equal(
+      (await f.service.usageStatistics(range, ctx)).days[0]!.toolCalls,
+      1,
+    );
   } finally {
     await f.service.close();
   }

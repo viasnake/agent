@@ -3,7 +3,7 @@ import { useReadingPosition } from "./reading-position.js";
 import { NotificationProvider, useNotify } from "./notifications.js";
 import { ModelPicker } from "./model-picker.js";
 import { SessionList } from "./sessions.js";
-import { SessionUsage } from "./usage.js";
+import { SessionUsage, UsageStatistics } from "./usage.js";
 import { MessageActions, MessageActionDialog } from "./message-actions.js";
 import { SelectionToolbar, SessionBranches } from "./message-controls.js";
 import type { MessageAction } from "./message-actions.js";
@@ -1035,6 +1035,7 @@ function App() {
           }
         />
         <div className="sidebar-footer">
+          <UsageStatistics />
           <a
             className="sidebar-terminal btn-text theme-secondary btn-sm"
             href="/terminal"
@@ -1214,7 +1215,13 @@ function App() {
                 className="session-panel"
                 tabIndex={0}
               >
-                {view && <SessionUsage usage={view.usage} />}
+                {view && tab === "usage" && (
+                  <SessionUsage
+                    id={view.conversation.id}
+                    usage={view.usage}
+                    latestEntry={view.transcript[0]?.id}
+                  />
+                )}
               </TabsContent>
               <TabsContent
                 value="files"

@@ -25,6 +25,9 @@ export function agentTools(service: AgentService) {
 export function mcpToolName(server: string, tool: string): string {
   return `mcp_${server.replaceAll("-", "")}_${hash(tool).slice(0, 12)}`;
 }
+export function mcpToolLabel(server: McpConfig, tool: string): string {
+  return `${server.name}/${tool}`.slice(0, 300);
+}
 export function mcpTools(
   service: AgentService,
   tools: ToolInfo[],
@@ -42,13 +45,19 @@ export function mcpTools(
       replay: "unsafe" as const,
       execute: async (args, api, context) => {
         const id = await service.toolConversation(api.conversationId);
-        return service.callMcp(
+        const result = await service.callMcp(
           server,
           id,
           tool.name,
           args as Record<string, unknown>,
           context.abortSignal,
         );
+        return {
+          ...result,
+          details: {
+            agentMcpToolLabel: service.redact(mcpToolLabel(server, tool.name)),
+          },
+        };
       },
     })),
   });
