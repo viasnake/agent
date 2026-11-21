@@ -1,0 +1,20 @@
+[Unit]
+Description=Refresh Agent Git mirror %i
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/srv/agent-data/git-mirrors/%i.git
+
+[Service]
+Type=oneshot
+User=agent-git
+Group=agent-work
+UMask=0027
+Environment=GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:ssh
+Environment="GIT_SSH_COMMAND=/usr/bin/ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"
+ExecStart=/usr/bin/git --git-dir=/srv/agent-data/git-mirrors/%i.git -c core.hooksPath=/dev/null -c http.followRedirects=false fetch --atomic --prune --no-tags --no-prune-tags --no-recurse-submodules --no-auto-maintenance --refmap= origin +refs/heads/*:refs/heads/*
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/agent-data/git-mirrors/%i.git
+PrivateTmp=yes
+NoNewPrivileges=yes
+TimeoutStartSec=2min

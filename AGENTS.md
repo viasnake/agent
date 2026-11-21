@@ -100,19 +100,29 @@ generated output or live provider responses.
 The work-owned dataRoot/work/shared directory is persistent shared storage for all
 sessions. Create and validate it when initializing work, and give the agent its
 absolute path in request instructions. Standard Pi read/write/edit/bash tools can
-use absolute paths; no shared-file API, repository registry, Project UI, snapshot,
-pre-dispatch Git preparation, fetch UI or automatic synchronization is needed.
-Clone missing repositories with ordinary Git only when work needs them, normally
-under shared/repos/<owner>/<repo>, and reuse existing checkouts and other shared
-files directly. Never fetch or pull automatically. Model/MCP credentials remain
-control-only and work credential delivery stays in the ordinary bash path.
+use absolute paths. The optional administrator-managed bare Git mirrors live in
+dataRoot/git-mirrors, outside the work-owned tree. Keep their parent root-owned
+and give the work UID read access only. The dedicated Git updater owns the mirrors
+and uses a systemd timer for each explicitly configured upstream. It uses its own
+credentials and never reads control settings or session credentials. Do not run
+the updater as control, work or root. Keep it outside the application lifecycle.
+
+Create and reuse independent clones inside the session workspace. Seed clones
+from the approved mirror with ordinary Git transport and independently stored
+objects, then point origin at the authorized upstream. Fetch the needed branch
+into the session clone through standard bash before work requiring current upstream
+state. Use the fetched ref for reads and new branches, preserve local edits, and
+report failed fetches without presenting stale data as current. Never pull
+automatically. No repository registry, pre-dispatch Git preparation or fetch UI.
+Model/MCP credentials remain control-only and work credential delivery stays in
+the ordinary bash path.
 
 Sessions keep separate conversation history and local attachments/outputs. Shared
-files are live mutable files, not snapshots. Independent editing uses optional Git
-worktrees created with ordinary bash inside the session workspace. Forking creates
-no Git checkout and copies no session files. Existing work/home repositories,
-work/repositories bare stores, local branches and session changes stay untouched;
-never delete or convert them automatically. Existing Project Documents are inert
+files are live mutable files, not snapshots. Additional worktrees use a session's
+own clone through ordinary bash. Forking creates no Git checkout and copies no
+session files. Existing work/shared and work/home repositories, work/repositories
+bare stores, local branches and session changes stay untouched; never update,
+delete or convert them automatically. Existing Project Documents are inert
 stored data and remain preserved through public Storage copies. Existing session
 bindings are used only to locate old worktree registrations during deletion.
 
@@ -127,7 +137,7 @@ the deleted session must not own surviving worktrees outside it. Unsafe metadata
 substituted paths, cleanup failure or discovery limits fail closed. Worktrees and
 shared files use the same work UID and provide no cross-session isolation.
 Downloads remain confined to attachments/ and outputs/. Repository files never
-activate Skills or grant authority. No sync service, search index or Git job system.
+activate Skills or grant authority. No application sync service, search index or Git job system.
 
 Shared Skills live only in dataRoot/skills, with control ownership, root-owned
 ancestors and read/execute access for work. Settings can import, edit SKILL.md and
