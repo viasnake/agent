@@ -56,6 +56,7 @@ import type { Runner } from "./execution/protocol.js";
 import { guardedProvider } from "./provider.js";
 import { conversationUsage } from "./usage.js";
 import { agentTools, mcpTools } from "./tools.js";
+import { searchOpenAI, webSearchTool } from "./web-search.js";
 import {
   conversationDatabase,
   requestDeletion,
@@ -96,6 +97,7 @@ type Active = {
     model: string;
     configId?: string;
     acceptsImages: boolean;
+    search?: Extension;
   };
   extensions: Extension[];
   limits: Config["limits"];
@@ -729,7 +731,7 @@ export class AgentService {
     conversation: Conversation,
     signal: AbortSignal,
     settings = this.settings.snapshot(),
-  ) {
+  ): Promise<Active["model"]> {
     const connection = settings.models.find(
       (m) =>
         m.id ===
@@ -819,6 +821,35 @@ export class AgentService {
       model: modelId,
       configId: connection?.id,
       acceptsImages: model.input.includes("image"),
+      search:
+        connection?.provider === "openai" &&
+        model.provider === "openai" &&
+        model.api === "openai-responses"
+          ? webSearchTool(conversation.piId, async (query, toolSignal) => {
+              const id = await this.toolConversation(conversation.piId);
+              const active = this.runs.get(id)!;
+              const provider = await this.harness.snapshot(
+                ProviderDoc,
+                conversation.piId,
+                ctx,
+              );
+              if (!provider?.sessionId) throw new Error("No provider session");
+              const bounded = AbortSignal.any([
+                ...(toolSignal ? [toolSignal] : []),
+                signal,
+                AbortSignal.timeout(active.limits.commandSeconds * 1000),
+              ]);
+              return this.sanitize(
+                await searchOpenAI(
+                  models,
+                  model,
+                  this.redact(query),
+                  provider.sessionId,
+                  bounded,
+                ),
+              );
+            })
+          : undefined,
     };
   }
   async list(): Promise<Conversation[]> {
@@ -1350,6 +1381,7 @@ export class AgentService {
       const extensions = starting
         ? await this.prepareMcp(id, settings.mcp)
         : [];
+      if (starting && model.search) extensions.push(model.search);
       if (skillRuntime) extensions.push(skillRuntime.extension);
       try {
         if (starting) {
