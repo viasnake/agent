@@ -7,7 +7,10 @@ import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
+import {
+  BACKGROUND_CONTEXT as ctx,
+  withAbortSignal,
+} from "@earendil-works/chord/context";
 import type { AgentService } from "./service.js";
 import { AppError } from "./security.js";
 import { isLocalOrigin } from "./config.js";
@@ -28,6 +31,13 @@ const identifier = z.object({ id: z.string().uuid() });
 const fileQuery = z.object({ path: z.string().max(240) }).strict();
 const modelSelection = z
   .object({ modelId: z.string().uuid(), model: z.string().min(1).max(200) })
+  .strict();
+const usagePeriod = z
+  .object({
+    from: z.iso.date(),
+    to: z.iso.date(),
+    timezone: z.string().min(1).max(100),
+  })
   .strict();
 type Session = { csrf: string; expires: number };
 function sendImage(
@@ -421,6 +431,14 @@ export async function createServer(
   app.get("/api/history", async (request) =>
     safe(await service.memory.search(historyInput.parse(request.query), true)),
   );
+  app.get("/api/statistics/usage", async (request) =>
+    safe(
+      await service.usageStatistics(
+        usagePeriod.parse(request.query),
+        withAbortSignal(request.signal, ctx),
+      ),
+    ),
+  );
   app.get("/api/conversations", async () =>
     safe({ conversations: (await service.list()).reverse() }),
   );
@@ -459,6 +477,14 @@ export async function createServer(
       : undefined;
     return safe(await service.view(id, parsed));
   });
+  app.get("/api/conversations/:id/usage", async (request) =>
+    safe(
+      await service.usageStatistics(
+        identifier.parse(request.params),
+        withAbortSignal(request.signal, ctx),
+      ),
+    ),
+  );
   app.delete("/api/conversations/:id", async (request) => {
     const { id } = identifier.parse(request.params);
     return service.deleteConversation(id);

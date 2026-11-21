@@ -8,7 +8,7 @@ import { createServer as portProbe } from "node:net";
 import { chromium } from "playwright";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { createServer } from "../../src/server.js";
-import { fixture, answer, until } from "../support.js";
+import { fixture, answer, call, until } from "../support.js";
 
 test("session actions, drafts, history search and explicit edit/regenerate/fork work through the real browser", async () => {
   const f = await fixture([
@@ -187,7 +187,11 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       await page.locator(".usage-summary dd").first().textContent(),
       beforeUsage.total.totalTokens.toLocaleString("ja-JP"),
     );
-    f.faux.setResponses([answer("使用量の更新")]);
+    f.faux.setResponses([
+      call("bash", { command: "printf stats" }),
+      call("read", { path: "missing-statistics-file.txt" }),
+      answer("使用量の更新"),
+    ]);
     await f.service.send(a.id, randomUUID(), "続き");
     await until(
       async () => (await f.service.conversation(a.id)).status === "idle",
@@ -199,6 +203,40 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
         document.querySelector(".usage-summary dd")?.textContent === value,
       afterUsage.total.totalTokens.toLocaleString("ja-JP"),
     );
+    const bash = page.getByRole("row", { name: /ツール: bash/ });
+    const read = page.getByRole("row", { name: /ツール: read/ });
+    await bash.waitFor();
+    assert.deepEqual(
+      (await bash.getByRole("cell").allTextContents()).slice(0, 2),
+      ["1", "0"],
+    );
+    assert.deepEqual(
+      (await read.getByRole("cell").allTextContents()).slice(0, 2),
+      ["1", "1"],
+    );
+
+    const statistics = page.getByRole("button", { name: "全セッションの統計" });
+    await statistics.click();
+    const dialog = page.getByRole("dialog", { name: "全セッションの統計" });
+    const daily = dialog.getByRole("table", { name: "日別の使用量" });
+    const today = await dialog.getByLabel("終了日").inputValue();
+    const day = daily.getByRole("row", { name: new RegExp(today) });
+    await day.waitFor();
+    assert.deepEqual(
+      (await day.getByRole("cell").allTextContents()).slice(0, 3),
+      ["4", "2", "1"],
+    );
+    await dialog.getByLabel("開始日").fill("2020-01-01");
+    await dialog.getByLabel("終了日").fill("2020-01-01");
+    await dialog.getByRole("button", { name: "集計", exact: true }).click();
+    await dialog.getByText("この期間の使用記録はありません").waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    assert.equal(
+      await statistics.evaluate((node) => node === document.activeElement),
+      true,
+    );
+
     await page.getByRole("tab", { name: "会話", exact: true }).click();
     assert.equal(await composer!.evaluate((node) => node.isConnected), true);
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
@@ -541,6 +579,11 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
         fullPage: true,
       });
       await page.keyboard.press("Escape");
+      await statistics.click();
+      await dialog.getByRole("table", { name: "日別の使用量" }).waitFor();
+      const bounds = await dialog.boundingBox();
+      assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390);
+      await dialog.getByRole("button", { name: "統計を閉じる" }).click();
       await page.locator(".sidebar-close").click();
       assert.ok(
         await page.evaluate(

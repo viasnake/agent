@@ -338,7 +338,10 @@ printf 'CSV verified'`,
         path: `test-results/session-files-${colorScheme}.png`,
       });
       await page.getByRole("tab", { name: "使用量", exact: true }).click();
-      await page.locator("#usage-panel .usage-table tbody tr").waitFor();
+      await page
+        .getByRole("tabpanel", { name: "使用量" })
+        .getByRole("rowheader", { name: "ツール: bash", exact: true })
+        .waitFor();
       await assertReadable(
         page.locator(
           "#usage-panel dt, #usage-panel dd, #usage-panel th, #usage-panel td, #usage-panel p",

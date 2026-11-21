@@ -95,6 +95,7 @@ export async function api<T>(
   path: string,
   method = "GET",
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const sentCsrf = csrf;
@@ -105,6 +106,7 @@ export async function api<T>(
         ...(method === "GET" ? {} : { "X-CSRF-Token": sentCsrf }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(signal ? { signal } : {}),
     });
     const value = await response.json();
     // Only this pre-handler rejection proves no mutation was admitted. Never
