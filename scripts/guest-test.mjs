@@ -107,6 +107,7 @@ const { WorkerClient } = await import(
 );
 const runner = new WorkerClient(),
   id = randomUUID(),
+  parallelId = randomUUID(),
   secret = `${dataRoot}/control/secrets/guest-test-${id}`,
   probePath = `/run/agent-cgroup-probe-${id}.mjs`,
   unit = `agent-cgroup-probe-${id}`,
@@ -332,7 +333,27 @@ Path("outputs/skill-check.txt").write_text("work UID only")
   await runner.close();
   await writeFile(
     probePath,
-    `import {WorkerClient} from '/opt/agent/dist/src/execution/client.js';const r=new WorkerClient();await r.ready();await r.call('${id}','tool',{name:'bash',args:{command:'setsid /bin/sh -c "sleep 300" >/dev/null 2>&1 & wait'},commandSeconds:300,commandBytes:1048576});`,
+    `import {WorkerClient} from "/opt/agent/dist/src/execution/client.js";
+    const runner = new WorkerClient();
+    await runner.ready();
+    await runner.call("${parallelId}", "init", {});
+    const shell = (id, command) => runner.call(id, "tool", {
+      name: "bash", args: {command}, commandSeconds: 300, commandBytes: 1048576
+    });
+    const first = shell("${id}", "echo $$ > outputs/first.pid; exec sleep 300").catch(() => {});
+    const second = shell("${parallelId}", "echo $$ > outputs/second.pid; exec setsid sleep 300");
+    for (const [session, file] of [["${id}", "first.pid"], ["${parallelId}", "second.pid"]]) {
+      for (let attempt = 0; attempt < 150; attempt++) {
+        const list = await runner.call(session, "list", {});
+        if (list.files.some(f => f.path === "outputs/" + file)) break;
+        if (attempt === 149) throw new Error("Parallel workers did not start");
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    if (!(await runner.call("${id}", "cleanup", {})).cleanup) throw new Error("Session cleanup failed");
+    await first;
+    await runner.call("${id}", "upload", {path:"attachments/stopped",data:"b2s="});
+    await second;`,
     { flag: "wx", mode: 0o644 },
   );
   command("systemd-run", [
@@ -342,11 +363,33 @@ Path("outputs/skill-check.txt").write_text("work UID only")
     "--property=User=agent-control",
     "--property=Group=agent-control",
     "--property=KillMode=control-group",
+    "--property=Delegate=yes",
+    "--property=DelegateSubgroup=control",
     "--property=TimeoutStopSec=3",
     "/opt/agent-node/bin/node",
     probePath,
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const stopped = `${dataRoot}/work/conversations/${id}/attachments/stopped`;
+  for (let attempt = 0; !existsSync(stopped); attempt++) {
+    assert.ok(attempt < 300, "Parallel workers must start and one must stop");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const readPid = async (session, name) =>
+    Number(
+      (
+        await readFile(
+          `${dataRoot}/work/conversations/${session}/outputs/${name}.pid`,
+          "utf8",
+        )
+      ).trim(),
+    );
+  const firstPid = await readPid(id, "first");
+  const secondPid = await readPid(parallelId, "second");
+  assert.equal(existsSync(`/proc/${firstPid}`), false);
+  assert.match(
+    await readFile(`/proc/${secondPid}/cgroup`, "utf8"),
+    /\/work-[a-f0-9-]+$/,
+  );
   const before = [];
   for (const pid of await readdir("/proc")) {
     if (!/^\d+$/.test(pid)) continue;
@@ -390,6 +433,10 @@ Path("outputs/skill-check.txt").write_text("work UID only")
   spawnSync("systemctl", ["stop", unit]);
   await unlink(secret).catch(() => undefined);
   await unlink(probePath).catch(() => undefined);
+  await rm(`${dataRoot}/work/conversations/${parallelId}`, {
+    recursive: true,
+    force: true,
+  });
   await rm(`${dataRoot}/work/conversations/${id}`, {
     recursive: true,
     force: true,

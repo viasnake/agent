@@ -23,11 +23,9 @@ import { modelProvider } from "../src/model-providers.js";
 
 // Test-only injection exercises actual Pi tools and files; it does not prove the production UID boundary.
 export class TestRunner implements Runner {
-  readonly worker: Worker;
+  readonly workers = new Map<string, Worker>();
   available = true;
-  constructor(readonly root: string) {
-    this.worker = new Worker({ root, production: false });
-  }
+  constructor(readonly root: string) {}
   async ready() {
     if (!this.available) throw new Error("Boundary unavailable");
   }
@@ -37,13 +35,18 @@ export class TestRunner implements Runner {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<WorkerResult> {
-    return this.worker.execute(
+    let worker = this.workers.get(conversationId);
+    if (!worker) {
+      worker = new Worker({ root: this.root, production: false });
+      this.workers.set(conversationId, worker);
+    }
+    return worker.execute(
       { id: randomUUID(), conversationId, op, args },
       signal ?? new AbortController().signal,
     );
   }
   async close() {
-    await this.worker.cleanup();
+    for (const worker of this.workers.values()) await worker.cleanup();
   }
 }
 export const call = (name: string, args: JsonObject): FauxResponseStep =>

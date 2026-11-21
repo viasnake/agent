@@ -12,6 +12,7 @@ export function skillsTools(
   service: Pick<AgentService, "toolConversation" | "sanitize">,
   snapshot: SkillsSnapshot,
   explicitInput?: string,
+  name = "skills",
 ) {
   const active = new Map<
     string,
@@ -33,7 +34,7 @@ export function skillsTools(
     return result;
   };
   const extension = defineExtension({
-    name: "skills",
+    name,
     hooks: [
       hook(GenerationTask, {
         beforeRequest: async ({ messages }, api) => {

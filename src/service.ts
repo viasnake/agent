@@ -5,7 +5,6 @@ import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { createModels, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type {
   Provider,
-  CredentialStore,
   OAuthAuth,
   ImageContent,
   UserMessage,
@@ -39,6 +38,7 @@ import type {
   Cursor,
   Storage,
   Registry,
+  Extension,
   EntryId,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -89,6 +89,17 @@ export type ServiceOptions = {
 };
 type Active = {
   id: string;
+  piId: ConversationId;
+  model: {
+    binding: Provider;
+    provider: string;
+    model: string;
+    configId?: string;
+    acceptsImages: boolean;
+  };
+  extensions: Extension[];
+  limits: Config["limits"];
+  signers: Set<Awaited<ReturnType<typeof openSshAgent>>>;
   version: number;
   timer: NodeJS.Timeout;
   credentials: ReturnType<typeof sharedCredentials>;
@@ -99,25 +110,15 @@ const interrupted =
 export class AgentService {
   readonly memory = new SessionMemory(this);
   readonly skills: SkillsLoader;
-  private skillsExtension?: ReturnType<typeof skillsTools>["extension"];
   harness!: Harness;
   settings!: SettingsStore;
   remote!: RemoteMcp;
   modelAuth!: ModelAuth;
-  private credentials: CredentialStore = new InMemoryCredentialStore();
   private models = createModels({
-    credentials: {
-      read: (...args) => this.credentials.read(...args),
-      list: (...args) => this.credentials.list(...args),
-      modify: (...args) => this.credentials.modify(...args),
-      delete: (...args) => this.credentials.delete(...args),
-    },
+    credentials: new InMemoryCredentialStore(),
     authContext: { env: async () => undefined, fileExists: async () => false },
   });
   private appliedRevision = -1;
-  private appliedModelConfigId?: string;
-  private appliedMcp: McpConfig[] = [];
-  private mcpExtensions: ReturnType<typeof mcpTools>[] = [];
   private mcpStatuses = new Map<string, McpStatus>();
   private modelStatuses = new Map<string, string>();
   private accountCatalogs = new Map<
@@ -127,8 +128,7 @@ export class AgentService {
   readonly runner: Runner;
   readonly notifications = new Set<() => void>();
   private registry: Registry = createRegistry();
-  private active?: Active;
-  private signers = new Set<Awaited<ReturnType<typeof openSshAgent>>>();
+  private readonly runs = new Map<string, Active>();
   private serial: Promise<unknown> = Promise.resolve();
   private closing = false;
   private reopening = false;
@@ -138,20 +138,16 @@ export class AgentService {
   readonly closed = new Promise<void>((resolve) => {
     this.resolveClosed = resolve;
   });
-  private readyModel = false;
-  private modelId: string | null;
-  private providerId: string;
+
   private secrets: string[] = [];
   private preparation?: Promise<void>;
-  private monitor?: Promise<void>;
+  private readonly monitors = new Set<Promise<void>>();
   private constructor(
     readonly config: Config,
     private options: ServiceOptions,
   ) {
     this.skills = options.skills ?? new SkillsLoader(config.dataRoot);
     this.runner = options.runner ?? new WorkerClient();
-    this.modelId = options.modelId ?? config.model?.id ?? null;
-    this.providerId = options.provider?.id ?? "openai";
   }
   static async open(
     config: Config,
@@ -166,7 +162,7 @@ export class AgentService {
     this.settings = await SettingsStore.open(this.config);
     this.modelAuth = new ModelAuth(this.settings, this.options.modelOAuth);
     this.remote = new RemoteMcp(this.settings, this.options.remote);
-    await this.applySettings();
+    this.applySettings();
     this.registry.install(agentTools(this));
     this.registry.install(memoryTools(this));
     if (!this.options.storage)
@@ -423,50 +419,14 @@ export class AgentService {
       null
     );
   }
-  private async applySettings(selected?: string, requested?: string) {
-    const s = this.settings.snapshot();
-    const model = s.models.find(
-      (m) => m.id === (selected ?? s.defaultModel ?? s.models[0]?.id),
-    );
-    if (selected && !model)
-      throw new AppError(
-        409,
-        "選択したモデルがありません。セッションのモデルを選び直してください",
-      );
-    const selectedModel = this.selectedModel(model, requested);
-    if (
-      this.appliedRevision === s.revision &&
-      this.appliedModelConfigId === model?.id &&
-      this.modelId === selectedModel
-    ) {
-      this.appliedMcp = s.mcp;
-      return;
-    }
+  private applySettings(s = this.settings.snapshot()) {
+    if (this.appliedRevision === s.revision) return;
     this.secrets.push(
       ...this.settings.secrets().filter((s) => !this.secrets.includes(s)),
     );
     this.config.instructions = s.instructions;
     Object.assign(this.config.limits, s.limits);
-    this.modelId = selectedModel;
-    this.models.deleteProvider(this.providerId);
-    this.providerId = this.options.provider?.id ?? model?.provider ?? "openai";
-    this.readyModel =
-      !!this.options.provider || !!(model && modelCredential(model));
-    this.credentials = model
-      ? this.settings.credentials(model)
-      : new InMemoryCredentialStore();
-    if (this.readyModel) {
-      this.models.setProvider(
-        guardedProvider(
-          this.options.provider ??
-            modelProvider({ ...model!, model: this.modelId! }),
-          (session, model) => this.reserve(session, model),
-        ),
-      );
-    }
-    this.appliedMcp = s.mcp;
     this.appliedRevision = s.revision;
-    this.appliedModelConfigId = model?.id;
   }
   private stdio(server: McpConfig) {
     return {
@@ -491,7 +451,7 @@ export class AgentService {
   async testMcp(id: string) {
     return this.exclusive(async () => {
       this.assertHealthy();
-      if (this.active)
+      if (this.busy)
         throw new AppError(
           409,
           "実行中です。接続テストは応答終了後に行ってください",
@@ -520,16 +480,12 @@ export class AgentService {
       return this.management();
     });
   }
-  private async prepareMcp(id: string) {
-    for (const extension of this.mcpExtensions)
-      this.registry.uninstall(extension);
-    this.mcpExtensions = [];
-    for (const server of this.appliedMcp.filter((s) => s.enabled)) {
+  private async prepareMcp(id: string, servers: McpConfig[]) {
+    const extensions: Extension[] = [];
+    for (const server of servers.filter((s) => s.enabled)) {
       try {
         const tools = await this.discover(server, id);
-        const extension = mcpTools(this, tools, server);
-        this.registry.install(extension);
-        this.mcpExtensions.push(extension);
+        extensions.push(mcpTools(this, tools, server, id));
         this.mcpStatuses.set(server.id, {
           state: "ready",
           message: "接続済み",
@@ -548,6 +504,7 @@ export class AgentService {
         });
       }
     }
+    return extensions;
   }
   async callMcp(
     server: McpConfig,
@@ -565,7 +522,7 @@ export class AgentService {
             server: this.stdio(server),
             name,
             args,
-            commandSeconds: this.config.limits.commandSeconds,
+            commandSeconds: this.runs.get(id)!.limits.commandSeconds,
           },
           signal,
         );
@@ -683,7 +640,7 @@ export class AgentService {
     return this.sanitize({
       ...(await this.skills.discover()).view,
       writable: await this.skills.writable(),
-      busy: !!this.active,
+      busy: this.busy,
     });
   }
   async skillDetail(name: string) {
@@ -706,7 +663,7 @@ export class AgentService {
   ) {
     return this.exclusive(async () => {
       this.assertHealthy();
-      if (this.active)
+      if (this.busy)
         throw new AppError(
           409,
           "実行中のセッションを停止してから Skills を変更してください",
@@ -764,6 +721,105 @@ export class AgentService {
   }
   private notify(): void {
     for (const listener of this.notifications) listener();
+  }
+  get busy() {
+    return this.runs.size > 0;
+  }
+  private async sessionModel(
+    conversation: Conversation,
+    signal: AbortSignal,
+    settings = this.settings.snapshot(),
+  ) {
+    const connection = settings.models.find(
+      (m) =>
+        m.id ===
+        (conversation.modelConfigId ??
+          settings.defaultModel ??
+          settings.models[0]?.id),
+    );
+    if (conversation.modelConfigId && !connection)
+      throw new AppError(
+        409,
+        "選択したモデルがありません。セッションのモデルを選び直してください",
+      );
+    const modelId = this.selectedModel(connection, conversation.model);
+    if (
+      !modelId ||
+      (!this.options.provider && (!connection || !modelCredential(connection)))
+    )
+      throw new AppError(409, "設定画面でモデルの認証を完了してください");
+    const provider =
+      this.options.provider ??
+      modelProvider({ ...connection!, model: modelId });
+    const credentials = connection
+      ? this.settings.credentials(connection)
+      : new InMemoryCredentialStore();
+    const models = createModels({
+      credentials,
+      authContext: {
+        env: async () => undefined,
+        fileExists: async () => false,
+      },
+    });
+    models.setProvider(
+      guardedProvider(provider, (session, model) =>
+        this.reserve(conversation.id, session, model),
+      ),
+    );
+
+    const model = models.getModel(provider.id, modelId);
+    if (!model) throw new AppError(409, "モデルを選び直してください");
+    if (provider.id === "github-copilot") {
+      let available: string[];
+      try {
+        available = await copilotAccountModels(
+          models,
+          credentials,
+          AbortSignal.timeout(10000),
+        );
+      } catch (error) {
+        throw new AppError(409, modelTestFailure(error));
+      }
+      if (!available.includes(modelId))
+        throw new AppError(
+          409,
+          "利用できないモデルです。モデルを選び直してください",
+        );
+    }
+    // The adapter has no credentials. All auth and refresh stay in this frozen
+    // admission's Models instance; worker settings cannot replace them.
+    const adapter = "agent-work-" + conversation.id;
+    const binding: Provider = {
+      id: adapter,
+      name: "Work session",
+      auth: {
+        apiKey: { name: "Internal", resolve: async () => ({ auth: {} }) },
+      },
+      getModels: () => [{ ...model, provider: adapter }],
+      stream: (_model, context, options) =>
+        models.stream(model, context, {
+          ...options,
+          signal: AbortSignal.any([
+            signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        }),
+      streamSimple: (_model, context, options) =>
+        models.streamSimple(model, context, {
+          ...options,
+          signal: AbortSignal.any([
+            signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        }),
+    };
+    return {
+      binding,
+      provider: adapter,
+      model: modelId,
+      configId: connection?.id,
+      acceptsImages: model.input.includes("image"),
+    };
   }
   async list(): Promise<Conversation[]> {
     this.assertHealthy();
@@ -883,11 +939,7 @@ export class AgentService {
     return this.exclusive(async () => {
       this.assertHealthy();
       const parent = await this.conversation(id);
-      if (
-        this.active ||
-        parent.status === "running" ||
-        parent.status === "stopping"
-      )
+      if (parent.status === "running" || parent.status === "stopping")
         throw new AppError(409, "応答を停止してから分岐してください");
       const digest = hash({ id, entryId, mode });
       const previous = (await this.harness.snapshot(ConversationsDoc, ctx))!
@@ -1008,7 +1060,7 @@ export class AgentService {
       if (!conversation) throw new AppError(404, "セッションがありません");
       if (conversation.purgedAt) return { id };
       if (
-        this.active ||
+        this.busy ||
         conversation.status === "running" ||
         conversation.status === "stopping"
       )
@@ -1045,11 +1097,12 @@ export class AgentService {
     signal?: AbortSignal,
   ) {
     const id = await this.toolConversation(piId);
-    const credentials = this.active!.credentials;
+    const active = this.runs.get(id)!;
+    const credentials = active.credentials;
     signal = AbortSignal.any([
       ...(signal ? [signal] : []),
-      this.active!.controller.signal,
-      AbortSignal.timeout(this.config.limits.commandSeconds * 1000),
+      active.controller.signal,
+      AbortSignal.timeout(active.limits.commandSeconds * 1000),
     ]);
     let signer: Awaited<ReturnType<typeof openSshAgent>> | undefined;
     try {
@@ -1058,7 +1111,7 @@ export class AgentService {
           ? process.getuid!()
           : (await readInstallation()).workUid;
         signer = await openSshAgent(credentials.keys, workUid, signal);
-        this.signers.add(signer);
+        active.signers.add(signer);
       }
       signal?.throwIfAborted();
       await this.toolConversation(piId);
@@ -1071,8 +1124,8 @@ export class AgentService {
           ...(name === "bash"
             ? { environment: credentials.env, sshSocket: signer?.socket }
             : {}),
-          commandSeconds: this.config.limits.commandSeconds,
-          commandBytes: this.config.limits.commandBytes,
+          commandSeconds: active.limits.commandSeconds,
+          commandBytes: active.limits.commandBytes,
         },
         signal,
       );
@@ -1086,7 +1139,7 @@ export class AgentService {
           this.fail();
           throw error;
         } finally {
-          this.signers.delete(signer);
+          active.signers.delete(signer);
         }
       }
     }
@@ -1179,50 +1232,27 @@ export class AgentService {
           throw new AppError(409, "requestId の内容が一致しません");
         return { id: previous.id };
       }
+      let active = this.runs.get(id);
+      const starting = !active;
       const requestedSkill = explicitSkill(text);
-      if (requestedSkill && (this.active || resume))
+      if (requestedSkill && (active || resume))
         throw new AppError(
           409,
           "Skill の明示指定は停止後の新しい入力で行ってください",
         );
-      if (options.continuing && this.active)
+      if (options.continuing && active)
         throw new AppError(409, "応答を停止してから再生成してください");
-      if (this.active && this.active.id !== id)
-        throw new AppError(409, "別のセッションが実行中です（busy）");
       if (conversation.status === "stopping")
         throw new AppError(409, "停止を確認しています");
-      const starting = !this.active;
-      const admittedCredentials = starting
-        ? sharedCredentials(this.settings.snapshot().workCredentials)
-        : this.active!.credentials;
-      if (!this.active)
-        await this.applySettings(
-          conversation.modelConfigId,
-          conversation.model,
-        );
-      if (!this.readyModel || !this.modelId)
-        throw new AppError(
-          409,
-          "設定画面でモデルの認証を完了してください。セッションは保存されています",
-        );
-      if (!this.models.getModel(this.providerId, this.modelId))
-        throw new AppError(409, "モデルを選び直してください");
-      if (starting && this.providerId === "github-copilot") {
-        try {
-          const available = await copilotAccountModels(
-            this.models,
-            this.credentials,
-            AbortSignal.timeout(10000),
-          );
-          if (!available.includes(this.modelId))
-            throw new AppError(
-              409,
-              "利用できないモデルです。モデルを選び直してください",
-            );
-        } catch (error) {
-          throw new AppError(409, modelTestFailure(error));
-        }
-      }
+      const settings = this.settings.snapshot();
+      if (starting) this.applySettings(settings);
+      const controller = active?.controller ?? new AbortController();
+      const model =
+        active?.model ??
+        (await this.sessionModel(conversation, controller.signal, settings));
+      const limits = active?.limits ?? { ...this.config.limits };
+      const admittedCredentials =
+        active?.credentials ?? sharedCredentials(settings.workCredentials);
       const skillSnapshot = starting ? await this.skills.discover() : undefined;
       if (
         skillSnapshot &&
@@ -1241,6 +1271,7 @@ export class AgentService {
             this,
             skillSnapshot,
             requestedSkill ? this.redact(text) : undefined,
+            "skills-" + id,
           )
         : undefined;
       if (selectedSkill) {
@@ -1251,7 +1282,6 @@ export class AgentService {
       }
       if (starting) {
         await this.workspace(id);
-        await this.prepareMcp(id);
       }
       const images: ImageContent[] = [];
       let imageBytes = 0;
@@ -1304,12 +1334,7 @@ export class AgentService {
           data: bytes.toString("base64"),
         });
       }
-      if (
-        images.length &&
-        !this.models
-          .getModel(this.providerId, this.modelId)
-          ?.input.includes("image")
-      )
+      if (images.length && !model.acceptsImages)
         throw new AppError(400, "画像入力に対応するモデルを選択してください");
       const input: UserMessage["content"] = resume
         ? `${interrupted}\n\n状態を確認して、前の依頼を続けてください。`
@@ -1322,38 +1347,51 @@ export class AgentService {
         admittedSkills && Object.keys(admittedSkills.versions).length
           ? { kind: "agent.skill-input", data: admittedSkills }
           : undefined;
-      if (starting) {
-        if (this.skillsExtension) this.registry.uninstall(this.skillsExtension);
-        this.skillsExtension = skillRuntime?.extension;
-        if (this.skillsExtension) this.registry.install(this.skillsExtension);
-      }
-      if (starting)
-        await pi.configure(
-          {
-            model: { provider: this.providerId, modelId: this.modelId },
-            // An older conversation or fork may have saved its own tool filters.
-            extensions: null,
-            tools: null,
-            instructions:
-              this.instructions(id, skillSnapshot?.catalog()) +
-              `\nAvailable credential environment variable names: ${Object.keys(admittedCredentials.env).join(", ") || "none"}. SSH authentication: ${admittedCredentials.keys.length ? "available automatically through SSH_AUTH_SOCK" : "not configured"}. Use these credentials without printing their values.`,
-            maxTurns: this.config.limits.modelRequests,
-          },
-          ctx,
-        );
-      if (starting)
-        this.active = {
-          id,
-          version: 0,
-          credentials: admittedCredentials,
-          controller: new AbortController(),
-          timer: setTimeout(() => {
-            void this.stop(id, "実行時間の上限に達しました").catch(() => {
-              this.fail();
-            });
-          }, this.config.limits.runSeconds * 1000),
-        };
+      const extensions = starting
+        ? await this.prepareMcp(id, settings.mcp)
+        : [];
+      if (skillRuntime) extensions.push(skillRuntime.extension);
       try {
+        if (starting) {
+          const excluded = new Set<Extension>();
+          for (const run of this.runs.values())
+            for (const extension of run.extensions) excluded.add(extension);
+          const common = this.registry
+            .snapshot()
+            .installed()
+            .filter((extension) => !excluded.has(extension));
+          this.models.setProvider(model.binding);
+          for (const extension of extensions) this.registry.install(extension);
+          await pi.configure(
+            {
+              model: { provider: model.provider, modelId: model.model },
+              extensions: [...common, ...extensions],
+              tools: null,
+              instructions:
+                this.instructions(id, skillSnapshot?.catalog()) +
+                `\nAvailable credential environment variable names: ${Object.keys(admittedCredentials.env).join(", ") || "none"}. SSH authentication: ${admittedCredentials.keys.length ? "available automatically through SSH_AUTH_SOCK" : "not configured"}. Use these credentials without printing their values.`,
+              maxTurns: limits.modelRequests,
+            },
+            ctx,
+          );
+          active = {
+            id,
+            piId: conversation.piId,
+            model,
+            extensions,
+            limits,
+            signers: new Set(),
+            version: 0,
+            credentials: admittedCredentials,
+            controller,
+            timer: setTimeout(() => {
+              void this.stop(id, "実行時間の上限に達しました").catch(() => {
+                this.fail();
+              });
+            }, limits.runSeconds * 1000),
+          };
+          this.runs.set(id, active);
+        }
         await this.harness.commit(async (tx) => {
           const state = await tx.doc(ConversationsDoc),
             record = state.conversations.find((item) => item.id === id)!;
@@ -1377,43 +1415,47 @@ export class AgentService {
           record.updatedAt = Date.now();
           if (starting) {
             record.skills = skillState;
-            if (this.appliedModelConfigId)
-              record.modelConfigId = this.appliedModelConfigId;
-            if (this.modelId) record.model = this.modelId;
+            if (model.configId) record.modelConfigId = model.configId;
+            record.model = model.model;
             record.requests = 0;
-            record.deadlineAt =
-              Date.now() + this.config.limits.runSeconds * 1000;
+            record.deadlineAt = Date.now() + limits.runSeconds * 1000;
           }
           state.receipts[requestId] = { hash: digest, id };
         }, ctx);
       } catch (error) {
         if (starting) {
-          clearTimeout(this.active!.timer);
-          this.active = undefined;
+          if (active) clearTimeout(active.timer);
+          this.releaseRun(id, model.provider, extensions);
         }
         throw error;
       }
-      this.active!.version++;
+      active!.version++;
       if (starting) {
-        const active = this.active!;
-        this.monitor = this.monitorConversation(active, pi).catch(() => {
+        const monitor = this.monitorConversation(active!, pi).catch(() => {
           this.fail();
         });
+        this.monitors.add(monitor);
+        void monitor.finally(() => this.monitors.delete(monitor));
       }
       this.harness.resume();
       this.notify();
       return { id };
     });
   }
+  private releaseRun(id: string, provider: string, extensions: Extension[]) {
+    this.runs.delete(id);
+    this.models.deleteProvider(provider);
+    for (const extension of extensions) this.registry.uninstall(extension);
+  }
   private async monitorConversation(
     active: Active,
     pi: PiConversation,
   ): Promise<void> {
-    while (this.active === active) {
+    while (this.runs.get(active.id) === active) {
       const version = active.version;
       await pi.waitForIdle(ctx);
       const settled = await this.exclusive(async () => {
-        if (this.active !== active) return true;
+        if (this.runs.get(active.id) !== active) return true;
         if (version !== active.version) return false;
         const current = await this.conversation(active.id);
         if (current.status !== "running") return true;
@@ -1440,7 +1482,7 @@ export class AgentService {
           conversation.updatedAt = Date.now();
         }, ctx);
         clearTimeout(active.timer);
-        this.active = undefined;
+        this.releaseRun(active.id, active.model.provider, active.extensions);
         this.notify();
         return true;
       });
@@ -1484,9 +1526,8 @@ export class AgentService {
     return this.exclusive(async () => {
       this.assertHealthy();
       const conversation = await this.conversation(id);
-      if (this.active && this.active.id !== id) return { id };
-      if (!this.active && conversation.status === "idle") return { id };
-      const active = this.active;
+      const active = this.runs.get(id);
+      if (!active && conversation.status === "idle") return { id };
       await this.harness.commit(async (tx) => {
         const value = (await tx.doc(ConversationsDoc)).conversations.find(
           (item) => item.id === id,
@@ -1497,7 +1538,7 @@ export class AgentService {
       if (active) clearTimeout(active.timer);
       this.notify();
       active?.controller.abort();
-      for (const signer of this.signers) await signer.close();
+      for (const signer of active?.signers ?? []) await signer.close();
       await this.abortRetainingInput(await this.pi(conversation));
       await this.runner.ready();
       if (!(await this.runner.call(id, "cleanup", {})).cleanup) {
@@ -1515,17 +1556,18 @@ export class AgentService {
         value.detail = detail;
         value.updatedAt = Date.now();
       }, ctx);
-      this.active = undefined;
+      if (active) this.releaseRun(id, active.model.provider, active.extensions);
       this.notify();
       return { id };
     });
   }
   private async reserve(
+    id: string,
     sessionId: string | undefined,
     modelId: string,
   ): Promise<void> {
     this.assertHealthy();
-    const active = this.active;
+    const active = this.runs.get(id);
     if (!active) throw new Error("No active conversation");
     await this.harness.commit(async (tx) => {
       const conversation = (await tx.doc(ConversationsDoc)).conversations.find(
@@ -1536,8 +1578,8 @@ export class AgentService {
         conversation.status !== "running" ||
         !sessionId ||
         provider.sessionId !== sessionId ||
-        modelId !== this.modelId ||
-        conversation.requests >= this.config.limits.modelRequests ||
+        modelId !== active.model.model ||
+        conversation.requests >= active.limits.modelRequests ||
         !conversation.deadlineAt ||
         conversation.deadlineAt <= Date.now()
       )
@@ -1547,7 +1589,7 @@ export class AgentService {
   }
   async toolConversation(piId: ConversationId): Promise<string> {
     this.assertHealthy();
-    const active = this.active;
+    const active = [...this.runs.values()].find((run) => run.piId === piId);
     if (!active) throw new Error("No active conversation");
     const conversation = await this.conversation(active.id);
     if (
@@ -1603,11 +1645,9 @@ export class AgentService {
   ): Promise<{ path: string }> {
     return this.exclusive(async () => {
       await this.conversation(id);
-      if (this.active && this.active.id !== id)
-        throw new AppError(409, "別のセッションが実行中です（busy）");
       if (data.length > this.config.limits.fileBytes)
         throw new AppError(413, "ファイルの上限を超えています");
-      if (!this.active) await this.workspace(id);
+      if (!this.runs.has(id)) await this.workspace(id);
       const path = `attachments/${requestId}-${safeRelative(name)}`;
       await this.runner.call(id, "upload", {
         path,
@@ -1823,16 +1863,18 @@ export class AgentService {
   async close(): Promise<void> {
     if (this.closing) return;
     try {
-      if (this.active && !this.fatal) await this.stop(this.active.id);
+      for (const active of this.runs.values()) {
+        if (!this.fatal) await this.stop(active.id);
+        active.controller.abort();
+        clearTimeout(active.timer);
+        for (const signer of active.signers) await signer.close();
+      }
       this.closing = true;
-      this.active?.controller.abort();
-      for (const signer of this.signers) await signer.close();
       await this.modelAuth.close();
-      if (this.active) clearTimeout(this.active.timer);
       this.notify();
       await this.harness.close(ctx);
       await this.runner.close();
-      await this.monitor;
+      await Promise.all(this.monitors);
     } catch (error) {
       this.fail();
       throw error;

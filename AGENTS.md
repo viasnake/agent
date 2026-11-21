@@ -8,8 +8,8 @@ Pi Durable 1.5.0, SQLite and separate control/work users. Machine provisioning,
 virtualization, disks, OS initialization and host networking belong outside this
 repository. Agent does not depend on or invoke a VM manager, including Devbox.
 The user-facing unit is a session containing a Pi conversation and its working
-directory. An answered session accepts more input. At most one session executes; other
-execution requests receive busy, without a host FIFO or scheduler.
+directory. An answered session accepts more input. Independent sessions execute concurrently. Bind model credentials, tools, limits
+and cancellation to each admitted session.
 
 install/install.sh downloads checksum-pinned Node.js 26.13.0 and standalone
 Python 3.14.10 for Agent. Keep them root-owned under /opt/agent-node and
@@ -144,7 +144,7 @@ auto-discover work-owned Skills, or replace a changed version during resume.
 ## Implementation boundaries
 
 - src/service.ts and src/state.ts: conversation metadata in a Pi Document,
-  atomic input admission, one-active-conversation gate and interruption handling.
+  atomic input admission, per-conversation execution and interruption handling.
 - src/tools.ts: relay unmodified Pi read/write/edit/bash definitions to the work
   UID; expose tools enumerated by configured MCP servers.
 - src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
@@ -208,7 +208,9 @@ The fixed root-owned sudo launcher permits only agent-work, no arguments and
 no SETENV. Apply NoNewPrivileges after the UID switch. Build a clean work
 environment; never inherit control credentials, host homes or SSH agents.
 Never silently fall back when mount/UUID, UID, firewall or cleanup is unavailable.
-Retain systemd control-group cleanup and bounded tool duration/output.
+Run each executable worker operation in a delegated cgroup and confirm membership
+before dispatch. Drain that cgroup on completion or cancellation. Retain systemd
+control-group cleanup and bounded tool duration/output.
 
 Credential visibility in Settings is independent of agent access. Show saved work,
 model and MCP values in the browser UI, including private keys and OAuth tokens,

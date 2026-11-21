@@ -30,6 +30,7 @@ export type ToolInfo = {
 export type WorkFile = { path: string; size: number };
 export type WorkerResult = {
   uid?: number;
+  cgroup?: string;
   cleanup?: boolean;
   data?: string;
   path?: string;
@@ -45,6 +46,7 @@ export const replySchema = z
     result: z
       .object({
         uid: z.number().int().optional(),
+        cgroup: z.string().max(4096).optional(),
         cleanup: z.boolean().optional(),
         data: z.string().optional(),
         path: z.string().optional(),

@@ -29,9 +29,10 @@ export function mcpTools(
   service: AgentService,
   tools: ToolInfo[],
   server: McpConfig,
+  sessionId: string,
 ) {
   return defineExtension({
-    name: `mcp-${server.id}`,
+    name: `mcp-${server.id}-${sessionId}`,
     tools: tools.map((tool) => ({
       name: mcpToolName(server.id, tool.name),
       description: service

@@ -1,3 +1,6 @@
+import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { settingsInput } from "../src/settings.js";
 import { mcpToolName } from "../src/tools.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -82,12 +85,16 @@ test("CSV and Markdown use unmodified Pi file/edit/bash tools, outputs are downl
   }
 });
 
-test("busy is rejected without queueing; steering uses Pi inbox; stop reaps children and explicit resume retains the conversation", async () => {
+test("independent sessions execute bash concurrently; stopping one retains its input and lets the other finish", async () => {
   const { service, root, faux } = await fixture([
     call("bash", {
       command: "echo $$ > child.pid; printf ready > started; sleep 30",
     }),
-    answer("stale"),
+    call("bash", {
+      command:
+        "echo $$ > second.pid; while [ ! -f release ]; do sleep 0.1; done; echo survived > finished",
+    }),
+    answer("second finished"),
   ]);
   try {
     const { id } = await service.create(randomUUID(), "中断"),
@@ -100,9 +107,19 @@ test("busy is rejected without queueing; steering uses Pi inbox; stop reaps chil
         () => false,
       ),
     );
-    await assert.rejects(
-      service.send(other.id, randomUUID(), "queued?"),
-      /busy/,
+    await service.upload(
+      other.id,
+      randomUUID(),
+      "input.txt",
+      Buffer.from("input"),
+    );
+    await service.send(other.id, randomUUID(), "run concurrently");
+    const second = join(root, "work/conversations", other.id);
+    await until(async () =>
+      readFile(join(second, "second.pid")).then(
+        () => true,
+        () => false,
+      ),
     );
     await service.send(id, randomUUID(), "CSV の列名は変えないで");
     assert.equal((await service.view(id)).pendingInputs, 1);
@@ -113,6 +130,15 @@ test("busy is rejected without queueing; steering uses Pi inbox; stop reaps chil
     assert.match(
       JSON.stringify(await service.view(id)),
       /CSV の列名は変えないで/,
+    );
+    assert.equal((await service.conversation(other.id)).status, "running");
+    await writeFile(join(second, "release"), "");
+    await until(
+      async () => (await service.conversation(other.id)).status === "idle",
+    );
+    assert.equal(
+      (await readFile(join(second, "finished"), "utf8")).trim(),
+      "survived",
     );
     faux.setResponses([
       call("bash", { command: "test -f started && printf resumed" }),
@@ -588,5 +614,104 @@ test("renaming and bounded search preserve selection; branching is atomic and ne
     );
   } finally {
     await f.service.close();
+  }
+});
+
+test("concurrent work sessions retain their model credentials and cancellation", async () => {
+  const faux = fauxProvider({
+    tokensPerSecond: Infinity,
+    models: [{ id: "gpt-4.1" }, { id: "gpt-4.1-mini" }],
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let childStarted = false;
+  faux.setResponses([
+    async () => {
+      childStarted = true;
+      await gate;
+      return fauxAssistantMessage("child");
+    },
+    async () => {
+      await gate;
+      return fauxAssistantMessage("sibling");
+    },
+  ]);
+  const seen: { key?: string; model: string; signal?: AbortSignal }[] = [];
+  const provider = {
+    ...faux.provider,
+    id: "openai",
+    auth: openaiProvider().auth,
+    getModels: () =>
+      faux.provider.getModels().map((m) => ({ ...m, provider: "openai" })),
+    streamSimple: ((model, context, options) => {
+      seen.push({
+        key: options?.apiKey,
+        model: model.id,
+        signal: options?.signal,
+      });
+      return faux.provider.streamSimple(model, context, options);
+    }) as typeof faux.provider.streamSimple,
+  };
+  const { service } = await fixture([], { provider });
+  try {
+    const {
+      schemaVersion: _,
+      hostId: __,
+      ...snapshot
+    } = service.settings.snapshot();
+    const first = randomUUID(),
+      second = randomUUID();
+    await service.saveSettings(
+      settingsInput.parse({
+        ...snapshot,
+        models: [
+          {
+            id: first,
+            provider: "openai",
+            model: "gpt-4.1",
+            key: "fixture-first-secret",
+          },
+          {
+            id: second,
+            provider: "openai",
+            model: "gpt-4.1-mini",
+            key: "fixture-second-secret",
+          },
+        ],
+        defaultModel: first,
+      }),
+    );
+    const child = await service.create(
+      randomUUID(),
+      "independent",
+      second,
+      "gpt-4.1-mini",
+    );
+    await service.send(child.id, randomUUID(), "long work");
+    await until(async () => childStarted);
+    const sibling = await service.create(
+      randomUUID(),
+      "second independent",
+      first,
+      "gpt-4.1",
+    );
+    await service.send(sibling.id, randomUUID(), "parallel work");
+    await until(async () => seen.length === 2);
+    assert.deepEqual(
+      seen.map(({ key, model }) => ({ key, model })),
+      [
+        { key: "fixture-second-secret", model: "gpt-4.1-mini" },
+        { key: "fixture-first-secret", model: "gpt-4.1" },
+      ],
+    );
+    assert.notEqual(seen[0]!.signal, seen[1]!.signal);
+    assert.equal(seen[0]!.signal?.aborted, false);
+    release();
+    await until(async () => !service.busy);
+  } finally {
+    release();
+    await service.close();
   }
 });
