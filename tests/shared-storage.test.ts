@@ -54,7 +54,7 @@ const idle = async (
   id: string,
 ) => until(async () => (await service.conversation(id)).status === "idle");
 
-test("shared absolute paths work through ordinary Pi tools across sessions, forks and restart without Git preparation or synchronization", async () => {
+test("shared absolute paths work across sessions, forks and restart without service-managed Git synchronization", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-shared-"));
   const source = await sourceRepository(root);
   const shared = join(root, "work/shared");
@@ -111,6 +111,14 @@ test("shared absolute paths work through ordinary Pi tools across sessions, fork
         request.includes(`Shared persistent directory: ${shared}`),
       ),
     );
+    assert.ok(
+      requests.some(
+        (request) =>
+          request.includes(
+            `Read-only Git mirrors, if provisioned by the administrator: ${join(root, "git-mirrors")}`,
+          ) && request.includes("then use FETCH_HEAD for current code reads"),
+      ),
+    );
     assert.equal(await readFile(note, "utf8"), "shared reference\n");
     const head = await git(repo, "rev-parse", "HEAD");
     await writeFile(join(source, "code.txt"), "new upstream content\n");
@@ -119,7 +127,7 @@ test("shared absolute paths work through ordinary Pi tools across sessions, fork
     await service.send(
       b.id,
       randomUUID(),
-      "read and update the existing shared files",
+      "read and update the existing shared files using their local state",
     );
     await idle(service, b.id);
     assert.equal(await readFile(note, "utf8"), "reused reference\n");
