@@ -5,7 +5,7 @@ import {
   section,
 } from "@earendil-works/pi-durable";
 import { z } from "zod";
-import { AppError, hash } from "./security.js";
+import { hash } from "./security.js";
 import {
   historyInput,
   memorySource,
@@ -28,27 +28,21 @@ export function memoryTools(service: AgentService) {
     piId: Parameters<AgentService["toolConversation"]>[0],
   ) {
     const sessionId = await service.toolConversation(piId);
-    if ((await service.conversation(sessionId)).coordinatorId)
-      throw new AppError(403, "作業セッションは共有記憶を変更できません");
     return service.memory.latestInput(sessionId);
   }
   return defineExtension({
     name: "memory",
     sections: [
-      section("memory-workflow", async ({ conversationId }) => {
-        const session = (await service.list()).find(
-          (c) => c.piId === conversationId,
-        );
-        return session?.coordinatorId
-          ? "You are a work session. Use only your request and supplied sources. Report findings, questions and failures in your answer; the assistant receives them after all run work ends. You cannot manage other sessions or change global knowledge."
-          : `${memoryPolicy}\nCurrent UTC timestamp: ${new Date().toISOString()}`;
-      }),
+      section(
+        "memory-workflow",
+        () =>
+          `${memoryPolicy}\nCurrent UTC timestamp: ${new Date().toISOString()}`,
+      ),
     ],
     hooks: [
       hook(GenerationTask, {
         beforeRequest: async ({ messages }, api) => {
-          const id = await service.toolConversation(api.conversationId);
-          if ((await service.conversation(id)).coordinatorId) return;
+          await service.toolConversation(api.conversationId);
           const notes = await service.memory.list();
           if (!notes.length) return;
           // Request-only context is rebuilt from live records; never persist a second copy in Pi history.
@@ -106,9 +100,7 @@ export function memoryTools(service: AgentService) {
         parameters: z.toJSONSchema(memoryRevision),
         replay: "unsafe",
         execute: async (input, api) => {
-          const sessionId = await service.toolConversation(api.conversationId);
-          if ((await service.conversation(sessionId)).coordinatorId)
-            throw new AppError(403, "作業セッションは共有記憶を変更できません");
+          await service.toolConversation(api.conversationId);
           const { id, revision } = memoryRevision.parse(input);
           return {
             output: [
@@ -128,17 +120,13 @@ export function memoryTools(service: AgentService) {
         replay: "safe",
         outputLimits: { maxBytes: 64000 },
         execute: async (input, api) => {
-          const sessionId = await service.toolConversation(api.conversationId);
-          const session = await service.conversation(sessionId);
+          await service.toolConversation(api.conversationId);
           return {
             output: [
               {
                 type: "text",
                 text: JSON.stringify(
-                  await service.memory.search(
-                    historyInput.parse(input),
-                    session.coordinatorId ? new Set([sessionId]) : undefined,
-                  ),
+                  await service.memory.search(historyInput.parse(input)),
                 ),
               },
             ],
@@ -153,13 +141,7 @@ export function memoryTools(service: AgentService) {
         replay: "safe",
         outputLimits: { maxBytes: 64000 },
         execute: async (input, api) => {
-          const sessionId = await service.toolConversation(api.conversationId);
-          const source = memorySource.parse(input);
-          if (
-            (await service.conversation(sessionId)).coordinatorId &&
-            source.sessionId !== sessionId
-          )
-            throw new AppError(403, "他セッションは参照できません");
+          await service.toolConversation(api.conversationId);
           return {
             output: [
               {

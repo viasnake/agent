@@ -540,11 +540,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .click();
     await page.locator("#message").fill("MCP とファイルを使って");
     await page.locator("#send").click();
-    const workSession = async () =>
-      (await f.service.list()).find(
-        (session) => session.role !== "coordinator",
-      );
-    await until(async () => (await workSession())?.status === "idle");
+    await until(async () => (await f.service.list())[0]?.status === "idle");
     await page.getByText("完了しました", { exact: true }).waitFor();
     const picker = page.getByRole("button", {
       name: "セッションのモデル",
@@ -564,9 +560,11 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
       .getByRole("dialog")
       .getByRole("button", { name: "gpt-4.1-mini", exact: true })
       .click();
-    await until(async () => (await workSession())?.model === "gpt-4.1-mini");
+    await until(
+      async () => (await f.service.list())[0]?.model === "gpt-4.1-mini",
+    );
     assert.equal(
-      (await workSession())?.modelConfigId,
+      (await f.service.list())[0]?.modelConfigId,
       f.service.management().models[0]!.id,
     );
     await page.screenshot({
