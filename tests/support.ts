@@ -59,6 +59,7 @@ export async function fixture(
     root?: string;
     noModel?: boolean;
     mcp?: Config["mcp"];
+    commandSeconds?: number;
   } = {},
 ) {
   const root =
@@ -76,7 +77,7 @@ export async function fixture(
     model: null,
     mcp: options.mcp ?? [],
     instructions: "",
-    limits: { ...DEFAULT_LIMITS, commandSeconds: 10 },
+    limits: { ...DEFAULT_LIMITS, commandSeconds: options.commandSeconds ?? 10 },
   };
   const faux = fauxProvider({
     tokensPerSecond: Infinity,

@@ -78,7 +78,7 @@ test("real browser conversation: attachments, final answers with local images, d
   })
     .png()
     .toBuffer();
-  const f = await fixture([
+  const responses = [
     fauxAssistantMessage(
       [
         fauxThinking("添付 CSV を確認します。"),
@@ -109,7 +109,8 @@ printf 'CSV verified'`,
         "<script>window.pwned=1</script><img src=https://evil.invalid/track>",
       ].join("\n\n"),
     ),
-  ]);
+  ];
+  const f = await fixture(responses, { commandSeconds: 60 });
   const probe = portProbe();
   await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
   const address = probe.address();
@@ -412,7 +413,7 @@ printf 'CSV verified'`,
         [
           fauxText("実行途中のメッセージです。"),
           fauxToolCall("bash", {
-            command: "printf started > started; sleep 30",
+            command: "printf started > started; exec sleep 60",
           }),
         ],
         { stopReason: "toolUse" },
@@ -437,14 +438,23 @@ printf 'CSV verified'`,
     await activeTool.locator("summary").click();
     await activeTool
       .locator('pre[aria-label="入力"]')
-      .filter({ hasText: "sleep 30" })
+      .filter({ hasText: "exec sleep 60" })
       .waitFor();
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
       await assertReadable(page.locator("#state"));
     }
     await page.locator("#message").fill("追加指示を保持してください");
-    await page.getByRole("button", { name: "送る", exact: true }).click();
+    const [steeringResponse] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname ===
+            `/api/conversations/${id}/messages` &&
+          response.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: "送る", exact: true }).click(),
+    ]);
+    assert.equal(steeringResponse.status(), 202);
     await until(async () => (await f.service.view(id)).pendingInputs === 1);
     await page.getByRole("button", { name: "停止", exact: true }).click();
     await page.getByRole("button", { name: "再開", exact: true }).waitFor();
@@ -573,7 +583,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     models: [{ id: "faux-1" }],
   });
   faux.setResponses([answer("最初の応答")]);
-  const f = await fixture([], { provider: faux.provider });
+  const f = await fixture([], { provider: faux.provider, commandSeconds: 60 });
   const { randomUUID } = await import("node:crypto");
   const creationReceipt = randomUUID();
   const a = await f.service.create(creationReceipt, "会話 A");
@@ -642,7 +652,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
 
     const bText = "会話 B の応答";
     faux.setResponses([
-      call("bash", { command: "sleep 30" }),
+      call("bash", { command: "exec sleep 60" }),
       answer(`${bText}\n\n${"別のセッションで実行した結果です。".repeat(20)}`),
     ]);
     await page.locator("#send").click();

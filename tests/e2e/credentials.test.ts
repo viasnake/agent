@@ -162,7 +162,10 @@ test("browser displays credentials and shares them with every session in light a
       .getByRole("textbox", { name: "メッセージ", exact: true })
       .fill("確認してください");
     await page.getByRole("button", { name: "送る", exact: true }).click();
-    await page.getByText("完了", { exact: true }).waitFor();
+    await page
+      .locator(".assistant-message[data-entry-id] .markdown")
+      .getByText("完了", { exact: true })
+      .waitFor();
     await until(
       async () =>
         (await f.service.list()).length === 1 &&
