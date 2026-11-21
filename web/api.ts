@@ -2,12 +2,8 @@ import type { ConversationUsage } from "../src/usage.js";
 
 export type Message = {
   role: string;
+  visibleInTranscript: boolean;
   content: string;
-  reasoning?: string;
-  toolName: string | null;
-  toolCallId: string | null;
-  toolCalls: { id: string; name: string; argsText: string }[];
-  isError: boolean;
   images?: { url: string }[];
   timestamp?: number;
 };
@@ -33,12 +29,6 @@ export type View = {
   cursor: unknown;
   modelConfigured: boolean;
   pendingInputs: number;
-  progress: {
-    generating: boolean;
-    partial: string;
-    reasoning?: string;
-    tools: { name: string; status: string; output: string }[];
-  };
 };
 export type Files = {
   files: { path: string; size: number }[];

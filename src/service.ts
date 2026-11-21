@@ -74,6 +74,7 @@ import { skillsTools } from "./skills-tools.js";
 import { sharedCredentials } from "./work-credentials.js";
 import { openSshAgent } from "./ssh-agent.js";
 import { readInstallation } from "./installation.js";
+import { isConversationMessage, messageText } from "./transcript.js";
 
 export type ServiceOptions = {
   skills?: SkillsLoader;
@@ -1586,6 +1587,14 @@ export class AgentService {
       throw new AppError(413, "ファイルの上限を超えています");
     return data;
   }
+  async fileImage(id: string, path: string) {
+    const expectedMimeType = imageMime(path);
+    if (!expectedMimeType)
+      throw new AppError(415, "PNG・JPEG・WebP の静止画像を指定してください");
+    const bytes = await this.download(id, path);
+    const { mimeType } = await validateImage(bytes, expectedMimeType);
+    return { bytes, mimeType };
+  }
   async upload(
     id: string,
     requestId: string,
@@ -1634,15 +1643,8 @@ export class AgentService {
     const needle = query.toLocaleLowerCase();
     const matches = page.items.flatMap((entry) =>
       (entry.model ?? []).flatMap((message) => {
-        if (message.role !== "user" && message.role !== "assistant") return [];
-        const text = this.redact(
-          typeof message.content === "string"
-            ? message.content
-            : message.content
-                .filter((part) => part.type === "text")
-                .map((part) => part.text)
-                .join("\n"),
-        );
+        if (!isConversationMessage(message)) return [];
+        const text = this.redact(messageText(message));
         const index = text.toLocaleLowerCase().indexOf(needle);
         if (index < 0) return [];
         return [
@@ -1715,6 +1717,7 @@ export class AgentService {
       messages: (entry.model ?? [])
         .map((message, messageIndex) => ({
           role: message.role,
+          visibleInTranscript: isConversationMessage(message),
           timestamp: message.timestamp,
           isError: message.role === "toolResult" ? message.isError : false,
           toolName: message.role === "toolResult" ? message.toolName : null,
@@ -1756,13 +1759,7 @@ export class AgentService {
                       ]
                     : [],
                 ),
-          content:
-            typeof message.content === "string"
-              ? message.content
-              : message.content
-                  .filter((block) => block.type === "text")
-                  .map((block) => block.text)
-                  .join("\n"),
+          content: messageText(message),
         }))
         .map((message) => ({
           ...message,
