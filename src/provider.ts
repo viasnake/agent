@@ -10,6 +10,12 @@ export function guardedProvider(
   provider: Provider,
   reserve: (sessionId: string | undefined, modelId: string) => Promise<void>,
 ): Provider {
+  // Provider threads can outlive the credential bound to a conversation run.
+  const dispatchOptions = {
+    disableContinuation: true,
+    maxRetries: 0,
+    maxTokens: 8192,
+  };
   function guarded(
     start: () => AssistantMessageEventStream,
     sessionId: string | undefined,
@@ -73,7 +79,7 @@ export function guardedProvider(
           return provider.stream(
             model,
             context,
-            Object.assign({}, options, { maxRetries: 0, maxTokens: 8192 }),
+            Object.assign({}, options, dispatchOptions),
           );
         },
         options?.sessionId,
@@ -94,7 +100,7 @@ export function guardedProvider(
           return provider.streamSimple(
             model,
             context,
-            Object.assign({}, options, { maxRetries: 0, maxTokens: 8192 }),
+            Object.assign({}, options, dispatchOptions),
           );
         },
         options?.sessionId,
