@@ -18,11 +18,12 @@ import {
 import type {
   TextMessagePartProps,
   ThreadMessageLike,
+  ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Entry } from "./api.js";
+import type { Entry, Message, View } from "./api.js";
 import { Icon } from "./icons.js";
 import { MessageActions } from "./message-actions.js";
 import { MessageBranches, MessageControlScope } from "./message-controls.js";
@@ -32,32 +33,104 @@ export const ConversationId = createContext<string | null>(null);
 
 const LinkedImage = createContext(false);
 
-// Keep durable entry IDs for message actions, including when older pages load.
-export function threadMessages(entries: Entry[]): ThreadMessageLike[] {
-  return [...entries]
+export function conversationThread(entries: Entry[], view: View | null) {
+  // Keep durable entry IDs for message actions, including when older pages load.
+  const history = [...entries]
     .sort((a, b) => a.id - b.id)
     .flatMap((entry) =>
-      entry.messages.flatMap((message, index): ThreadMessageLike[] => {
-        if (!message.visibleInTranscript) return [];
-        const content: Exclude<ThreadMessageLike["content"], string>[number][] =
-          [];
-        if (message.content.trim())
-          content.push({ type: "text", text: message.content });
+      entry.messages.map((message, index) => ({
+        id: `${entry.id}-${index}`,
+        message,
+      })),
+    );
+  type Call = Message["toolCalls"][number];
+  const unanswered = new Map<string, Call>();
+  const results = new Map<Call, Message>();
+  const matchedResults = new Set<Message>();
+  for (const { message } of history) {
+    for (const call of message.toolCalls) unanswered.set(call.id, call);
+    if (!message.toolCallId) continue;
+    const call = unanswered.get(message.toolCallId);
+    if (!call) continue;
+    results.set(call, message);
+    matchedResults.add(message);
+    unanswered.delete(call.id);
+  }
+  const progress = view?.progress;
+  const liveTools = new Map(progress?.tools.map((tool) => [tool.callId, tool]));
+  const runningTools = new Set<string>();
+  type Part = Exclude<ThreadMessageLike["content"], string>[number];
+  const messages = history.flatMap(({ id, message }): ThreadMessageLike[] => {
+    if (
+      message.role !== "user" &&
+      message.role !== "assistant" &&
+      message.role !== "toolResult"
+    )
+      return [];
+    const content: Part[] = [];
+    if (message.role === "toolResult") {
+      // A result's call can be outside the loaded history page.
+      if (matchedResults.has(message)) return [];
+      content.push({
+        type: "tool-call",
+        toolCallId: message.toolCallId ?? id,
+        toolName: message.toolName ?? "",
+        args: {},
+        argsText: "",
+        result: message.content,
+        isError: message.isError,
+      });
+    } else {
+      if (message.content.trim())
+        content.push({ type: "text", text: message.content });
+      if (message.visibleInTranscript)
         for (const image of message.images ?? [])
           content.push({ type: "image", image: image.url });
-        if (!content.length) return [];
-        return [
-          {
-            id: `${entry.id}-${index}`,
-            role: message.role === "user" ? "user" : "assistant",
-            createdAt: message.timestamp
-              ? new Date(message.timestamp)
-              : undefined,
-            content,
-          },
-        ];
-      }),
-    );
+      if (message.reasoning.trim())
+        content.push({ type: "reasoning", text: message.reasoning });
+      for (const call of message.toolCalls) {
+        const result = results.get(call);
+        const live =
+          unanswered.get(call.id) === call ? liveTools.get(call.id) : undefined;
+        if (live?.status === "running") runningTools.add(toolLabel(call.name));
+        content.push({
+          type: "tool-call",
+          toolCallId: call.id,
+          toolName: call.name,
+          args: {},
+          argsText: call.argsText,
+          result: result?.content ?? (live?.output || undefined),
+          isError: result?.isError,
+          isPreliminary: !result && !!live?.output,
+          artifact: live?.status,
+        });
+      }
+    }
+    if (!content.length) return [];
+    return [
+      {
+        id,
+        role: message.role === "user" ? "user" : "assistant",
+        createdAt: message.timestamp ? new Date(message.timestamp) : undefined,
+        content,
+        metadata: { custom: { finalAnswer: message.visibleInTranscript } },
+      },
+    ];
+  });
+  if (progress?.generating && (progress.partial || progress.reasoning)) {
+    const content: Part[] = [];
+    if (progress.partial)
+      content.push({ type: "text", text: progress.partial });
+    if (progress.reasoning)
+      content.push({ type: "reasoning", text: progress.reasoning });
+    messages.push({
+      id: "streaming",
+      role: "assistant",
+      content,
+      status: { type: "running" },
+    });
+  }
+  return { messages, runningTools: [...runningTools] };
 }
 
 function sessionFileUrl(
@@ -114,17 +187,84 @@ const markdownComponents: Components = {
   },
 };
 
-function MarkdownText({ text }: Pick<TextMessagePartProps, "text">) {
+const progressMarkdownComponents: Components = {
+  ...markdownComponents,
+  img: ({ alt }) => (
+    <span className="fg-2">{alt ? `[画像：${alt}]` : "[画像]"}</span>
+  ),
+};
+
+function MarkdownText({
+  text,
+  finalAnswer,
+}: Pick<TextMessagePartProps, "text"> & { finalAnswer: boolean }) {
   return (
-    <div className="markdown" data-aui-quote-selectable="">
+    <div
+      className="markdown"
+      data-aui-quote-selectable={finalAnswer ? "" : "false"}
+    >
       <Markdown
         remarkPlugins={[remarkGfm]}
         skipHtml
-        components={markdownComponents}
+        components={
+          finalAnswer ? markdownComponents : progressMarkdownComponents
+        }
       >
         {text}
       </Markdown>
     </div>
+  );
+}
+
+function toolLabel(name: string): string {
+  const labels: Record<string, string> = {
+    read: "ファイル読み取り",
+    write: "ファイル保存",
+    edit: "ファイル編集",
+    bash: "コマンド",
+    memory_save: "記憶の保存",
+    memory_update: "記憶の更新",
+    memory_forget: "記憶の削除",
+    session_search: "過去の会話の検索",
+    session_read: "過去の会話の読み取り",
+    skill_activate: "Skill の読み込み",
+    skill_read_resource: "Skill の資料の読み取り",
+  };
+  return (
+    (Object.hasOwn(labels, name) && labels[name]) ||
+    (name.startsWith("mcp_") ? "MCP ツール" : name || "ツール")
+  );
+}
+
+function ToolActivity({
+  toolName,
+  argsText,
+  result,
+  isError,
+  isPreliminary,
+  artifact,
+}: ToolCallMessagePartProps) {
+  let status = "結果未確認";
+  if (isError) status = "失敗";
+  else if (result !== undefined && !isPreliminary) status = "完了";
+  else if (artifact === "running") status = "実行中";
+  else if (artifact === "pending") status = "待機中";
+  return (
+    <details
+      className="activity-details tool-card"
+      data-aui-quote-selectable="false"
+    >
+      <summary>
+        <span>{toolLabel(toolName)}</span>
+        <span className={isError ? "ms-2 activity-error" : "ms-2 fg-2"}>
+          {status}
+        </span>
+      </summary>
+      {argsText && <pre aria-label="入力">{argsText}</pre>}
+      {typeof result === "string" && result && (
+        <pre aria-label="出力">{result}</pre>
+      )}
+    </details>
   );
 }
 
@@ -218,21 +358,36 @@ function UserText({ text }: { text: string }) {
 }
 export function AssistantMessage() {
   const id = useAuiState((state) => state.message.id);
+  const finalAnswer = useAuiState(
+    (state) => state.message.metadata.custom.finalAnswer === true,
+  );
   const { activeEntry } = useContext(MessageActions);
   return (
     <MessagePrimitive.Root
-      data-entry-id={id.split("-")[0]}
+      data-entry-id={id === "streaming" ? undefined : id.split("-")[0]}
       className={`message assistant-message ${activeEntry === Number(id.split("-")[0]) ? "search-current" : ""}`}
     >
       <div className="visually-hidden">アシスタント</div>
       <MessagePrimitive.Parts>
         {({ part }) => {
-          if (part.type === "text") return <MarkdownText text={part.text} />;
+          if (part.type === "text")
+            return <MarkdownText text={part.text} finalAnswer={finalAnswer} />;
           if (part.type === "image") return <ImagePreview image={part.image} />;
+          if (part.type === "tool-call") return <ToolActivity {...part} />;
+          if (part.type === "reasoning")
+            return (
+              <details
+                className="activity-details"
+                data-aui-quote-selectable="false"
+              >
+                <summary>思考の詳細</summary>
+                <pre>{part.text}</pre>
+              </details>
+            );
           return null;
         }}
       </MessagePrimitive.Parts>
-      <MessageFooter />
+      {finalAnswer && <MessageFooter />}
     </MessagePrimitive.Root>
   );
 }

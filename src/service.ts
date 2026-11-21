@@ -1771,9 +1771,8 @@ export class AgentService {
                         ? [block.thinking]
                         : [],
                     )
-                    .join("\n")
-                    .slice(-16000),
-                )
+                    .join("\n"),
+                ).slice(-16000)
               : "",
           toolCalls:
             message.role === "assistant"
@@ -1783,8 +1782,8 @@ export class AgentService {
                     id: block.id,
                     name: block.name,
                     argsText: this.redact(
-                      JSON.stringify(block.arguments).slice(0, 2000),
-                    ),
+                      JSON.stringify(this.sanitize(block.arguments)),
+                    ).slice(0, 2000),
                   }))
               : [],
           images:
@@ -1803,11 +1802,10 @@ export class AgentService {
         }))
         .map((message) => ({
           ...message,
-          content: this.redact(
+          content:
             message.role === "user"
-              ? message.content.slice(0, 64000)
-              : message.content.slice(-16000),
-          ),
+              ? this.redact(message.content).slice(0, 64000)
+              : this.redact(message.content).slice(-16000),
         })),
     }));
     const live = await this.harness.snapshot(LiveDoc, conversation.piId, ctx),
@@ -1838,21 +1836,20 @@ export class AgentService {
                 ? [block.thinking]
                 : [],
             )
-            .join("\n")
-            .slice(-16000) ?? "",
-        ),
+            .join("\n") ?? "",
+        ).slice(-16000),
         partial: this.redact(
           live?.generation?.message?.content
             .filter((block) => block.type === "text")
             .map((block) => block.text)
-            .join("")
-            .slice(-16000) ?? "",
-        ),
+            .join("") ?? "",
+        ).slice(-16000),
         tools:
           live?.tools?.map((tool) => ({
+            callId: tool.callId,
             name: tool.name,
             status: tool.status,
-            output: this.redact(tool.output?.slice(-2000) ?? ""),
+            output: this.redact(tool.output ?? "").slice(-2000),
           })) ?? [],
       },
     };

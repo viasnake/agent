@@ -527,6 +527,34 @@ button {
   padding: 8px 12px;
   border: 1px solid var(--bs-border-muted);
 }
+.activity-details {
+  margin-top: 6px;
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 8px;
+  background: var(--bs-bg-1);
+  color: var(--bs-fg-1);
+  font-size: 13px;
+}
+.activity-details summary {
+  padding: 6px 10px;
+  cursor: pointer;
+  border-radius: inherit;
+}
+.activity-details summary:hover {
+  background: var(--bs-bg-2);
+}
+.activity-details pre {
+  margin: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--bs-border-muted);
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.activity-error {
+  color: var(--bs-danger-fg);
+}
 .live-status {
   display: flex;
   align-items: center;
