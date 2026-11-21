@@ -11,6 +11,7 @@ import { createServer } from "../../src/server.js";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import {
   fauxAssistantMessage,
+  fauxProvider,
   fauxText,
   fauxThinking,
   fauxToolCall,
@@ -87,7 +88,8 @@ test("real browser conversation: attachments, final answers with local images, d
 printf 'name,total\\nAlice,12\\n' > outputs/clean.csv &&
 printf %s '${png.toString("base64")}' | base64 -d > 'outputs/構成 図.png'
 printf '<svg xmlns="http://www.w3.org/2000/svg"/>' > outputs/figure.svg
-cp outputs/figure.svg outputs/fake.png`,
+cp outputs/figure.svg outputs/fake.png
+printf 'CSV verified'`,
         }),
       ],
       { stopReason: "toolUse" },
@@ -277,13 +279,15 @@ cp outputs/figure.svg outputs/fake.png`,
         extension === "PNG" ? "構成 図.png" : "figure.svg",
       );
     }
-    assert.equal(await page.locator(".assistant-message").count(), 1);
-    assert.equal(
-      await page
-        .getByText(/添付 CSV を確認|途中経過の報告|思考・ツール/)
-        .count(),
-      0,
-    );
+    await page.getByText("途中経過の報告です。", { exact: true }).waitFor();
+    const tool = page.locator(".tool-card").first();
+    await page.getByText("思考の詳細", { exact: true }).click();
+    await page.getByText("添付 CSV を確認します。", { exact: true }).waitFor();
+    await page.getByText("思考の詳細", { exact: true }).click();
+    await tool.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    await tool.getByText("CSV verified", { exact: true }).waitFor();
+    await tool.locator("summary").click();
     for (const route of [
       `/api/conversations/${id}/search?q=`,
       "/api/history?query=",
@@ -335,7 +339,7 @@ cp outputs/figure.svg outputs/fake.png`,
       await page.getByRole("tab", { name: "会話", exact: true }).click();
       await assertReadable(
         page.locator(
-          ".session-row.selected, #state, #connection, .user-bubble, .markdown, .markdown pre, .markdown th, .markdown td, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
+          ".session-row.selected, #state, #connection, .user-bubble, .markdown, .markdown pre, .markdown th, .markdown td, .activity-details summary, .tool-card summary .fg-2, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
         ),
       );
       await assertReadable(page.locator("#message"), "::placeholder");
@@ -375,6 +379,9 @@ cp outputs/figure.svg outputs/fake.png`,
     await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
     await page.getByRole("tab", { name: "会話", exact: true }).click();
+    await tool.locator("summary").click();
+    await tool.getByText("CSV verified", { exact: true }).waitFor();
+    await tool.locator("summary").click();
     f.faux.setResponses([
       call("write", {
         path: "outputs/note.md",
@@ -421,11 +428,17 @@ cp outputs/figure.svg outputs/fake.png`,
       ),
     );
     await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
-    await page.getByText("応答中", { exact: true }).waitFor();
-    assert.equal(
-      await page.getByText(/実行途中のメッセージ|コマンドを実行/).count(),
-      0,
-    );
+    await page
+      .getByText("実行途中のメッセージです。", { exact: true })
+      .waitFor();
+    await page.locator("#live").getByText("コマンドを実行中…").waitFor();
+    const activeTool = page.locator(".tool-card").last();
+    await activeTool.getByText("実行中", { exact: true }).waitFor();
+    await activeTool.locator("summary").click();
+    await activeTool
+      .locator('pre[aria-label="入力"]')
+      .filter({ hasText: "sleep 30" })
+      .waitFor();
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
       await assertReadable(page.locator("#state"));
@@ -435,6 +448,10 @@ cp outputs/figure.svg outputs/fake.png`,
     await until(async () => (await f.service.view(id)).pendingInputs === 1);
     await page.getByRole("button", { name: "停止", exact: true }).click();
     await page.getByRole("button", { name: "再開", exact: true }).waitFor();
+    assert.equal(
+      await activeTool.getByText("実行中", { exact: true }).count(),
+      0,
+    );
     assert.match(
       JSON.stringify(await f.service.view(id)),
       /追加指示を保持してください/,
@@ -551,7 +568,12 @@ cp outputs/figure.svg outputs/fake.png`,
 });
 
 test("conversation navigation preserves selection, ignores stale loads and contains failures in the thread", async () => {
-  const f = await fixture([answer("最初の応答")]);
+  const faux = fauxProvider({
+    tokensPerSecond: 50,
+    models: [{ id: "faux-1" }],
+  });
+  faux.setResponses([answer("最初の応答")]);
+  const f = await fixture([], { provider: faux.provider });
   const { randomUUID } = await import("node:crypto");
   const creationReceipt = randomUUID();
   const a = await f.service.create(creationReceipt, "会話 A");
@@ -618,12 +640,14 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       1,
     );
 
-    f.faux.setResponses([
+    const bText = "会話 B の応答";
+    faux.setResponses([
       call("bash", { command: "sleep 30" }),
-      answer("会話 B の応答"),
+      answer(`${bText}\n\n${"別のセッションで実行した結果です。".repeat(20)}`),
     ]);
     await page.locator("#send").click();
     await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
+    await page.locator("#live").getByText("コマンドを実行中…").waitFor();
     await page
       .getByRole("button", { name: "「会話 A」の操作", exact: true })
       .click();
@@ -645,10 +669,19 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     );
     await page.locator("#message").fill("別の作業を進めて");
     await page.locator("#send").click();
-    await page.getByText("会話 B の応答", { exact: true }).waitFor();
+    await page
+      .locator(".assistant-message:not([data-entry-id])")
+      .getByText(bText, { exact: true })
+      .waitFor();
+    assert.equal(await page.locator(".tool-card").count(), 0);
+    await page
+      .locator(".assistant-message[data-entry-id]")
+      .getByText(bText, { exact: true })
+      .waitFor();
     assert.equal((await f.service.conversation(a.id)).status, "running");
     await selectA.click();
     await page.getByRole("button", { name: "停止", exact: true }).waitFor();
+    await page.locator("#live").getByText("コマンドを実行中…").waitFor();
     await selectA.click({ clickCount: 3 });
     await page.getByRole("button", { name: "停止", exact: true }).click();
     await page.locator("#transcript #detail").waitFor();
@@ -674,12 +707,15 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     await selectA.click();
     await until(async () => captured);
     await page.getByRole("button", { name: "再開", exact: true }).waitFor();
-    f.faux.setResponses([answer("新しい応答")]);
+    faux.setResponses([answer("新しい応答")]);
     await f.service.send(a.id, randomUUID(), "新しい入力");
     await page.getByText("新しい応答", { exact: true }).waitFor();
     release();
     await page.unrouteAll({ behavior: "wait" });
-    assert.equal(await page.locator("#state").textContent(), "応答終了");
+    await page
+      .locator("#state")
+      .getByText("応答終了", { exact: true })
+      .waitFor();
     assert.equal(await page.locator("#detail").count(), 0);
 
     // Failed initial loading offers an in-thread retry instead of an endless spinner.
@@ -807,7 +843,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     await page.reload();
     await selectB.waitFor();
     assert.equal(await selectA.count(), 0);
-    f.faux.setResponses([answer("新しいセッションで応答")]);
+    faux.setResponses([answer("新しいセッションで応答")]);
     await page.locator("#message").fill("会話 A");
     await page.locator("#send").click();
     await page.getByText("新しいセッションで応答", { exact: true }).waitFor();

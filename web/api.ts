@@ -4,6 +4,11 @@ export type Message = {
   role: string;
   visibleInTranscript: boolean;
   content: string;
+  reasoning: string;
+  isError: boolean;
+  toolName: string | null;
+  toolCallId: string | null;
+  toolCalls: { id: string; name: string; argsText: string }[];
   images?: { url: string }[];
   timestamp?: number;
 };
@@ -29,6 +34,17 @@ export type View = {
   cursor: unknown;
   modelConfigured: boolean;
   pendingInputs: number;
+  progress: {
+    generating: boolean;
+    partial: string;
+    reasoning: string;
+    tools: {
+      callId: string;
+      name: string;
+      status: "pending" | "running" | "done";
+      output: string;
+    }[];
+  };
 };
 export type Files = {
   files: { path: string; size: number }[];

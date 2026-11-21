@@ -37,8 +37,8 @@ import {
 import type { Conversation, Entry, Files, View, ModelOptions } from "./api.js";
 import {
   AssistantMessage,
+  conversationThread,
   ConversationId,
-  threadMessages,
   UserMessage,
 } from "./messages.js";
 import { Icon } from "./icons.js";
@@ -96,7 +96,10 @@ function Chat({
   const viewport = useReadingPosition();
   const draftFailure = useRef(false);
   const previousScrollTop = useRef(0);
-  const messages = useMemo(() => threadMessages(entries), [entries]);
+  const { messages, runningTools } = useMemo(
+    () => conversationThread(entries, view),
+    [entries, view],
+  );
   const runtime = useExternalStoreRuntime({
     messages,
     convertMessage: (message) => message,
@@ -218,7 +221,9 @@ function Chat({
               {view?.conversation.status === "running" && (
                 <div id="live" role="status" className="live-status">
                   <span className="running-dot" />
-                  応答中
+                  {runningTools.length
+                    ? `${runningTools.join("・")}を実行中…`
+                    : "応答中"}
                 </div>
               )}
             </div>
