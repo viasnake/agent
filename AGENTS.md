@@ -9,8 +9,8 @@ virtualization, disks, OS initialization and host networking belong outside this
 repository. Agent does not depend on or invoke a VM manager, including Devbox.
 The user-facing unit is a session containing a Pi conversation and its working
 directory. The default entry is one persistent assistant (Coordinator). Its control
-and response slot can run alongside one work session; other direct work requests
-receive busy. Bounded managed instructions wait in Pi Documents inside the existing
+and response slot can run alongside multiple independent work sessions. Scope
+model dispatch, extensions, budgets, cancellation and worker cleanup to each session. Bounded managed instructions wait in Pi Documents inside the existing
 service. There is no general scheduler or continuously running model.
 
 install/install.sh downloads checksum-pinned Node.js 26.13.0 and standalone
@@ -37,7 +37,7 @@ Only explicit browser actions adopt existing sessions. Authenticate management t
 from the active Pi conversation, recheck ownership, directiveVersion and controlEpoch
 inside admission, and deny management and global knowledge writes to work sessions.
 The Coordinator has no arbitrary shell or MCP tools. Freeze its provider credentials,
-model, cancellation, budgets and selected extensions independently from the work slot.
+model, cancellation, budgets and selected extensions independently from every work session.
 Do not let later extension registration change a running session's selected tools.
 
 Keep commands, notifications, shared request budgets and their admission receipts in
@@ -182,7 +182,7 @@ auto-discover work-owned Skills, or replace a changed version during resume.
 ## Implementation boundaries
 
 - src/service.ts and src/state.ts: conversation metadata in a Pi Document,
-  atomic input admission, one-active-conversation gate and interruption handling.
+  atomic input admission, per-conversation execution and interruption handling.
 - src/tools.ts: relay unmodified Pi read/write/edit/bash definitions to the work
   UID; expose tools enumerated by configured MCP servers.
 - src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
@@ -247,7 +247,7 @@ The fixed root-owned sudo launcher permits only agent-work, no arguments and
 no SETENV. Apply NoNewPrivileges after the UID switch. Build a clean work
 environment; never inherit control credentials, host homes or SSH agents.
 Never silently fall back when mount/UUID, UID, firewall or cleanup is unavailable.
-Retain systemd control-group cleanup and bounded tool duration/output.
+Run each executable worker operation in a control-owned delegated cgroup. Confirm membership before dispatch and drain only that cgroup on completion or cancellation. Retain systemd control-group cleanup and bounded tool duration/output.
 
 Credential visibility in Settings is independent of agent access. Show saved work,
 model and MCP values in the browser UI, including private keys and OAuth tokens,

@@ -553,7 +553,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
 
     f.faux.setResponses([
       call("bash", { command: "sleep 30" }),
-      answer("unused"),
+      answer("会話 B の応答"),
     ]);
     await page.locator("#send").click();
     await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
@@ -576,6 +576,10 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       await page.getByText("最初の応答", { exact: true }).count(),
       0,
     );
+    await page.locator("#message").fill("別の作業を進めて");
+    await page.locator("#send").click();
+    await page.getByText("会話 B の応答", { exact: true }).waitFor();
+    assert.equal((await f.service.conversation(a.id)).status, "running");
     await selectA.click();
     await page.getByRole("button", { name: "停止", exact: true }).waitFor();
     await selectA.click({ clickCount: 3 });

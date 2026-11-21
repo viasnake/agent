@@ -82,12 +82,16 @@ test("CSV and Markdown use unmodified Pi file/edit/bash tools, outputs are downl
   }
 });
 
-test("busy is rejected without queueing; steering uses Pi inbox; stop reaps children and explicit resume retains the conversation", async () => {
+test("independent sessions execute bash concurrently; stopping one retains its input and lets the other finish", async () => {
   const { service, root, faux } = await fixture([
     call("bash", {
       command: "echo $$ > child.pid; printf ready > started; sleep 30",
     }),
-    answer("stale"),
+    call("bash", {
+      command:
+        "echo $$ > second.pid; while [ ! -f release ]; do sleep 0.1; done; echo survived > finished",
+    }),
+    answer("second finished"),
   ]);
   try {
     const { id } = await service.create(randomUUID(), "中断"),
@@ -100,9 +104,19 @@ test("busy is rejected without queueing; steering uses Pi inbox; stop reaps chil
         () => false,
       ),
     );
-    await assert.rejects(
-      service.send(other.id, randomUUID(), "queued?"),
-      /busy/,
+    await service.upload(
+      other.id,
+      randomUUID(),
+      "input.txt",
+      Buffer.from("input"),
+    );
+    await service.send(other.id, randomUUID(), "run concurrently");
+    const second = join(root, "work/conversations", other.id);
+    await until(async () =>
+      readFile(join(second, "second.pid")).then(
+        () => true,
+        () => false,
+      ),
     );
     await service.send(id, randomUUID(), "CSV の列名は変えないで");
     assert.equal((await service.view(id)).pendingInputs, 1);
@@ -113,6 +127,15 @@ test("busy is rejected without queueing; steering uses Pi inbox; stop reaps chil
     assert.match(
       JSON.stringify(await service.view(id)),
       /CSV の列名は変えないで/,
+    );
+    assert.equal((await service.conversation(other.id)).status, "running");
+    await writeFile(join(second, "release"), "");
+    await until(
+      async () => (await service.conversation(other.id)).status === "idle",
+    );
+    assert.equal(
+      (await readFile(join(second, "finished"), "utf8")).trim(),
+      "survived",
     );
     faux.setResponses([
       call("bash", { command: "test -f started && printf resumed" }),

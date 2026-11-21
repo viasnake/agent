@@ -908,7 +908,9 @@ export class Coordinator {
       this.pending = false;
       const state = await this.state();
       if (!state.id || state.paused) continue;
-      const command = !this.service.workBusy ? state.commands[0] : undefined;
+      const command = state.commands.find(
+        (command) => !this.service.isWorkRunning(command.sessionId),
+      );
       if (command) {
         try {
           await this.service.send(

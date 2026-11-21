@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
+import { operationGroup, removeGroup } from "./cgroup.js";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { readInstallation } from "../installation.js";
 import { AppError } from "../security.js";
 import { PROTOCOL_BYTES, replySchema } from "./protocol.js";
@@ -15,7 +16,8 @@ async function trusted(path: string): Promise<void> {
       throw new Error("Worker launcher is not root-owned and immutable");
   }
 }
-export class WorkerClient implements Runner {
+class WorkerProcess implements Runner {
+  constructor(private readonly group?: string) {}
   private child?: ChildProcessWithoutNullStreams;
   private pending = new Map<
     string,
@@ -49,14 +51,28 @@ export class WorkerClient implements Runner {
       `agent-work-egress-v2:${installation.workUid}`
     )
       throw new Error("Worker egress policy is unavailable");
-    this.child = spawn(
+    const command = [
       "/usr/bin/sudo",
-      ["-n", "-u", "agent-work", "--", "/usr/local/libexec/agent-work"],
-      {
-        env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
+      "-n",
+      "-u",
+      "agent-work",
+      "--",
+      "/usr/local/libexec/agent-work",
+    ];
+    // Move the control-owned child before sudo changes identity or starts work.
+    // The work UID cannot write the delegated control user's cgroup files.
+    if (this.group)
+      command.unshift(
+        "/bin/sh",
+        "-ec",
+        'echo 0 > "$1/cgroup.procs"; shift; exec "$@"',
+        "agent-launch",
+        this.group,
+      );
+    this.child = spawn(command[0]!, command.slice(1), {
+      env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     this.child.stdout.on("data", (data: Buffer) => {
       this.buffer = Buffer.concat([this.buffer, data]);
       if (this.buffer.length > PROTOCOL_BYTES) {
@@ -86,12 +102,15 @@ export class WorkerClient implements Runner {
     });
     // Worker stderr is intentionally not a service log channel.
     this.child.stderr.resume();
+    this.child.stdin.on("error", () => this.fail());
     this.child.on("error", () => this.fail());
     this.child.on("exit", () => this.fail());
     const health = await this.call(randomUUID(), "health", {});
     if (
       health.uid !== installation.workUid ||
-      health.uid === process.getuid?.()
+      health.uid === process.getuid?.() ||
+      (this.group !== undefined &&
+        health.cgroup !== "0::" + this.group.slice("/sys/fs/cgroup".length))
     ) {
       this.fail();
       throw new Error("Worker identity is not separated");
@@ -162,5 +181,91 @@ export class WorkerClient implements Runner {
       });
       this.child!.stdin.end();
     });
+  }
+}
+
+export class WorkerClient implements Runner {
+  private readonly files = new WorkerProcess();
+  private readonly operations = new Map<
+    string,
+    { controller: AbortController; finished: Promise<WorkerResult> }
+  >();
+  private broken = false;
+  ready() {
+    return this.files.ready();
+  }
+
+  async call(
+    id: string,
+    op: WorkerRequest["op"],
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<WorkerResult> {
+    if (this.broken)
+      throw new Error("Worker cleanup failed; restart the service");
+    if (op === "cleanup") {
+      const current = this.operations.get(id);
+      current?.controller.abort();
+      await current?.finished.catch(() => {});
+      return { cleanup: !this.broken };
+    }
+    if (!["tool", "mcp_call", "mcp_list", "worktrees"].includes(op))
+      return this.files.call(id, op, args, signal);
+    if (this.operations.has(id))
+      throw new Error("Session tool already running");
+    const controller = new AbortController();
+    const combined = signal
+      ? AbortSignal.any([controller.signal, signal])
+      : controller.signal;
+    const finished = this.execute(id, op, args, combined);
+    this.operations.set(id, { controller, finished });
+    try {
+      return await finished;
+    } finally {
+      this.operations.delete(id);
+    }
+  }
+
+  private async execute(
+    id: string,
+    op: WorkerRequest["op"],
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+  ) {
+    const group = await operationGroup();
+    const worker = new WorkerProcess(group);
+    try {
+      await worker.ready();
+      signal.throwIfAborted();
+      // Membership is confirmed before cancellation can kill this cgroup.
+      const cancel = () => {
+        void writeFile(join(group, "cgroup.kill"), "1").catch(() =>
+          worker.close().catch(() => {}),
+        );
+      };
+      signal.addEventListener("abort", cancel, { once: true });
+      try {
+        return await worker.call(id, op, args);
+      } finally {
+        signal.removeEventListener("abort", cancel);
+      }
+    } finally {
+      try {
+        await removeGroup(group);
+      } catch (error) {
+        this.broken = true;
+        throw error;
+      }
+      await worker.close();
+    }
+  }
+
+  async close() {
+    for (const task of this.operations.values()) task.controller.abort();
+    await Promise.allSettled(
+      [...this.operations.values()].map((task) => task.finished),
+    );
+    await this.files.close();
+    if (this.broken) throw new Error("Worker cleanup failed");
   }
 }

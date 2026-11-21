@@ -6,9 +6,9 @@ import {
   mkdir,
   open,
   readdir,
+  readFile,
   realpath,
   rm,
-  stat,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -185,27 +185,7 @@ export class Worker {
   }
   async cleanup(): Promise<boolean> {
     for (const env of this.environments) await env.cleanup(BACKGROUND_CONTEXT);
-    if (!this.options.production) return this.environments.size === 0;
-    // Only one conversation executes. End short-lived MCP connections before sweeping escaped work-UID processes.
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const pids: number[] = [];
-      for (const name of await readdir("/proc")) {
-        const pid = Number(name);
-        if (!pid || pid === process.pid) continue;
-        try {
-          if ((await stat(`/proc/${name}`)).uid === process.getuid?.())
-            pids.push(pid);
-        } catch {}
-      }
-      if (!pids.length) return true;
-      for (const pid of pids) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {}
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    return false;
+    return this.environments.size === 0;
   }
   private async standardTool(
     id: string,
@@ -496,7 +476,13 @@ export class Worker {
     signal: AbortSignal,
   ): Promise<WorkerResult> {
     const { conversationId: id, op, args } = request;
-    if (op === "health") return { uid: process.getuid?.() ?? -1 };
+    if (op === "health")
+      return {
+        uid: process.getuid?.() ?? -1,
+        ...(this.options.production
+          ? { cgroup: (await readFile("/proc/self/cgroup", "utf8")).trim() }
+          : {}),
+      };
     if (op === "delete_workspace") {
       const base = this.workspace(id);
       const parent = dirname(base);

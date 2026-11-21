@@ -516,7 +516,7 @@ test("assistant delegates through Pi, receives one settled result, and child has
   }
 });
 
-test("two simultaneous admissions retain distinct model credentials, models and cancellation", async () => {
+test("concurrent work sessions and the assistant retain their model credentials and cancellation", async () => {
   const faux = fauxProvider({
     tokensPerSecond: Infinity,
     models: [{ id: "gpt-4.1" }, { id: "gpt-4.1-mini" }],
@@ -531,6 +531,10 @@ test("two simultaneous admissions retain distinct model credentials, models and 
       childStarted = true;
       await gate;
       return fauxAssistantMessage("child");
+    },
+    async () => {
+      await gate;
+      return fauxAssistantMessage("sibling");
     },
     fauxAssistantMessage("parent"),
   ]);
@@ -588,6 +592,14 @@ test("two simultaneous admissions retain distinct model credentials, models and 
     );
     await service.send(child.id, randomUUID(), "long work");
     await until(async () => childStarted);
+    const sibling = await service.create(
+      randomUUID(),
+      "second independent",
+      first,
+      "gpt-4.1",
+    );
+    await service.send(sibling.id, randomUUID(), "parallel work");
+    await until(async () => seen.length === 2);
     await service.send(parent.id, randomUUID(), "quick response");
     await until(async () => !service.coordinator.busy);
     assert.equal(service.workBusy, true);
@@ -595,6 +607,7 @@ test("two simultaneous admissions retain distinct model credentials, models and 
       seen.map(({ key, model }) => ({ key, model })),
       [
         { key: "fixture-child-secret", model: "gpt-4.1-mini" },
+        { key: "fixture-parent-secret", model: "gpt-4.1" },
         { key: "fixture-parent-secret", model: "gpt-4.1" },
       ],
     );
