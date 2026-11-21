@@ -45,6 +45,7 @@ function inputError(error: z.ZodError): string {
     models: "モデル接続",
     mcp: "MCP",
     name: "名前",
+    email: "メールアドレス",
     model: "モデル",
     provider: "プロバイダー",
     key: "API キー",
@@ -297,6 +298,10 @@ export async function createServer(
   app.get("/api/settings", async () => service.management());
   app.put("/api/settings", async (request) =>
     service.saveSettings(request.body),
+  );
+  app.get("/api/settings/git", async () => service.workGitIdentity());
+  app.put("/api/settings/git", { bodyLimit: 4096 }, async (request) =>
+    service.workGitIdentity(request.body ?? null),
   );
   app.post("/api/settings/models/:id/test", async (request) => {
     const { id } = identifier.parse(request.params);

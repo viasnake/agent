@@ -1,8 +1,10 @@
 import { returnToSession } from "./navigation.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { chromium, type Page } from "playwright";
 import { fixture, call, answer, until } from "../support.js";
 import { createServer } from "../../src/server.js";
@@ -113,6 +115,20 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   try {
+    const home = join(f.root, "work/home");
+    const xdg = join(home, ".config/git");
+    await mkdir(xdg, { recursive: true });
+    await writeFile(
+      join(xdg, "config"),
+      "[user]\nname = Existing User\nemail = existing@example.invalid\n[init]\ndefaultBranch = trunk\n",
+    );
+    const git = async (...args: string[]) =>
+      (
+        await promisify(execFile)("/usr/bin/git", args, {
+          cwd: home,
+          env: { HOME: home, PATH: "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1" },
+        })
+      ).stdout.trim();
     await page.route(
       "**/api/settings",
       (route) =>
@@ -145,6 +161,7 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
           ["models", "モデル"],
           ["mcp", "MCP"],
           ["credentials", "クレデンシャル"],
+          ["git", "Git"],
           ["skills", "Skills"],
           ["agent", "指示・制限"],
           ["memory", "記憶"],
@@ -156,7 +173,9 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
           const toolbar = page.locator(
             section === "agent"
               ? ".settings-fields"
-              : ".settings-toolbar:visible",
+              : section === "git"
+                ? "form.settings-card:visible"
+                : ".settings-toolbar:visible",
           );
           await toolbar.waitFor();
           assert.equal(
@@ -195,6 +214,67 @@ test("Web management saves models, ChatGPT OAuth, stdio MCP and limits with mobi
     }
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.emulateMedia({ colorScheme: "light" });
+    const gitTab = page.getByRole("button", { name: "Git", exact: true });
+    await gitTab.click();
+    const commitName = page.getByLabel("作成者名", { exact: true });
+    const commitEmail = page.getByLabel("メールアドレス", { exact: true });
+    assert.equal(await commitName.inputValue(), "Existing User");
+    assert.equal(await commitEmail.inputValue(), "existing@example.invalid");
+    const newName = '山田 "Git" 太郎';
+    await commitName.fill(newName);
+    await commitEmail.fill("yamada@example.invalid");
+    await page.getByRole("button", { name: "指示・制限", exact: true }).click();
+    await gitTab.click();
+    assert.equal(await commitName.inputValue(), newName);
+    const saveGit = async (status: number) => {
+      const response = page.waitForResponse(
+        (reply) =>
+          reply.request().method() === "PUT" &&
+          new URL(reply.url()).pathname === "/api/settings/git",
+      );
+      await page
+        .getByRole("button", { name: "Git 設定を保存", exact: true })
+        .click();
+      assert.equal((await response).status(), status);
+    };
+    await saveGit(200);
+    await git("init", "identity-check");
+    await git(
+      "-C",
+      "identity-check",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "global",
+    );
+    assert.equal(
+      await git(
+        "-C",
+        "identity-check",
+        "log",
+        "-1",
+        "--format=%an <%ae> / %cn <%ce>",
+      ),
+      `${newName} <yamada@example.invalid> / ${newName} <yamada@example.invalid>`,
+    );
+    assert.equal(
+      await git("config", "--global", "init.defaultBranch"),
+      "trunk",
+    );
+    await git("config", "--global", "user.name", "Edited in Git");
+    await commitEmail.fill("draft@example.invalid");
+    await saveGit(409);
+    assert.equal(await commitEmail.inputValue(), "draft@example.invalid");
+    await page.getByRole("button", { name: "再読み込み", exact: true }).click();
+    await page.waitForFunction(
+      () =>
+        document.querySelector<HTMLInputElement>("form.settings-card input")
+          ?.value === "Edited in Git",
+    );
+    await commitEmail.fill("");
+    await saveGit(200);
+    await assert.rejects(git("config", "--global", "user.email"), { code: 1 });
+    assert.equal(await git("config", "--global", "user.name"), "Edited in Git");
     await page.getByRole("button", { name: "モデル", exact: true }).click();
     await page.getByRole("button", { name: "追加", exact: true }).click();
     for (const width of [1600, 1280, 390]) {
