@@ -6,6 +6,7 @@ import {
 import { Icon } from "./icons.js";
 import { CredentialSettings } from "./credentials.js";
 import { Skills } from "./skills.js";
+import { GitSettings } from "./git-settings.js";
 import { MemoryNotes } from "./memory.js";
 import type { MemoryDraft, MemorySource } from "./memory.js";
 import { useNotify } from "./notifications.js";
@@ -20,6 +21,7 @@ const settingsSections = [
   ["models", "モデル"],
   ["mcp", "MCP"],
   ["credentials", "クレデンシャル"],
+  ["git", "Git"],
   ["skills", "Skills"],
   ["agent", "指示・制限"],
   ["memory", "記憶"],
@@ -131,6 +133,7 @@ export function Settings({
   const [visited, setVisited] = useState(() => new Set<Tab>([tab]));
   const [memoryDirty, setMemoryDirty] = useState(false);
   const [skillsDirty, setSkillsDirty] = useState(false);
+  const [gitDirty, setGitDirty] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const navigation = useRef<HTMLElement>(null);
   const [busy, setBusy] = useState(false),
@@ -138,7 +141,13 @@ export function Settings({
   const [environments, setEnvironments] = useState<
     Record<string, EnvironmentRow[]>
   >({});
-  const unsaved = dirty || memoryDirty || skillsDirty;
+  const sectionDirty: Partial<Record<Tab, boolean>> = {
+    memory: memoryDirty,
+    skills: skillsDirty,
+    git: gitDirty,
+  };
+  const unsaved = dirty || memoryDirty || skillsDirty || gitDirty;
+  const separateEditor = tab === "git" || tab === "skills" || tab === "memory";
   function canLeave() {
     return confirmSettingsExit(unsaved);
   }
@@ -337,12 +346,7 @@ export function Settings({
               }
               aria-pressed={tab === id}
               aria-label={label}
-              aria-description={
-                (id === "memory" && memoryDirty) ||
-                (id === "skills" && skillsDirty)
-                  ? "編集中"
-                  : undefined
-              }
+              aria-description={sectionDirty[id] ? "編集中" : undefined}
               aria-controls="settings-panel"
               onClick={() => {
                 setVisited((old) => new Set([...old, id]));
@@ -350,8 +354,7 @@ export function Settings({
               }}
             >
               {label}
-              {((id === "memory" && memoryDirty) ||
-                (id === "skills" && skillsDirty)) && (
+              {sectionDirty[id] && (
                 <small className="settings-editing" aria-hidden="true">
                   編集中
                 </small>
@@ -454,6 +457,11 @@ export function Settings({
                   )}
                 </section>
               )}
+              {visited.has("git") && (
+                <div hidden={tab !== "git"}>
+                  <GitSettings onDirtyChange={setGitDirty} />
+                </div>
+              )}
               {visited.has("skills") && (
                 <div hidden={tab !== "skills"}>
                   <Skills onDirtyChange={setSkillsDirty} />
@@ -470,7 +478,7 @@ export function Settings({
                   />
                 </div>
               )}
-              {tab === "skills" || tab === "memory" ? null : !draft ? (
+              {separateEditor ? null : !draft ? (
                 loadFailed ? (
                   <button
                     className="btn-outline theme-secondary"
@@ -1478,7 +1486,7 @@ export function Settings({
               )}
             </div>
           </div>
-          {(dirty || (tab !== "memory" && tab !== "skills")) && (
+          {(dirty || !separateEditor) && (
             <footer className="settings-footer" aria-label="設定の保存">
               <div className="settings-column settings-footer-content justify-content-end">
                 <button

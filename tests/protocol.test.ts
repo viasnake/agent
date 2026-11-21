@@ -57,6 +57,25 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
     await send("init", {}).result;
     const tool = (name: string, args: Record<string, unknown>) =>
       send("tool", { name, args, commandSeconds: 40, commandBytes: 1048576 });
+    const identity = (await send("git_identity", {}).result).gitIdentity;
+    assert.ok(identity && !("conflict" in identity));
+    assert.equal(identity.name, "");
+    const gitConfig = await send("git_identity", {
+      input: {
+        ...identity,
+        name: "Worker User",
+        email: "worker@example.invalid",
+      },
+    }).result;
+    assert.deepEqual(await send("git_identity", {}).result, gitConfig);
+    const gitAuthor = await tool("bash", {
+      command: "git var GIT_AUTHOR_IDENT",
+    }).result;
+    assert.equal(gitAuthor.result?.isError, undefined);
+    assert.match(
+      JSON.stringify(gitAuthor.result?.output),
+      /Worker User <worker@example\.invalid>/,
+    );
     await tool("write", {
       path: "outputs/message.txt",
       content: "実プロトコルの確認",

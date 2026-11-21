@@ -30,8 +30,13 @@ import type {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { safeRelative } from "../security.js";
-import { PROTOCOL_BYTES, requestSchema } from "./protocol.js";
+import {
+  executableOperations,
+  PROTOCOL_BYTES,
+  requestSchema,
+} from "./protocol.js";
 import type { WorkerRequest, WorkerResult, WorkFile } from "./protocol.js";
+import { gitIdentity, gitIdentityInput } from "./git-identity.js";
 
 export type WorkerOptions = { root: string; production: boolean };
 const fileLimit = 20 * 1024 * 1024;
@@ -534,6 +539,15 @@ export class Worker {
         mode: 0o700,
       });
     if (op === "cleanup") return { cleanup: await this.cleanup() };
+    if (op === "git_identity")
+      return {
+        gitIdentity: await gitIdentity(
+          this.env(),
+          signal,
+          z.object({ input: gitIdentityInput.optional() }).strict().parse(args)
+            .input,
+        ),
+      };
     if (op === "worktrees") return this.worktrees(id, args, signal);
     if (op === "mcp_list" || op === "mcp_call")
       return this.mcp(id, args, op === "mcp_call", signal);
@@ -624,9 +638,7 @@ export async function serveWorker(options: WorkerOptions): Promise<void> {
         }
         const request = requestSchema.parse(value),
           controller = new AbortController();
-        const tool = ["tool", "mcp_call", "mcp_list", "worktrees"].includes(
-          request.op,
-        );
+        const tool = executableOperations.has(request.op);
         if (tool && activeTool) {
           reply({ id: request.id, ok: false, error: "Worker busy" });
           continue;
