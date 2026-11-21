@@ -840,6 +840,10 @@ test("one credential connection supports independent conversation models and pre
     const root = f.root;
     await f.service.close();
     f = await fixture([], { root });
+    assert.deepEqual(
+      (await f.service.conversationModelOptions()).recentModels,
+      [{ modelId: connection, model: "gpt-4.1-mini" }],
+    );
     assert.equal(
       (await f.service.conversation(first.id)).model,
       "gpt-4.1-mini",

@@ -25,6 +25,7 @@ import {
 import type { AppendMessage } from "@assistant-ui/react";
 import {
   api,
+  modelChoiceId,
   modelChoices,
   ApiError,
   setCsrf,
@@ -53,12 +54,19 @@ type ThreadProps = {
   loadError: string;
   onRetry: () => void;
   sending: boolean;
+  waitingForModel: boolean;
   attachments: File[];
   setAttachments: (files: File[]) => void;
   onSend: (message: AppendMessage) => Promise<void>;
   onEarlier: () => Promise<void>;
 };
-function SendButton({ sending }: { sending: boolean }) {
+function SendButton({
+  sending,
+  waitingForModel,
+}: {
+  sending: boolean;
+  waitingForModel: boolean;
+}) {
   const aui = useAui();
   const canSend = useAuiState((state) => state.composer.canSend);
   // Pi already accepts steering in its durable inbox; do not introduce a browser queue.
@@ -70,7 +78,7 @@ function SendButton({ sending }: { sending: boolean }) {
       aria-label={sending ? "送信中…" : "送る"}
       title="送信（Ctrl / ⌘ + Enter）"
       aria-busy={sending}
-      disabled={!canSend || sending}
+      disabled={!canSend || sending || waitingForModel}
       onClick={() => aui.composer().send()}
     >
       <Icon name={sending ? "retry" : "send"} />
@@ -83,6 +91,7 @@ function Chat({
   entries,
   cursor,
   sending,
+  waitingForModel,
   attachments,
   setAttachments,
   onSend,
@@ -104,7 +113,8 @@ function Chat({
     messages,
     convertMessage: (message) => message,
     isRunning: view?.conversation.status === "running",
-    isSendDisabled: sending || view?.conversation.status === "stopping",
+    isSendDisabled:
+      sending || waitingForModel || view?.conversation.status === "stopping",
     onNew: async (message) => {
       try {
         await onSend(message);
@@ -336,7 +346,10 @@ function Chat({
                       ? "モデル未設定"
                       : ""}
                 </span>
-                <SendButton sending={sending} />
+                <SendButton
+                  sending={sending}
+                  waitingForModel={waitingForModel}
+                />
               </div>
             </ComposerPrimitive.Root>
             <div className="composer-shortcut">Ctrl / ⌘ + Enter</div>
@@ -379,10 +392,23 @@ function App() {
     catalog: [],
     models: [],
     initialModel: null,
+    recentModels: [],
   });
+  const [loadingModelOptions, setLoadingModelOptions] = useState(true);
   const choices = useMemo(() => modelChoices(modelOptions), [modelOptions]);
-  const [draftModel, setDraftModel] = useState("");
+  const recentChoices = modelOptions.recentModels.map(({ modelId, model }) =>
+    modelChoiceId(modelId, model),
+  );
+  const initialModel =
+    choices.find((choice) => choice.connectionId === modelOptions.initialModel)
+      ?.id ??
+    choices[0]?.id ??
+    "";
+  const draftModel =
+    recentChoices.find((id) => choices.some((choice) => choice.id === id)) ??
+    initialModel;
   const [changingModel, setChangingModel] = useState(false);
+  const modelSelectionVersion = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(
     new URLSearchParams(location.search).has("settings"),
   );
@@ -514,10 +540,16 @@ function App() {
   useEffect(() => {
     if (!ready || settingsOpen) return;
     let active = true;
+    setLoadingModelOptions(true);
+    const version = modelSelectionVersion.current;
     void api<ModelOptions>("/api/model-options")
       .then((options) => {
         if (!active) return;
-        setModelOptions(options);
+        setModelOptions((previous) =>
+          version === modelSelectionVersion.current
+            ? options
+            : { ...options, recentModels: previous.recentModels },
+        );
         const failures = options.models.filter((model) => model.error);
         if (failures.length)
           notify(
@@ -526,17 +558,13 @@ function App() {
               .join(" / "),
             true,
           );
-        const available = modelChoices(options);
-        setDraftModel((old) =>
-          available.some((m) => m.id === old)
-            ? old
-            : (available.find((m) => m.connectionId === options.initialModel)
-                ?.id ??
-              available[0]?.id ??
-              ""),
-        );
       })
-      .catch(notice);
+      .catch((error) => {
+        if (active) notice(error);
+      })
+      .finally(() => {
+        if (active) setLoadingModelOptions(false);
+      });
     return () => {
       active = false;
     };
@@ -544,19 +572,32 @@ function App() {
   async function changeModel(choiceId: string) {
     const choice = choices.find((m) => m.id === choiceId);
     if (!choice) return;
-    if (!selectedRef.current) {
-      setDraftModel(choiceId);
-      return;
-    }
+    const id = selectedRef.current;
+    const selection = { modelId: choice.connectionId, model: choice.model };
     setChangingModel(true);
     try {
-      merge(
-        await api<View>(
-          `/api/conversations/${selectedRef.current}/model`,
+      type RecentModels = Pick<ModelOptions, "recentModels">;
+      let recentModels: ModelOptions["recentModels"];
+      if (id) {
+        const result = await api<View & RecentModels>(
+          `/api/conversations/${id}/model`,
           "PUT",
-          { modelId: choice.connectionId, model: choice.model },
-        ),
-      );
+          selection,
+        );
+        merge(result);
+        recentModels = result.recentModels;
+      } else {
+        ({ recentModels } = await api<RecentModels>(
+          "/api/recent-models",
+          "PUT",
+          selection,
+        ));
+      }
+      modelSelectionVersion.current++;
+      setModelOptions((previous) => ({
+        ...previous,
+        recentModels,
+      }));
     } catch (error) {
       notice(error);
     } finally {
@@ -1303,6 +1344,7 @@ function App() {
                         changingModel ||
                         (selected !== null && !view)
                       }
+                      waitingForModel={selected === null && loadingModelOptions}
                       loading={selected !== null && !view && !loadError}
                       loadError={loadError}
                       onRetry={() => {
@@ -1316,7 +1358,7 @@ function App() {
                             compact
                             value={
                               view?.conversation.modelConfigId
-                                ? JSON.stringify([
+                                ? modelChoiceId(
                                     view.conversation.modelConfigId,
                                     view.conversation.model ??
                                       modelOptions.models.find(
@@ -1324,10 +1366,13 @@ function App() {
                                           m.id ===
                                           view.conversation.modelConfigId,
                                       )?.model,
-                                  ])
-                                : draftModel
+                                  )
+                                : selected
+                                  ? initialModel
+                                  : draftModel
                             }
                             models={choices}
+                            recent={recentChoices}
                             disabled={
                               sending ||
                               deleting ||

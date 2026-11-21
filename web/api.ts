@@ -1,4 +1,5 @@
 import type { ConversationUsage } from "../src/usage.js";
+import type { ModelSelection } from "../src/state.js";
 
 export type Message = {
   role: string;
@@ -194,7 +195,12 @@ export type ModelOptions = {
     error?: string;
   }[];
   initialModel: string | null;
+  recentModels: ModelSelection[];
 };
+
+export function modelChoiceId(modelId: string, model?: string) {
+  return JSON.stringify([modelId, model]);
+}
 
 export function modelChoices(options: ModelOptions) {
   return options.models
@@ -209,7 +215,7 @@ export function modelChoices(options: ModelOptions) {
           ],
         ),
       ].map((model) => ({
-        id: JSON.stringify([connection.id, model]),
+        id: modelChoiceId(connection.id, model),
         name: model,
         group: connection.name,
         connectionId: connection.id,

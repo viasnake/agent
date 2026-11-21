@@ -6,6 +6,7 @@ type Choice = { id: string; name: string; available?: boolean; group?: string };
 export function ModelPicker({
   value,
   models,
+  recent,
   onChange,
   disabled,
   label,
@@ -14,6 +15,7 @@ export function ModelPicker({
 }: {
   value: string;
   models: Choice[];
+  recent: string[];
   onChange: (id: string) => void;
   disabled?: boolean;
   label: string;
@@ -21,6 +23,8 @@ export function ModelPicker({
   onManage?: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const list = useRef<HTMLDivElement>(null);
   const heading = useId();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -30,8 +34,42 @@ export function ModelPicker({
       .toLowerCase()
       .includes(query.trim().toLowerCase()),
   );
+  const recentChoices = recent
+    .map((id) => choices.find((m) => m.id === id))
+    .filter((choice) => choice !== undefined);
+  const groups = new Map<string, Choice[]>();
+  for (const choice of choices) {
+    if (recent.includes(choice.id)) continue;
+    const group = choice.group ?? "OpenAI";
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)!.push(choice);
+  }
   function close() {
     dialog.current?.close();
+  }
+  function option(m: Choice, showConnection = false) {
+    return (
+      <button
+        type="button"
+        key={m.id}
+        className="model-option"
+        aria-pressed={m.id === value}
+        onClick={() => {
+          close();
+          onChange(m.id);
+        }}
+      >
+        <span className="model-option-icon">
+          <Icon name="agent" />
+        </span>
+        <span className="model-option-name">
+          {m.name}
+          {showConnection && <small>{m.group}</small>}
+          {m.available === false && <small>未認証</small>}
+        </span>
+        {m.id === value && <Icon name="check" />}
+      </button>
+    );
   }
   return (
     <>
@@ -42,10 +80,13 @@ export function ModelPicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         disabled={disabled}
-        onClick={() => {
+        onClick={(e) => {
           setQuery("");
           setOpen(true);
+          e.currentTarget.focus({ preventScroll: true });
           dialog.current?.showModal();
+          search.current?.focus();
+          if (list.current) list.current.scrollTop = 0;
         }}
       >
         <Icon name="agent" />
@@ -77,7 +118,7 @@ export function ModelPicker({
               </button>
             </header>
             <input
-              autoFocus
+              ref={search}
               className="form-control model-search"
               type="search"
               aria-label="モデルを検索"
@@ -94,6 +135,7 @@ export function ModelPicker({
               }}
             />
             <div
+              ref={list}
               className="model-list"
               aria-label="モデル一覧"
               onKeyDown={(e) => {
@@ -121,36 +163,18 @@ export function ModelPicker({
                 buttons[next]?.focus();
               }}
             >
-              {[...new Set(choices.map((m) => m.group ?? "OpenAI"))].map(
-                (group) => (
-                  <div key={group} role="group" aria-label={group}>
-                    <div className="model-group">{group}</div>
-                    {choices
-                      .filter((m) => (m.group ?? "OpenAI") === group)
-                      .map((m) => (
-                        <button
-                          type="button"
-                          key={m.id}
-                          className="model-option"
-                          aria-pressed={m.id === value}
-                          onClick={() => {
-                            close();
-                            onChange(m.id);
-                          }}
-                        >
-                          <span className="model-option-icon">
-                            <Icon name="agent" />
-                          </span>
-                          <span className="model-option-name">
-                            {m.name}
-                            {m.available === false && <small>未認証</small>}
-                          </span>
-                          {m.id === value && <Icon name="check" />}
-                        </button>
-                      ))}
-                  </div>
-                ),
+              {recentChoices.length > 0 && (
+                <div role="group" aria-label="最近選択したモデル">
+                  <div className="model-group">最近選択したモデル</div>
+                  {recentChoices.map((choice) => option(choice, true))}
+                </div>
               )}
+              {[...groups].map(([group, items]) => (
+                <div key={group} role="group" aria-label={group}>
+                  <div className="model-group">{group}</div>
+                  {items.map((choice) => option(choice))}
+                </div>
+              ))}
               {!choices.length && (
                 <p className="model-empty">
                   {models.length
