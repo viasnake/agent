@@ -29,7 +29,23 @@ export type State = {
   schemaVersion: 1;
   conversations: Conversation[];
   receipts: Record<string, { hash: string; id: string }>;
+  recentModels?: ModelSelection[];
 };
+export type ModelSelection = { modelId: string; model: string };
+
+export function promoteRecentModel(state: State, selection: ModelSelection) {
+  // Copy older selections so no Pi transaction drafts escape the commit.
+  const previous = (state.recentModels ?? [])
+    .filter(
+      (item) =>
+        item.modelId !== selection.modelId || item.model !== selection.model,
+    )
+    .slice(0, 2)
+    .map(({ modelId, model }) => ({ modelId, model }));
+  const recent = [selection, ...previous];
+  state.recentModels = recent;
+  return recent;
+}
 // A new database and document kind deliberately leave the former job store untouched.
 export const ConversationsDoc = defineDoc<State>({
   kind: "agent.conversations",

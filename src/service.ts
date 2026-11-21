@@ -48,7 +48,7 @@ import { SettingsStore, modelCredential } from "./settings.js";
 import type { McpConfig, ModelConfig } from "./settings.js";
 import { RemoteMcp } from "./mcp.js";
 import type { McpStatus, RemoteOptions } from "./mcp.js";
-import { ConversationsDoc } from "./state.js";
+import { ConversationsDoc, promoteRecentModel } from "./state.js";
 import type { Conversation } from "./state.js";
 import { AppError, hash, safeRelative } from "./security.js";
 import { WorkerCleanupError, WorkerClient } from "./execution/client.js";
@@ -426,9 +426,15 @@ export class AgentService {
         return { ...connection, ...(await entry.result) };
       }),
     );
+    this.assertHealthy();
+    const state = await this.harness.snapshot(ConversationsDoc, ctx);
     if (this.settings.snapshot().revision !== snapshot.revision)
       throw new AppError(409, "接続が変更されました。再読み込みしてください");
-    return this.sanitize({ ...options, models });
+    return this.sanitize({
+      ...options,
+      models,
+      recentModels: state?.recentModels ?? [],
+    });
   }
   private selectedModel(config: ModelConfig | undefined, requested?: string) {
     if (
@@ -1226,6 +1232,24 @@ export class AgentService {
       }
     }
   }
+  private configuredModel(modelId: string, model?: string) {
+    const config = this.settings
+      .snapshot()
+      .models.find((m) => m.id === modelId);
+    if (!config) throw new AppError(400, "モデルを選び直してください");
+    return this.selectedModel(config, model);
+  }
+  async rememberModel(modelId: string, model: string) {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      this.configuredModel(modelId, model);
+      const recentModels = await this.harness.commit(async (tx) => {
+        const state = await tx.doc(ConversationsDoc);
+        return promoteRecentModel(state, { modelId, model });
+      }, ctx);
+      return { recentModels };
+    });
+  }
   async selectModel(id: string, modelId: string, model?: string) {
     return this.exclusive(async () => {
       this.assertHealthy();
@@ -1235,22 +1259,19 @@ export class AgentService {
         conversation.status === "stopping"
       )
         throw new AppError(409, "応答が終わってからモデルを変更してください");
-      if (!this.settings.snapshot().models.some((m) => m.id === modelId))
-        throw new AppError(400, "モデルを選び直してください");
-      const selectedModel = this.selectedModel(
-        this.settings.snapshot().models.find((m) => m.id === modelId),
-        model,
-      );
-      await this.harness.commit(async (tx) => {
-        const record = (await tx.doc(ConversationsDoc)).conversations.find(
-          (c) => c.id === id,
-        )!;
+      const selectedModel = this.configuredModel(modelId, model);
+      const recentModels = await this.harness.commit(async (tx) => {
+        const state = await tx.doc(ConversationsDoc);
+        const record = state.conversations.find((c) => c.id === id)!;
         record.modelConfigId = modelId;
         if (selectedModel) record.model = selectedModel;
         record.updatedAt = Date.now();
+        return selectedModel
+          ? promoteRecentModel(state, { modelId, model: selectedModel })
+          : undefined;
       }, ctx);
       this.notify();
-      return this.view(id);
+      return { ...(await this.view(id)), recentModels };
     });
   }
   private async workspace(id: string): Promise<void> {

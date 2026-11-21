@@ -26,6 +26,9 @@ import {
 const requestId = z.string().uuid();
 const identifier = z.object({ id: z.string().uuid() });
 const fileQuery = z.object({ path: z.string().max(240) }).strict();
+const modelSelection = z
+  .object({ modelId: z.string().uuid(), model: z.string().min(1).max(200) })
+  .strict();
 type Session = { csrf: string; expires: number };
 function sendImage(
   reply: FastifyReply,
@@ -496,14 +499,14 @@ export async function createServer(
       }),
     );
   });
+  app.put("/api/recent-models", async (request) => {
+    const { modelId, model } = modelSelection.parse(request.body);
+    return safe(await service.rememberModel(modelId, model));
+  });
   app.put("/api/conversations/:id/model", async (request) => {
     const { id } = identifier.parse(request.params);
-    const { modelId, model } = z
-      .object({
-        modelId: z.string().uuid(),
-        model: z.string().min(1).max(200).optional(),
-      })
-      .strict()
+    const { modelId, model } = modelSelection
+      .partial({ model: true })
       .parse(request.body);
     return safe(await service.selectModel(id, modelId, model));
   });
