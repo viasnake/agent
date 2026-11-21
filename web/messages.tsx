@@ -12,18 +12,17 @@ import {
   ActionBarPrimitive,
   MessagePrimitive,
   MessagePartPrimitive,
-  groupPartByType,
   useAuiState,
   useAui,
 } from "@assistant-ui/react";
 import type {
   TextMessagePartProps,
   ThreadMessageLike,
-  ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import Markdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Entry, View } from "./api.js";
+import type { Entry } from "./api.js";
 import { Icon } from "./icons.js";
 import { MessageActions } from "./message-actions.js";
 import { MessageBranches, MessageControlScope } from "./message-controls.js";
@@ -31,131 +30,97 @@ import { useNotify } from "./notifications.js";
 
 export const ConversationId = createContext<string | null>(null);
 
-// This is a display adapter only. Tool execution and durable history stay on the server.
-export function threadMessages(
-  entries: Entry[],
-  view: View | null,
-): ThreadMessageLike[] {
-  const messages = [...entries]
+const LinkedImage = createContext(false);
+
+// Keep durable entry IDs for message actions, including when older pages load.
+export function threadMessages(entries: Entry[]): ThreadMessageLike[] {
+  return [...entries]
     .sort((a, b) => a.id - b.id)
     .flatMap((entry) =>
-      entry.messages.map((message, index) => ({
-        ...message,
-        id: `${entry.id}-${index}`,
-      })),
+      entry.messages.flatMap((message, index): ThreadMessageLike[] => {
+        if (!message.visibleInTranscript) return [];
+        const content: Exclude<ThreadMessageLike["content"], string>[number][] =
+          [];
+        if (message.content.trim())
+          content.push({ type: "text", text: message.content });
+        for (const image of message.images ?? [])
+          content.push({ type: "image", image: image.url });
+        if (!content.length) return [];
+        return [
+          {
+            id: `${entry.id}-${index}`,
+            role: message.role === "user" ? "user" : "assistant",
+            createdAt: message.timestamp
+              ? new Date(message.timestamp)
+              : undefined,
+            content,
+          },
+        ];
+      }),
     );
-  const results = new Map(
-    messages
-      .filter((m) => m.role === "toolResult")
-      .map((m) => [m.toolCallId, m]),
-  );
-  const calls = new Set(
-    messages.flatMap((m) => m.toolCalls.map((call) => call.id)),
-  );
-  const converted: ThreadMessageLike[] = [];
-  for (const message of messages) {
-    if (message.role === "toolResult" && calls.has(message.toolCallId!))
-      continue;
-    const content: Exclude<ThreadMessageLike["content"], string>[number][] = [];
-    if (message.role === "toolResult") {
-      content.push({
-        type: "tool-call",
-        toolCallId: message.toolCallId ?? message.id,
-        toolName: message.toolName ?? "道具",
-        args: {},
-        argsText: "",
-        result: message.content,
-        isError: message.isError,
-      });
-    } else {
-      if (message.reasoning?.trim())
-        content.push({ type: "reasoning", text: message.reasoning });
-      if (message.content.trim())
-        content.push({ type: "text", text: message.content });
-      for (const image of message.images ?? [])
-        content.push({ type: "image", image: image.url });
-      for (const call of message.toolCalls) {
-        const result = results.get(call.id);
-        content.push({
-          type: "tool-call",
-          toolCallId: call.id,
-          toolName: call.name,
-          args: {},
-          argsText: call.argsText,
-          ...(result
-            ? { result: result.content, isError: result.isError }
-            : {}),
-        });
-      }
-    }
-    if (content.length)
-      converted.push({
-        id: message.id,
-        role: message.role === "user" ? "user" : "assistant",
-        ...(message.timestamp
-          ? { createdAt: new Date(message.timestamp) }
-          : {}),
-        content,
-      });
-  }
-  if (view?.progress.partial || view?.progress.reasoning)
-    converted.push({
-      id: "streaming",
-      role: "assistant",
-      content: [
-        ...(view.progress.reasoning
-          ? [{ type: "reasoning" as const, text: view.progress.reasoning }]
-          : []),
-        ...(view.progress.partial
-          ? [{ type: "text" as const, text: view.progress.partial }]
-          : []),
-      ],
-      status: { type: "running" },
-    });
-  return converted;
 }
 
-export function MarkdownText({ text }: Pick<TextMessagePartProps, "text">) {
-  const id = useContext(ConversationId);
+function sessionFileUrl(
+  id: string | null,
+  destination: string | undefined,
+  route: "download" | "file-image",
+): string | undefined {
+  if (!id || !destination || /[?#]/.test(destination)) return;
+  let path: string;
+  try {
+    path = decodeURIComponent(destination.replace(/^\.\//, ""));
+  } catch {
+    return;
+  }
+  if (
+    !/^(outputs|attachments)\//.test(path) ||
+    /[\\\0]/.test(path) ||
+    path.split("/").some((part) => !part || part === ".." || part === ".")
+  )
+    return;
+  return `/api/conversations/${id}/${route}?path=${encodeURIComponent(path)}`;
+}
+
+const markdownComponents: Components = {
+  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+  code: ({ children, className }) => (
+    <HighlightedCode className={className}>
+      {String(children ?? "")}
+    </HighlightedCode>
+  ),
+  img: function MarkdownImage({ src, alt }) {
+    const id = useContext(ConversationId);
+    const image = sessionFileUrl(id, src, "file-image");
+    return image ? (
+      <ImagePreview key={image} image={image} alt={alt ?? ""} />
+    ) : (
+      <span className="fg-2">{alt ? `[画像：${alt}]` : "[画像]"}</span>
+    );
+  },
+  a: function MarkdownLink({ href, children }) {
+    const id = useContext(ConversationId);
+    const external = href && /^https?:\/\//i.test(href);
+    const url = external ? href : sessionFileUrl(id, href, "download");
+    if (!url) return <span>{children}</span>;
+    return (
+      <a
+        href={url}
+        target={external ? "_blank" : undefined}
+        rel={external ? "noopener noreferrer" : undefined}
+      >
+        <LinkedImage.Provider value>{children}</LinkedImage.Provider>
+      </a>
+    );
+  },
+};
+
+function MarkdownText({ text }: Pick<TextMessagePartProps, "text">) {
   return (
     <div className="markdown" data-aui-quote-selectable="">
       <Markdown
         remarkPlugins={[remarkGfm]}
         skipHtml
-        components={{
-          pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
-          code: ({ children, className }) => (
-            <HighlightedCode className={className}>
-              {String(children ?? "")}
-            </HighlightedCode>
-          ),
-          img: ({ alt }) => (
-            <span className="fg-2">{alt ? `[画像：${alt}]` : "[画像]"}</span>
-          ),
-          a: ({ href, children }) => {
-            if (href && /^https?:\/\//i.test(href))
-              return (
-                <a href={href} target="_blank" rel="noopener noreferrer">
-                  {children}
-                </a>
-              );
-            const path = href?.replace(/^\.\//, "");
-            if (
-              id &&
-              path?.startsWith("outputs/") &&
-              !path.includes("\\") &&
-              !path.split("/").some((part) => part === ".." || part === ".")
-            )
-              return (
-                <a
-                  href={`/api/conversations/${id}/download?path=${encodeURIComponent(path)}`}
-                >
-                  {children}
-                </a>
-              );
-            return <span>{children}</span>;
-          },
-        }}
+        components={markdownComponents}
       >
         {text}
       </Markdown>
@@ -198,64 +163,6 @@ function HighlightedCode({
   return <code className={className}>{tokens}</code>;
 }
 
-export function toolLabel(name: string): string {
-  const labels: Record<string, string> = {
-    read: "ファイルを読む",
-    write: "ファイルを保存",
-    edit: "ファイルを編集",
-    bash: "コマンドを実行",
-    memory_save: "記憶を保存",
-    memory_update: "記憶を更新",
-    memory_forget: "記憶を削除",
-    session_search: "過去の会話を検索",
-    session_read: "過去の会話を読む",
-  };
-  return labels[name] ?? (name.startsWith("mcp_") ? "MCP ツール" : name);
-}
-
-function ToolResult({
-  toolName,
-  argsText,
-  result,
-  isError,
-}: ToolCallMessagePartProps) {
-  const running = useAuiState((state) => state.thread.isRunning);
-  return (
-    <details
-      className={`tool-card ${isError ? "tool-error" : ""}`}
-      data-aui-quote-selectable="false"
-    >
-      <summary>
-        <Icon name="terminal" />
-        <span className="tool-name">{toolLabel(toolName)}</span>
-        <span className="tool-state">
-          {isError
-            ? "失敗"
-            : result === undefined
-              ? running
-                ? "実行中"
-                : "結果未確認"
-              : "実行結果"}
-        </span>
-      </summary>
-      <div className="tool-detail-label">入力</div>
-      <pre>
-        {toolName}
-        {argsText ? `\n${argsText}` : ""}
-      </pre>
-      {result !== undefined && (
-        <>
-          <div className="tool-detail-label">出力</div>
-          <pre>
-            {typeof result === "string"
-              ? result
-              : JSON.stringify(result, null, 2)}
-          </pre>
-        </>
-      )}
-    </details>
-  );
-}
 export function UserMessage() {
   const id = useAuiState((state) => state.message.id);
   const { activeEntry } = useContext(MessageActions);
@@ -310,11 +217,6 @@ function UserText({ text }: { text: string }) {
   );
 }
 export function AssistantMessage() {
-  const hasText = useAuiState((state) =>
-    state.message.parts.some(
-      (part) => part.type === "text" && part.text.trim(),
-    ),
-  );
   const id = useAuiState((state) => state.message.id);
   const { activeEntry } = useContext(MessageActions);
   return (
@@ -323,72 +225,15 @@ export function AssistantMessage() {
       className={`message assistant-message ${activeEntry === Number(id.split("-")[0]) ? "search-current" : ""}`}
     >
       <div className="visually-hidden">アシスタント</div>
-      <div className="assistant-content">
-        <MessagePrimitive.GroupedParts
-          groupBy={groupPartByType({
-            reasoning: ["group-thinking"],
-            "tool-call": ["group-thinking"],
-          })}
-          indicator="never"
-        >
-          {({ part, children }) => {
-            if (part.type === "group-thinking")
-              return (
-                <ChainOfThought indices={part.indices}>
-                  {children}
-                </ChainOfThought>
-              );
-            if (part.type === "reasoning")
-              return (
-                <div
-                  className="reasoning-text"
-                  data-aui-quote-selectable="false"
-                >
-                  {part.text}
-                </div>
-              );
-            if (part.type === "text") return <MarkdownText text={part.text} />;
-            if (part.type === "tool-call") return <ToolResult {...part} />;
-            return null;
-          }}
-        </MessagePrimitive.GroupedParts>
-      </div>
-      {hasText && <MessageFooter />}
+      <MessagePrimitive.Parts>
+        {({ part }) => {
+          if (part.type === "text") return <MarkdownText text={part.text} />;
+          if (part.type === "image") return <ImagePreview image={part.image} />;
+          return null;
+        }}
+      </MessagePrimitive.Parts>
+      <MessageFooter />
     </MessagePrimitive.Root>
-  );
-}
-
-function ChainOfThought({
-  children,
-  indices,
-}: {
-  children: import("react").ReactNode;
-  indices: readonly number[];
-}) {
-  const running = useAuiState(
-    (state) =>
-      state.message.status?.type === "running" ||
-      (state.thread.isRunning &&
-        indices.some((index) => {
-          const part = state.message.parts[index];
-          return part?.type === "tool-call" && part.result === undefined;
-        })),
-  );
-  const failed = useAuiState((state) =>
-    indices.some((index) => {
-      const part = state.message.parts[index];
-      return part?.type === "tool-call" && part.isError;
-    }),
-  );
-  return (
-    <details className="chain-of-thought" data-aui-quote-selectable="false">
-      <summary>
-        <Icon name="chevron" />
-        <span>{running ? "思考中…" : "思考・ツール"}</span>
-        {failed && <span className="thinking-error">ツール失敗</span>}
-      </summary>
-      <div className="thinking-parts">{children}</div>
-    </details>
   );
 }
 
@@ -542,37 +387,57 @@ function CodeBlock({ children }: { children?: import("react").ReactNode }) {
   );
 }
 
-export function ImagePreview({ image }: { image: string }) {
+function ImagePreview({
+  image,
+  alt = "添付画像",
+}: {
+  image: string;
+  alt?: string;
+}) {
+  const linked = useContext(LinkedImage);
   const dialog = useRef<HTMLDialogElement>(null);
+  const [expanded, setExpanded] = useState(false);
   const [failed, setFailed] = useState(false);
+  if (failed)
+    return (
+      <span className="fg-2" role="alert">
+        {alt
+          ? `${alt}：画像を読み込めませんでした`
+          : "画像を読み込めませんでした"}
+      </span>
+    );
+  const thumbnail = (
+    <img
+      src={image}
+      alt={alt}
+      className="img-fluid rounded"
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
+  if (linked) return thumbnail;
   return (
     <>
-      {failed ? (
-        <span role="alert">画像を読み込めませんでした</span>
-      ) : (
-        <button
-          type="button"
-          className="image-thumbnail"
-          aria-label="画像を拡大"
-          onClick={() => dialog.current?.showModal()}
-        >
-          <img
-            src={image}
-            alt="添付画像"
-            className="img-fluid rounded"
-            loading="lazy"
-            onError={() => setFailed(true)}
-          />
-          <span>
-            <Icon name="expand" />
-          </span>
-        </button>
-      )}
+      <button
+        type="button"
+        className="image-thumbnail"
+        aria-label={alt && alt !== "添付画像" ? `${alt}を拡大` : "画像を拡大"}
+        onClick={() => {
+          dialog.current?.showModal();
+          setExpanded(true);
+        }}
+      >
+        {thumbnail}
+        <span>
+          <Icon name="expand" />
+        </span>
+      </button>
       {createPortal(
         <dialog
           ref={dialog}
           className="image-dialog"
           aria-label="画像プレビュー"
+          onClose={() => setExpanded(false)}
           onClick={(event) => {
             if (event.target === event.currentTarget) dialog.current?.close();
           }}
@@ -586,7 +451,7 @@ export function ImagePreview({ image }: { image: string }) {
           >
             <Icon name="close" />
           </button>
-          <img src={image} alt="添付画像の拡大表示" />
+          {expanded && <img src={image} alt={alt || "画像の拡大表示"} />}
         </dialog>,
         document.body,
       )}

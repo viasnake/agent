@@ -1,22 +1,14 @@
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { Cursor, EntryId } from "@earendil-works/pi-durable";
-import type { Message } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { z } from "zod";
 import type { AgentService } from "./service.js";
 import { ConversationsDoc } from "./state.js";
 import { AppError, hash } from "./security.js";
+import { isConversationMessage, messageText } from "./transcript.js";
 
 const limits = { notes: 32, noteChars: 1000, totalChars: 8000, records: 2048 };
 const memoryText = z.string().trim().min(1).max(limits.noteChars);
-const messageText = (message: Message) =>
-  typeof message.content === "string"
-    ? message.content
-    : message.content
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join("\n");
-
 export const memoryId = z.union([
   z.string().uuid(),
   z.string().regex(/^[a-f0-9]{64}$/),
@@ -385,7 +377,7 @@ export class SessionMemory {
     return { id };
   }
 
-  async search(input: z.input<typeof historyInput>) {
+  async search(input: z.input<typeof historyInput>, visibleOnly = false) {
     const value = historyInput.parse(input);
     try {
       localDate(Date.now(), value.timezone);
@@ -399,7 +391,7 @@ export class SessionMemory {
       throw new AppError(400, "日付またはタイムゾーンが不正です");
     }
     const filter = hash(
-      JSON.stringify([value.query, value.date, value.timezone]),
+      JSON.stringify([value.query, value.date, value.timezone, visibleOnly]),
     );
     const cursorSchema = z
       .object({
@@ -453,6 +445,7 @@ export class SessionMemory {
         if (entry.conversationId !== session.piId) continue;
         for (const message of entry.model ?? []) {
           if (message.role !== "user" && message.role !== "assistant") continue;
+          if (visibleOnly && !isConversationMessage(message)) continue;
           if (
             value.date &&
             (!Number.isFinite(message.timestamp) ||

@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer as portProbe } from "node:net";
 import { chromium, type Locator } from "playwright";
+import sharp from "sharp";
 import { fixture, answer, call, until } from "../support.js";
 import { createServer } from "../../src/server.js";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import {
   fauxAssistantMessage,
+  fauxText,
   fauxThinking,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
@@ -69,20 +71,41 @@ async function assertReadable(locator: Locator, pseudo?: string) {
   }
 }
 
-test("real browser conversation: no category, attachments, response-loss retry, reconnect, CSV download and continuation without a new job", async () => {
+test("real browser conversation: attachments, final answers with local images, downloads, reconnect and continuation", async () => {
+  const png = await sharp({
+    create: { width: 36, height: 24, channels: 3, background: "#4a8" },
+  })
+    .png()
+    .toBuffer();
   const f = await fixture([
     fauxAssistantMessage(
       [
         fauxThinking("添付 CSV を確認します。"),
+        fauxText("途中経過の報告です。"),
         fauxToolCall("bash", {
-          command:
-            "test -f attachments/*-input.csv && mkdir -p outputs && printf 'name,total\\nAlice,12\\n' > outputs/clean.csv",
+          command: `test -f attachments/*-input.csv && mkdir -p outputs &&
+printf 'name,total\\nAlice,12\\n' > outputs/clean.csv &&
+printf %s '${png.toString("base64")}' | base64 -d > 'outputs/構成 図.png'
+printf '<svg xmlns="http://www.w3.org/2000/svg"/>' > outputs/figure.svg
+cp outputs/figure.svg outputs/fake.png`,
         }),
       ],
       { stopReason: "toolUse" },
     ),
     answer(
-      "## CSV の整形\n\n**保存しました。**\n\n| 名前 | 合計 |\n| --- | --- |\n| Alice | 12 |\n\n```sh\ncat outputs/clean.csv\n```\n\n![外部画像](https://evil.invalid/track)\n\n[不正なリンク](javascript:alert(1))\n\n<script>window.pwned=1</script><img src=https://evil.invalid/track>",
+      [
+        "## CSV の整形",
+        "**保存しました。**",
+        "| 名前 | 合計 |\n| --- | --- |\n| Alice | 12 |",
+        "```sh\ncat outputs/clean.csv\n```",
+        "![構成図](./outputs/構成%20図.png)",
+        "[PNG をダウンロード](outputs/構成%20図.png) ｜ [SVG をダウンロード](outputs/figure.svg)",
+        "![偽の PNG](outputs/fake.png)",
+        "![外部画像](https://evil.invalid/track)",
+        "![作業領域の外](outputs/%2e%2e/secret.png)",
+        "[不正なリンク](javascript:alert(1))",
+        "<script>window.pwned=1</script><img src=https://evil.invalid/track>",
+      ].join("\n\n"),
     ),
   ]);
   const probe = portProbe();
@@ -204,31 +227,75 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       await page.locator('.markdown a[href^="javascript:"]').count(),
       0,
     );
-    assert.equal(await page.locator(".markdown img").count(), 0);
-    const tool = page.locator(".tool-card").first();
-    const thinking = page.locator(".chain-of-thought").first();
-    assert.equal(
-      await thinking.evaluate((node) => (node as HTMLDetailsElement).open),
-      false,
+    const diagram = page.getByAltText("構成図", { exact: true });
+    await diagram.waitFor();
+    await until(async () =>
+      diagram.evaluate((image: HTMLImageElement) => image.naturalWidth === 36),
     );
-    await thinking.locator(":scope > summary").focus();
-    await page.keyboard.press("Enter");
-    assert.equal(
-      await thinking.locator(".reasoning-text").innerText(),
-      "添付 CSV を確認します。",
+    const previewUrl = (await diagram.getAttribute("src"))!;
+    const inline = await page.request.get(origin + previewUrl);
+    assert.equal(inline.status(), 200);
+    assert.equal(inline.headers()["content-type"], "image/png");
+    assert.equal(inline.headers()["x-content-type-options"], "nosniff");
+    assert.deepEqual(await inline.body(), png);
+    const anonymous = await browser.newContext();
+    try {
+      assert.equal(
+        (await anonymous.request.get(origin + previewUrl)).status(),
+        401,
+      );
+    } finally {
+      await anonymous.close();
+    }
+    for (const path of ["outputs/../secret.png", "outputs/figure.svg"]) {
+      const rejected = await page.request.get(
+        `${origin}/api/conversations/${id}/file-image?path=${encodeURIComponent(path)}`,
+      );
+      assert.equal(rejected.status(), path.endsWith(".svg") ? 415 : 400);
+    }
+    await page.getByText("偽の PNG：画像を読み込めませんでした").waitFor();
+    assert.equal(await page.locator(".markdown img").count(), 1);
+    const expand = page.getByRole("button", {
+      name: "構成図を拡大",
+      exact: true,
+    });
+    await expand.click();
+    const preview = page.getByRole("dialog", { name: "画像プレビュー" });
+    await preview.getByAltText("構成図").waitFor();
+    await page.keyboard.press("Escape");
+    await preview.waitFor({ state: "hidden" });
+    assert.ok(
+      await expand.evaluate((button) => button === document.activeElement),
     );
+    for (const extension of ["PNG", "SVG"]) {
+      const downloading = page.waitForEvent("download");
+      await page
+        .getByRole("link", { name: `${extension} をダウンロード` })
+        .click();
+      assert.equal(
+        (await downloading).suggestedFilename(),
+        extension === "PNG" ? "構成 図.png" : "figure.svg",
+      );
+    }
+    assert.equal(await page.locator(".assistant-message").count(), 1);
     assert.equal(
-      await tool.evaluate((node) => (node as HTMLDetailsElement).open),
-      false,
+      await page
+        .getByText(/添付 CSV を確認|途中経過の報告|思考・ツール/)
+        .count(),
+      0,
     );
-    await tool.locator("summary").click();
-    assert.ok(await tool.locator("pre").first().isVisible());
-    await tool.locator("summary").click();
+    for (const route of [
+      `/api/conversations/${id}/search?q=`,
+      "/api/history?query=",
+    ]) {
+      const response = await page.request.get(
+        origin + route + encodeURIComponent("途中経過の報告"),
+      );
+      assert.equal(response.status(), 200);
+      assert.deepEqual((await response.json()).matches, []);
+    }
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
-      await assertReadable(
-        page.locator(".chain-of-thought > summary, .reasoning-text"),
-      );
       await page.getByRole("tab", { name: "ファイル", exact: true }).click();
       await assertReadable(
         page.locator(
@@ -268,7 +335,7 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       await page.getByRole("tab", { name: "会話", exact: true }).click();
       await assertReadable(
         page.locator(
-          ".session-row.selected, #state, #connection, .user-bubble, .markdown, .markdown pre, .markdown th, .markdown td, .tool-card summary, .tool-state, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
+          ".session-row.selected, #state, #connection, .user-bubble, .markdown, .markdown pre, .markdown th, .markdown td, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
         ),
       );
       await assertReadable(page.locator("#message"), "::placeholder");
@@ -334,7 +401,15 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       false,
     );
     f.faux.setResponses([
-      call("bash", { command: "printf started > started; sleep 30" }),
+      fauxAssistantMessage(
+        [
+          fauxText("実行途中のメッセージです。"),
+          fauxToolCall("bash", {
+            command: "printf started > started; sleep 30",
+          }),
+        ],
+        { stopReason: "toolUse" },
+      ),
       answer("stale"),
     ]);
     await page.locator("#message").fill("停止と再開を確認して");
@@ -346,6 +421,11 @@ test("real browser conversation: no category, attachments, response-loss retry, 
       ),
     );
     await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
+    await page.getByText("応答中", { exact: true }).waitFor();
+    assert.equal(
+      await page.getByText(/実行途中のメッセージ|コマンドを実行/).count(),
+      0,
+    );
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
       await assertReadable(page.locator("#state"));

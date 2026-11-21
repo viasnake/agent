@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import { readFile } from "node:fs/promises";
@@ -22,7 +22,18 @@ import {
 
 const requestId = z.string().uuid();
 const identifier = z.object({ id: z.string().uuid() });
+const fileQuery = z.object({ path: z.string().max(240) }).strict();
 type Session = { csrf: string; expires: number };
+function sendImage(
+  reply: FastifyReply,
+  image: { bytes: Buffer; mimeType: string },
+) {
+  return reply
+    .header("Content-Type", image.mimeType)
+    .header("Cache-Control", "private, no-store")
+    .header("Content-Security-Policy", "sandbox; default-src 'none'")
+    .send(image.bytes);
+}
 function inputError(error: z.ZodError): string {
   const issue = error.issues[0];
   if (!issue) return "入力が不正です";
@@ -345,7 +356,7 @@ export async function createServer(
     return safe(await service.memory.forget(id, revision));
   });
   app.get("/api/history", async (request) =>
-    safe(await service.memory.search(historyInput.parse(request.query))),
+    safe(await service.memory.search(historyInput.parse(request.query), true)),
   );
   app.get("/api/conversations", async () =>
     safe({ conversations: (await service.list()).reverse() }),
@@ -476,13 +487,12 @@ export async function createServer(
       })
       .strict()
       .parse(request.query);
-    const image = await service.image(id, entry, message, block);
-    return reply
-      .header("Content-Type", image.mimeType)
-      .header("Cache-Control", "private, no-store")
-      .header("Content-Security-Policy", "sandbox; default-src 'none'")
-      .header("X-Content-Type-Options", "nosniff")
-      .send(image.bytes);
+    return sendImage(reply, await service.image(id, entry, message, block));
+  });
+  app.get("/api/conversations/:id/file-image", async (request, reply) => {
+    const { id } = identifier.parse(request.params);
+    const { path } = fileQuery.parse(request.query);
+    return sendImage(reply, await service.fileImage(id, path));
   });
   app.post("/api/conversations/:id/resume", async (request, reply) => {
     const { id } = identifier.parse(request.params),
@@ -528,10 +538,7 @@ export async function createServer(
   });
   app.get("/api/conversations/:id/download", async (request, reply) => {
     const { id } = identifier.parse(request.params),
-      { path } = z
-        .object({ path: z.string().max(240) })
-        .strict()
-        .parse(request.query);
+      { path } = fileQuery.parse(request.query);
     const bytes = await service.download(id, path),
       name = path.startsWith("attachments/")
         ? path

@@ -39,7 +39,6 @@ import {
   AssistantMessage,
   ConversationId,
   threadMessages,
-  toolLabel,
   UserMessage,
 } from "./messages.js";
 import { Icon } from "./icons.js";
@@ -97,10 +96,7 @@ function Chat({
   const viewport = useReadingPosition();
   const draftFailure = useRef(false);
   const previousScrollTop = useRef(0);
-  const messages = useMemo(
-    () => threadMessages(entries, view),
-    [entries, view],
-  );
+  const messages = useMemo(() => threadMessages(entries), [entries]);
   const runtime = useExternalStoreRuntime({
     messages,
     convertMessage: (message) => message,
@@ -222,12 +218,7 @@ function Chat({
               {view?.conversation.status === "running" && (
                 <div id="live" role="status" className="live-status">
                   <span className="running-dot" />
-                  {view.progress.tools.some((tool) => tool.status !== "done")
-                    ? `${view.progress.tools
-                        .filter((tool) => tool.status !== "done")
-                        .map((tool) => toolLabel(tool.name))
-                        .join("・")}…`
-                    : "応答中"}
+                  応答中
                 </div>
               )}
             </div>
