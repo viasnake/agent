@@ -56,6 +56,7 @@ import { WorkerCleanupError, WorkerClient } from "./execution/client.js";
 import type { Runner } from "./execution/protocol.js";
 import type { TerminalIO } from "./execution/terminal.js";
 import { gitIdentityInput } from "./execution/git-identity.js";
+import type { GitReviewRequest, GitReviewResult } from "./git-review.js";
 import { guardedProvider } from "./provider.js";
 import { conversationUsage, recordedUsage, type UsagePeriod } from "./usage.js";
 import { agentTools, mcpToolLabel, mcpToolName, mcpTools } from "./tools.js";
@@ -1720,6 +1721,37 @@ ${this.config.instructions}${this.redact(catalog)}`;
       return { files: [], truncated: false };
     await this.runner.ready();
     return this.runner.call(id, "list", {});
+  }
+  async gitReview(
+    id: string,
+    args: GitReviewRequest,
+  ): Promise<GitReviewResult> {
+    return this.exclusive(async () => {
+      this.assertHealthy();
+      const conversation = await this.conversation(id);
+      if (
+        this.terminalRun ||
+        this.runs.has(id) ||
+        conversation.status === "running" ||
+        conversation.status === "stopping"
+      )
+        throw new AppError(
+          409,
+          "このセッションの実行が終わり、ターミナルを閉じてから更新してください",
+        );
+      if (conversation.workspaceCreated === false)
+        return args.kind === "repositories"
+          ? { kind: "repositories", repositories: [], limited: false }
+          : { kind: "unavailable", reason: "repository" };
+      const { gitReview } = await this.runner.call(
+        id,
+        "git_review",
+        args,
+        AbortSignal.timeout(7000),
+      );
+      if (!gitReview) throw new Error("Git review result missing");
+      return gitReview;
+    });
   }
   async download(id: string, path: string): Promise<Buffer> {
     await this.conversation(id);

@@ -4,6 +4,7 @@ import { NotificationProvider, useNotify } from "./notifications.js";
 import { ModelPicker } from "./model-picker.js";
 import { SessionList } from "./sessions.js";
 import { SessionUsage, UsageStatistics } from "./usage.js";
+import { GitReview } from "./git-review.js";
 import { MessageActions, MessageActionDialog } from "./message-actions.js";
 import { SelectionToolbar, SessionBranches } from "./message-controls.js";
 import type { MessageAction } from "./message-actions.js";
@@ -1236,11 +1237,11 @@ function App() {
                 <section
                   id="files-section"
                   className="output-files"
-                  aria-label="ファイル"
+                  aria-label="添付・生成ファイル"
                 >
                   <div className="output-label">
                     <Icon name="file" />
-                    <span>ファイル</span>
+                    <span>添付・生成ファイル</span>
                     <button
                       id="refresh-files"
                       className="btn-text theme-secondary btn-sm icon-button"
@@ -1286,6 +1287,16 @@ function App() {
                     )}
                   </div>
                 </section>
+                {selected && tab === "files" && (
+                  <GitReview
+                    key={selected}
+                    id={selected}
+                    running={
+                      currentStatus === "running" ||
+                      currentStatus === "stopping"
+                    }
+                  />
+                )}
               </TabsContent>
               <TabsContent
                 value="chat"

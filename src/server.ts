@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/chord/context";
 import type { AgentService } from "./service.js";
 import { AppError } from "./security.js";
+import { gitChangesQuery, gitPatchQuery } from "./git-review.js";
 import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 import { memoryId, memoryInput, memoryEdit, historyInput } from "./memory.js";
@@ -598,6 +599,27 @@ export async function createServer(
   app.get("/api/conversations/:id/files", async (request) => {
     const { id } = identifier.parse(request.params);
     return service.files(id);
+  });
+  app.get("/api/conversations/:id/git/repositories", async (request) => {
+    const { id } = identifier.parse(request.params);
+    return service.gitReview(id, { kind: "repositories" });
+  });
+  app.get("/api/conversations/:id/git/changes", async (request) => {
+    const { id } = identifier.parse(request.params);
+    return service.gitReview(id, {
+      kind: "changes",
+      ...gitChangesQuery.parse(request.query),
+    });
+  });
+  app.get("/api/conversations/:id/git/patch", async (request) => {
+    const { id } = identifier.parse(request.params);
+    const result = await service.gitReview(id, {
+      kind: "patch",
+      ...gitPatchQuery.parse(request.query),
+    });
+    return result.kind === "patch"
+      ? { ...result, text: service.redact(result.text) }
+      : result;
   });
   app.get("/api/conversations/:id/export", async (request, reply) => {
     const { id } = identifier.parse(request.params);

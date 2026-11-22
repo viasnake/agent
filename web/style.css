@@ -1684,3 +1684,9 @@ button {
 .skills-list li {
   overflow-wrap: anywhere;
 }
+
+.git-review-patch {
+  max-height: 28rem;
+  overflow: auto;
+  tab-size: 4;
+}

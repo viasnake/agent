@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { replySchema } from "../src/execution/protocol.js";
 import type { WorkerRequest, WorkerResult } from "../src/execution/protocol.js";
+import { reviewRepository } from "./git-review-fixture.js";
 
 test("S02: real worker stdio protocol, file operations, command cancellation and allowlisted shell environment", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "agent-worker-protocol-")),
@@ -55,6 +56,18 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
   try {
     assert.equal((await send("health", {}).result).uid, process.getuid?.());
     await send("init", {}).result;
+    const checkout = join(root, "conversations", conversationId, "checkout");
+    const { head } = await reviewRepository(checkout);
+    assert.deepEqual(
+      (await send("git_review", { kind: "changes", repo: "checkout" }).result)
+        .gitReview,
+      {
+        kind: "changes",
+        head,
+        files: [{ path: "app.txt", status: "M" }],
+        limited: false,
+      },
+    );
     const tool = (name: string, args: Record<string, unknown>) =>
       send("tool", { name, args, commandSeconds: 40, commandBytes: 1048576 });
     const identity = (await send("git_identity", {}).result).gitIdentity;
