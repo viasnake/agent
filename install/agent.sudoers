@@ -1,1 +1,2 @@
 agent-control ALL=(agent-work) NOPASSWD: NOSETENV: /usr/local/libexec/agent-work ""
+agent-control ALL=(root) NOPASSWD: NOSETENV: /usr/local/libexec/agent-destinations ""

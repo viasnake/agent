@@ -242,8 +242,12 @@ A failed storage session must stop and reopen, not continue accepting input.
 
 Keep the DB, model credentials and service installation separate from arbitrary
 work code. No project code or executable MCP server runs as agent-control.
-The fixed root-owned sudo launcher permits only agent-work, no arguments and
-no SETENV. Apply NoNewPrivileges after the UID switch. Build a clean work
+The fixed root-owned work launcher permits only agent-work, no arguments and
+no SETENV. The separate no-argument root destination helper is callable only
+by agent-control for browser settings; it accepts bounded structured input and
+updates only the dedicated IPv4/TCP nftables set. Keep the on-disk policy
+root-owned and preserve loopback, local and administrator-protected address
+boundaries. A partially applied update must not widen the persisted policy. Apply NoNewPrivileges after the UID switch. Build a clean work
 environment; never inherit control credentials, host homes or SSH agents.
 Never silently fall back when mount/UUID, UID, firewall or cleanup is unavailable.
 Run each executable worker operation in a delegated cgroup and confirm membership

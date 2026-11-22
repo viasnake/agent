@@ -1,6 +1,8 @@
 #!/opt/agent-python/bin/python3
 """Shared installation and startup checks; never creates or mounts storage."""
 
+import fcntl
+import hashlib
 import grp
 import ipaddress
 import json
@@ -11,10 +13,22 @@ import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 RECORD = Path("/etc/agent/installation.json")
 READY = Path("/run/agent-egress.ready")
+EGRESS_LOCK = Path("/run/agent-egress.lock")
+EGRESS_TEMPLATE = Path("/etc/agent/egress.nft")
+PROTECTED = Path("/etc/agent/protected-cidrs.nft")
+DESTINATIONS = Path("/etc/agent/egress.d/destinations.json")
+DESTINATION_MARKER = "@DESTINATION_ELEMENTS@"
+NFT = "/usr/sbin/nft"
+SPECIAL_DESTINATIONS = tuple(map(ipaddress.IPv4Network, (
+    "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "192.0.0.0/24",
+    "192.0.2.0/24", "192.88.99.0/24", "198.18.0.0/15", "198.51.100.0/24",
+    "203.0.113.0/24", "224.0.0.0/3", "100.100.100.200/32",
+)))
 
 
 def run(*args):
@@ -255,22 +269,167 @@ def atomic_write(path, content, mode=0o644):
             os.unlink(temporary)
 
 
+
+@contextmanager
+def egress_lock():
+    fd = os.open(EGRESS_LOCK, os.O_CREAT | os.O_NOFOLLOW | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def destination_entries(entries):
+    if not isinstance(entries, list) or len(entries) > 64:
+        raise ValueError("Invalid destination list")
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"name", "ip", "port"}:
+            raise ValueError("Invalid destination fields")
+        name, ip, port = (entry[key] for key in ("name", "ip", "port"))
+        if (not isinstance(name, str) or len(name) > 80 or (name and not name.isprintable())
+                or not isinstance(ip, str) or len(ip) > 15 or type(port) is not int
+                or not 1 <= port <= 65535):
+            raise ValueError("Invalid destination entry")
+        address = ipaddress.IPv4Address(ip)
+        if any(address in network for network in SPECIAL_DESTINATIONS):
+            raise ValueError("Special address")
+        if (ip, port) in seen:
+            raise ValueError("Duplicate destination")
+        seen.add((ip, port))
+    return entries
+
+
+def protected_networks():
+    trusted(PROTECTED)
+    source = re.sub(r"#.*", "", PROTECTED.read_text())
+    match = re.fullmatch(r"\s*define\s+protected_cidrs\s*=\s*\{([^}]+)\}\s*", source)
+    if match is None:
+        raise RuntimeError("Invalid protected address policy")
+    return [ipaddress.IPv4Network(item.strip(), strict=False) for item in match[1].split(",")]
+
+
+def read_destinations():
+    trusted(DESTINATIONS.parent)
+    if not os.path.lexists(DESTINATIONS):
+        return []
+    trusted(DESTINATIONS)
+    with DESTINATIONS.open("rb") as stream:
+        return destination_entries(json.loads(stream.read(65537)))
+
+
+def destination_json(entries):
+    return json.dumps(entries, sort_keys=True, ensure_ascii=True)
+
+
+def endpoint_pairs(entries):
+    return {(entry["ip"], entry["port"]) for entry in entries}
+
+
+def nft_elements(pairs):
+    # The only interpolations are validated IPv4 literals and bounded integers.
+    return ", ".join(f"{ip} . {port}" for ip, port in sorted(pairs))
+
+
+def active_endpoints():
+    listing = json.loads(run(NFT, "--json", "--numeric", "list", "set", "inet", "agent_work", "allowed_tcp_v4"))
+    (definition,) = (item["set"] for item in listing["nftables"] if "set" in item)
+    return {tuple(item["concat"]) for item in definition.get("elem", [])}
+
+
+def replace_endpoints(pairs):
+    script = "flush set inet agent_work allowed_tcp_v4\n"
+    if pairs:
+        script += "add element inet agent_work allowed_tcp_v4 { " + nft_elements(pairs) + " }\n"
+    result = subprocess.run([NFT, "--file", "-"], input=script, text=True, capture_output=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError("Cannot update destination set")
+
+
+def persist_destinations(entries):
+    atomic_write(DESTINATIONS, destination_json(entries) + "\n", 0o600)
+    fd = os.open(DESTINATIONS.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def save_destinations(before, after, old):
+    new = endpoint_pairs(after)
+    keep = old & new
+    if old != keep:
+        replace_endpoints(keep)
+    # On interruption, the live set must never be broader than the durable policy.
+    try:
+        persist_destinations(after)
+        if new != keep:
+            replace_endpoints(new)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        if new != keep:
+            replace_endpoints(keep)
+        persist_destinations(before)
+        if old != keep:
+            replace_endpoints(old)
+        raise
+
+
+def destination_request(request):
+    with egress_lock():
+        trusted(EGRESS_TEMPLATE)
+        if DESTINATION_MARKER not in EGRESS_TEMPLATE.read_text():
+            return {"status": "unavailable"}
+        entries = read_destinations()
+        pairs = endpoint_pairs(entries)
+        active = active_endpoints()
+        revision = hashlib.sha256(destination_json(entries).encode()).hexdigest()
+        if request != {"operation": "read"}:
+            try:
+                if not isinstance(request, dict) or set(request) != {"operation", "revision", "entries"} or request["operation"] != "write":
+                    raise ValueError("Invalid operation")
+                updated = destination_entries(request["entries"])
+                protected = protected_networks()
+                if any(ipaddress.IPv4Address(ip) in network for ip, _ in endpoint_pairs(updated) - pairs for network in protected):
+                    raise ValueError("Protected address")
+            except ValueError:
+                return {"status": "invalid"}
+            if request["revision"] != revision:
+                return {"status": "conflict"}
+            if not active <= pairs:
+                return {"status": "unavailable"}
+            if updated != entries or active != pairs:
+                save_destinations(entries, updated, active)
+            entries = updated
+            revision = hashlib.sha256(destination_json(entries).encode()).hexdigest()
+            active = active_endpoints()
+        return {"status": "ok", "revision": revision, "entries": entries,
+                "applied": active == endpoint_pairs(entries)}
+
+
 def egress(value):
     if os.geteuid() != 0:
         raise RuntimeError("Egress policy requires root")
+    with egress_lock():
+        apply_egress(value)
+
+
+def apply_egress(value):
     READY.unlink(missing_ok=True)
-    template = Path("/etc/agent/egress.nft")
-    trusted(template)
-    trusted("/etc/agent/protected-cidrs.nft")
+    trusted(EGRESS_TEMPLATE)
+    trusted(PROTECTED)
     policy = (
-        template.read_text()
+        EGRESS_TEMPLATE.read_text()
         .replace("@WORK_UID@", str(value["workUid"]))
         .replace("@DNS_RULES@", dns_rules(Path("/etc/resolv.conf").read_text()))
     )
+    if DESTINATION_MARKER in policy:
+        elements = nft_elements(endpoint_pairs(read_destinations()))
+        policy = policy.replace(DESTINATION_MARKER, f"elements = {{ {elements} }}" if elements else "")
     # Replace only our table in one nft transaction. Other applications' rules stay intact.
     exists = (
         subprocess.run(
-            ["/usr/sbin/nft", "list", "table", "inet", "agent_work"],
+            [NFT, "list", "table", "inet", "agent_work"],
             capture_output=True,
             timeout=30,
             check=False,
@@ -283,9 +442,9 @@ def egress(value):
     try:
         with os.fdopen(fd, "w") as stream:
             stream.write(policy)
-        run("/usr/sbin/nft", "--check", "--file", temporary)
-        run("/usr/sbin/nft", "--file", temporary)
-        run("/usr/sbin/nft", "list", "table", "inet", "agent_work")
+        run(NFT, "--check", "--file", temporary)
+        run(NFT, "--file", temporary)
+        run(NFT, "list", "table", "inet", "agent_work")
         atomic_write(READY, f"agent-work-egress-v2:{value['workUid']}\n")
     finally:
         os.unlink(temporary)
@@ -293,10 +452,18 @@ def egress(value):
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) != 2 or sys.argv[1] not in ("check", "preflight"):
-            raise RuntimeError("Usage: system.py check|preflight")
-        value = check(load_record())
-        if sys.argv[1] == "preflight":
-            egress(value)
-    except (RuntimeError, OSError, KeyError, ValueError) as error:
+        if sys.argv[1:] == ["destinations"]:
+            if os.geteuid() != 0:
+                raise RuntimeError("Egress policy requires root")
+            request = sys.stdin.buffer.read(65537)
+            if len(request) > 65536:
+                raise ValueError("Destination request too large")
+            print(json.dumps(destination_request(json.loads(request)), ensure_ascii=True))
+        else:
+            if len(sys.argv) != 2 or sys.argv[1] not in ("check", "preflight"):
+                raise RuntimeError("Usage: system.py check|preflight|destinations")
+            value = check(load_record())
+            if sys.argv[1] == "preflight":
+                egress(value)
+    except (RuntimeError, OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:
         sys.exit(str(error))

@@ -15,6 +15,7 @@ import {
 import type { AgentService } from "./service.js";
 import { AppError } from "./security.js";
 import { DeploymentGate } from "./deploy.js";
+import { destinationSettings, destinationUpdate } from "./destinations.js";
 import {
   gitChangesQuery,
   gitPatchQuery,
@@ -65,6 +66,9 @@ function inputError(error: z.ZodError): string {
     models: "モデル接続",
     mcp: "MCP",
     name: "名前",
+    ip: "IPv4 アドレス",
+    port: "TCP ポート",
+    entries: "接続先",
     email: "メールアドレス",
     model: "モデル",
     provider: "プロバイダー",
@@ -348,6 +352,10 @@ export async function createServer(
   app.get("/api/settings", async () => service.management());
   app.put("/api/settings", async (request) =>
     service.saveSettings(request.body),
+  );
+  app.get("/api/settings/network", async () => destinationSettings());
+  app.put("/api/settings/network", { bodyLimit: 65536 }, async (request) =>
+    destinationSettings(destinationUpdate.parse(request.body)),
   );
   app.get("/api/settings/git", async () => service.workGitIdentity());
   app.put("/api/settings/git", { bodyLimit: 4096 }, async (request) =>

@@ -4,6 +4,11 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      egress_kernel:
+        description: Check Agent egress with real nftables in an isolated network namespace
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -21,6 +26,12 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npx playwright install --with-deps chromium
+      - name: Test isolated egress policy
+        if: inputs.egress_kernel == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables
+          sudo env AGENT_GUEST_TEST=1 unshare --net -- python3 -B scripts/test-egress-kernel.py
       - name: Test
         run: |
           npm run build
