@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { TerminalIO } from "./terminal.js";
 import { gitIdentityView } from "./git-identity.js";
+import { gitReviewResult, type GitReviewResult } from "../git-review.js";
 export const requestSchema = z
   .object({
     id: z.string().uuid(),
@@ -20,6 +21,7 @@ export const requestSchema = z
       "delete_workspace",
       "worktrees",
       "git_identity",
+      "git_review",
     ]),
     args: z.record(z.string(), z.unknown()),
   })
@@ -41,6 +43,7 @@ export type WorkerResult = {
   truncated?: boolean;
   tools?: ToolInfo[];
   result?: ToolExecutionResult;
+  gitReview?: GitReviewResult;
   gitIdentity?: z.infer<typeof gitIdentityView> | { conflict: true };
 };
 export const executableOperations = new Set<WorkerRequest["op"]>([
@@ -49,6 +52,7 @@ export const executableOperations = new Set<WorkerRequest["op"]>([
   "mcp_list",
   "worktrees",
   "git_identity",
+  "git_review",
 ]);
 export const replySchema = z
   .object({
@@ -87,6 +91,7 @@ export const replySchema = z
             (v) => v !== null && typeof v === "object",
           )
           .optional(),
+        gitReview: gitReviewResult.optional(),
         gitIdentity: z
           .union([
             gitIdentityView,

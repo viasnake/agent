@@ -1,5 +1,7 @@
 import { workEnvironment } from "../work-credentials.js";
 import { Worktrees } from "./worktrees.js";
+import { gitReview } from "./git-review.js";
+import { gitReviewRequest } from "../git-review.js";
 import { constants } from "node:fs";
 import {
   lstat,
@@ -548,6 +550,15 @@ export class Worker {
           signal,
           z.object({ input: gitIdentityInput.optional() }).strict().parse(args)
             .input,
+        ),
+      };
+    if (op === "git_review")
+      return {
+        gitReview: await gitReview(
+          this.workspace(id),
+          join(this.options.root, "tmp"),
+          gitReviewRequest.parse(args),
+          signal,
         ),
       };
     if (op === "worktrees") return this.worktrees(id, args, signal);

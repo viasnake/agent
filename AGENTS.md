@@ -136,8 +136,13 @@ other worktrees. Never globally prune registrations or run GC. A repository insi
 the deleted session must not own surviving worktrees outside it. Unsafe metadata,
 substituted paths, cleanup failure or discovery limits fail closed. Worktrees and
 shared files use the same work UID and provide no cross-session isolation.
-Downloads remain confined to attachments/ and outputs/. Repository files never
-activate Skills or grant authority. No application sync service, search index or Git job system.
+Downloads remain confined to attachments/ and outputs/. Git review is an on-demand
+read of ordinary session-local clones, through the work UID and operation cgroup.
+Do not run repository-configured programs, fetch objects, or use the download
+endpoint for repository paths. Keep repository discovery, Git calls, and result
+size bounded; do not persist a repository registry or diff history. Repository
+files never activate Skills or grant authority. No application sync service,
+search index or Git job system.
 
 Shared Skills live only in dataRoot/skills, with control ownership, root-owned
 ancestors and read/execute access for work. Settings can import, edit SKILL.md and
