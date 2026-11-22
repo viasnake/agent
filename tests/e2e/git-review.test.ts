@@ -37,7 +37,9 @@ test("files tab opens a lazy, plain-text Git patch for the selected session and 
   let browser: Browser | undefined;
   try {
     browser = await chromium.launch({ args: ["--no-sandbox"] });
-    const page = await browser.newPage();
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 800 },
+    });
     let patchRequests = 0;
     page.on("request", (request) => {
       if (new URL(request.url()).pathname.endsWith("/git/patch"))
@@ -61,18 +63,57 @@ test("files tab opens a lazy, plain-text Git patch for the selected session and 
       /\+working <script>text<\/script>/,
     );
     assert.equal(await patch.locator("script").count(), 0);
-    assert.equal(await file.getAttribute("aria-expanded"), "true");
+    assert.equal(await file.getAttribute("aria-pressed"), "true");
+    assert.equal(
+      await patch.locator(".git-patch-removed span").first().textContent(),
+      "1",
+    );
+    assert.equal(
+      await patch.locator(".git-patch-added span").nth(1).textContent(),
+      "1",
+    );
+    const color = () =>
+      patch
+        .locator(".git-patch-added")
+        .evaluate((line) => getComputedStyle(line).backgroundColor);
+    const light = await color();
+    assert.notEqual(light, "rgba(0, 0, 0, 0)");
     await page.emulateMedia({ colorScheme: "dark" });
-    assert.ok(await patch.isVisible());
-    await file.click();
-    assert.equal(await patch.count(), 0);
-    await page.getByLabel("比較対象").selectOption("committed");
-    await page.getByLabel("基準コミットの SHA（40 桁）").fill(base);
+    assert.notEqual(await color(), light);
+    const working = page.getByRole("tab", { name: "未コミット", exact: true });
+    await working.focus();
+    await working.press("ArrowRight");
+    await page.getByLabel("基準コミット", { exact: true }).fill(base);
     await page.getByRole("button", { name: "比較", exact: true }).click();
     await file.click();
     await patch.waitFor();
-    assert.match((await patch.textContent())!, /-original\n\+committed line/);
+    assert.deepEqual(
+      await patch.locator(".git-patch-line code").allTextContents(),
+      ["@@ -1 +1 @@", "-original", "+committed line"],
+    );
     assert.equal(patchRequests, 2);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const back = page.getByRole("button", { name: "変更ファイルに戻る" });
+    await back.click();
+    await file.waitFor();
+    assert.equal(
+      await file.evaluate((node) => node === document.activeElement),
+      true,
+    );
+    await file.press("Enter");
+    await patch.waitFor();
+    assert.equal(
+      await back.evaluate((node) => node === document.activeElement),
+      true,
+    );
+    assert.equal(await file.isVisible(), false);
+    assert.equal(
+      await page
+        .locator("#files-panel")
+        .evaluate((node) => node.scrollWidth === node.clientWidth),
+      true,
+    );
+    await page.setViewportSize({ width: 1280, height: 800 });
     await selectSession(b.id);
     await files();
     await page.getByText("セッション内に Git クローンはありません").waitFor();
