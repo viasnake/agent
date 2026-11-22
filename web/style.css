@@ -47,6 +47,8 @@ button {
   overflow: clip;
 }
 .sidebar {
+  --sidebar-row-inset: 12px;
+  --sidebar-row-gap: 9px;
   display: flex;
   flex-direction: column;
   flex: 0 0 272px;
@@ -62,10 +64,10 @@ button {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 10px;
+  gap: var(--sidebar-row-gap);
   width: 100%;
   min-height: 40px;
-  padding: 8px 10px;
+  padding: 8px calc(var(--sidebar-row-inset) - var(--bs-btn-border-width));
   border-radius: 10px;
 }
 .sidebar-label {
@@ -104,14 +106,14 @@ button {
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 9px;
+  gap: var(--sidebar-row-gap);
   min-width: 0;
-  padding: 10px 8px 10px 12px;
+  padding: 10px 8px 10px var(--sidebar-row-inset);
   border: 0;
   border-radius: 9px;
   background: transparent;
   color: inherit;
-  text-align: left;
+  text-align: start;
 }
 .conversation-item > svg {
   width: 16px;
@@ -1227,8 +1229,15 @@ button {
   grid-column: 1 / -1;
   text-decoration: none;
 }
-.sidebar-footer .sidebar-settings {
+.sidebar-footer :is(.sidebar-statistics, .sidebar-terminal, .sidebar-settings) {
   justify-content: flex-start;
+  gap: var(--sidebar-row-gap);
+  padding-inline: calc(var(--sidebar-row-inset) - var(--bs-btn-border-width));
+  text-align: start;
+}
+.sidebar-header .new-conversation > svg {
+  width: 16px;
+  height: 16px;
 }
 .sidebar-footer .sidebar-toggle,
 .sidebar-footer .sidebar-close {
@@ -1251,15 +1260,18 @@ button {
   background: var(--bs-bg-body);
   box-shadow: var(--bs-box-shadow-lg);
 }
-.session-popover > button {
+.session-popover > :is(button, a) {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 9px;
   width: 100%;
+  min-height: 36px;
   padding: 9px 10px;
-  text-align: left;
+  text-align: start;
   font-size: 12px;
   border-radius: 7px;
+  text-decoration: none;
 }
 .session-popover svg {
   width: 16px;
@@ -1521,7 +1533,6 @@ button {
 .sidebar-header .new-conversation {
   min-width: 0;
   font-size: 13px;
-  padding: 10px 8px;
 }
 .sidebar-footer .sidebar-close {
   display: none;
@@ -1575,21 +1586,6 @@ button {
 }
 .session-list-controls + #conversations .sidebar-label:first-child {
   margin-top: 12px;
-}
-.session-popover button {
-  min-height: 36px;
-}
-.session-popover > a {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 9px 10px;
-  min-height: 36px;
-  text-align: left;
-  font-size: 12px;
-  border-radius: 7px;
-  text-decoration: none;
 }
 .memory-note p {
   white-space: pre-wrap;
