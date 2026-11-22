@@ -33,11 +33,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { safeRelative } from "../security.js";
 import {
+  commandPreviewWindow,
   executableOperations,
+  maxLongCommandSeconds,
   PROTOCOL_BYTES,
   requestSchema,
 } from "./protocol.js";
-import type { WorkerRequest, WorkerResult, WorkFile } from "./protocol.js";
+import type {
+  CommandProgress,
+  WorkerRequest,
+  WorkerResult,
+  WorkFile,
+} from "./protocol.js";
 import { gitIdentity, gitIdentityInput } from "./git-identity.js";
 
 export type WorkerOptions = { root: string; production: boolean };
@@ -223,10 +230,17 @@ export class Worker {
     id: string,
     args: Record<string, unknown>,
     signal: AbortSignal,
+    longCommand?: CommandProgress,
   ): Promise<WorkerResult> {
-    const name = z.enum(["read", "write", "edit", "bash"]).parse(args.name),
+    const name = longCommand
+        ? "bash"
+        : z.enum(["read", "write", "edit", "bash"]).parse(args.name),
       input = z.record(z.string(), z.unknown()).parse(args.args);
-    const seconds = z.number().positive().max(300).parse(args.commandSeconds),
+    const seconds = z
+        .number()
+        .positive()
+        .max(longCommand ? maxLongCommandSeconds : 300)
+        .parse(args.commandSeconds),
       maxBytes = z
         .number()
         .int()
@@ -258,6 +272,26 @@ export class Worker {
         retain: "tail",
       }),
       diagnostics: ToolDiagnostic[] = [];
+    const preview =
+      longCommand &&
+      new OutputBuffer({
+        maxBytes: commandPreviewWindow,
+        maxLines: 4000,
+        retain: "tail",
+      });
+    let published = "";
+    const publish = () => {
+      if (!preview) return;
+      const { text, droppedBytes, droppedLines } = preview.snapshot();
+      if (text && text !== published) {
+        published = text;
+        longCommand?.({
+          text,
+          truncated: droppedBytes > 0 || droppedLines > 0,
+        });
+      }
+    };
+    const updates = preview && setInterval(publish, 500);
     const exec = env.exec.bind(env);
     let bytes = 0;
     env.exec = (command, options, ctx) =>
@@ -272,6 +306,7 @@ export class Worker {
             bytes += Buffer.byteLength(text);
             if (bytes > maxBytes)
               throw new Error("Command output limit reached");
+            preview && preview.push(text);
             options?.onOutput?.(text, ctx, info);
           },
         },
@@ -349,6 +384,8 @@ export class Worker {
         },
       };
     } finally {
+      if (updates) clearInterval(updates);
+      publish();
       await env.cleanup(BACKGROUND_CONTEXT);
       this.environments.delete(env);
       if (!(await this.cleanup()))
@@ -508,6 +545,7 @@ export class Worker {
   async execute(
     request: WorkerRequest,
     signal: AbortSignal,
+    onProgress?: CommandProgress,
   ): Promise<WorkerResult> {
     const { conversationId: id, op, args } = request;
     if (op === "health")
@@ -589,6 +627,10 @@ export class Worker {
       return {};
     }
     if (op === "tool") return this.standardTool(id, args, signal);
+    if (op === "long_command") {
+      if (!onProgress) throw new Error("Command progress relay is required");
+      return this.standardTool(id, args, signal, onProgress);
+    }
     if (op === "list") return this.list(id);
     const name = safeRelative(z.string().parse(args.path));
     if (op === "read_attachment") {
@@ -659,7 +701,16 @@ export async function serveWorker(options: WorkerOptions): Promise<void> {
         if (tool) activeTool = true;
         controllers.set(request.id, controller);
         void worker
-          .execute(request, controller.signal)
+          .execute(
+            request,
+            controller.signal,
+            request.op === "long_command"
+              ? (progress) => {
+                  if (process.stdout.writableLength < 64 * 1024)
+                    reply({ id: request.id, progress });
+                }
+              : undefined,
+          )
           .then(
             (result) => reply({ id: request.id, ok: true, result }),
             () =>

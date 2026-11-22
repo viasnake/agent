@@ -5,7 +5,10 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { replySchema } from "../src/execution/protocol.js";
+import {
+  commandProgressSchema,
+  replySchema,
+} from "../src/execution/protocol.js";
 import type { WorkerRequest, WorkerResult } from "../src/execution/protocol.js";
 import { reviewRepository } from "./git-review-fixture.js";
 
@@ -22,6 +25,7 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
     },
   );
   let buffered = "";
+  const progress = new Map<string, string>();
   const pending = new Map<
     string,
     { resolve: (value: WorkerResult) => void; reject: (error: Error) => void }
@@ -31,8 +35,15 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
     buffered += String(chunk);
     let end: number;
     while ((end = buffered.indexOf("\n")) >= 0) {
-      const reply = replySchema.parse(JSON.parse(buffered.slice(0, end)));
+      const value = JSON.parse(buffered.slice(0, end));
       buffered = buffered.slice(end + 1);
+      if ("progress" in value) {
+        const update = commandProgressSchema.parse(value);
+        assert.ok(pending.has(update.id));
+        progress.set(update.id, update.progress.text);
+        continue;
+      }
+      const reply = replySchema.parse(value);
       const waiter = pending.get(reply.id);
       assert.ok(waiter, "Unsolicited protocol reply");
       pending.delete(reply.id);
@@ -70,6 +81,19 @@ test("S02: real worker stdio protocol, file operations, command cancellation and
     );
     const tool = (name: string, args: Record<string, unknown>) =>
       send("tool", { name, args, commandSeconds: 40, commandBytes: 1048576 });
+    const longCommand = send("long_command", {
+      args: { command: "echo wire-started; exec sleep 20" },
+      commandSeconds: 600,
+      commandBytes: 1024,
+    });
+    const deadline = Date.now() + 5000;
+    while (!progress.has(longCommand.id) && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(progress.get(longCommand.id), "wire-started\n");
+    child.stdin.write(
+      JSON.stringify({ type: "cancel", id: longCommand.id }) + "\n",
+    );
+    assert.equal((await longCommand.result).result?.isError, true);
     const identity = (await send("git_identity", {}).result).gitIdentity;
     assert.ok(identity && !("conflict" in identity));
     assert.equal(identity.name, "");

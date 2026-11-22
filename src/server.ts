@@ -1,3 +1,4 @@
+import { choiceInput } from "./choices.js";
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import cookie from "@fastify/cookie";
@@ -566,6 +567,16 @@ export async function createServer(
           { source: body.source },
         ),
       );
+  });
+  app.post("/api/conversations/:id/choices", async (request, reply) => {
+    const { id } = identifier.parse(request.params);
+    const { requestId: key, choice } = z
+      .object({ requestId, choice: choiceInput })
+      .strict()
+      .parse(request.body);
+    return reply
+      .code(202)
+      .send(await service.send(id, key, "", false, [], { choice }));
   });
   app.get("/api/conversations/:id/images", async (request, reply) => {
     const { id } = identifier.parse(request.params);

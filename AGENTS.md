@@ -161,7 +161,15 @@ auto-discover work-owned Skills, or replace a changed version during resume.
 - src/service.ts and src/state.ts: conversation metadata in a Pi Document,
   atomic input admission, per-conversation execution and interruption handling.
 - src/tools.ts: relay unmodified Pi read/write/edit/bash definitions to the work
-  UID; expose tools enumerated by configured MCP servers.
+  UID; expose tools enumerated by configured MCP servers. Long commands reuse
+  Pi bash and hold at most one worker operation and one bounded output preview
+  per active response. Keep command IDs in memory, scoped to that response;
+  stop and confirm cleanup on completion, abort, deadline and shutdown. Do not
+  stream unredacted output to inference, durable storage or the browser.
+- src/choices.ts: the choice tool runs alone and uses Pi's terminal tool result.
+  Derive the pending card from that session's latest history, and admit a
+  validated answer as ordinary deduplicated user input only after the response
+  is idle.
 - src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
   official MCP client and bounded attachment/output transfers.
 - src/provider.ts: model dispatch limit and active-conversation binding.

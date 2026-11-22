@@ -11,6 +11,7 @@ export const requestSchema = z
       "health",
       "init",
       "tool",
+      "long_command",
       "mcp_list",
       "mcp_call",
       "list",
@@ -48,6 +49,7 @@ export type WorkerResult = {
 };
 export const executableOperations = new Set<WorkerRequest["op"]>([
   "tool",
+  "long_command",
   "mcp_call",
   "mcp_list",
   "worktrees",
@@ -104,6 +106,21 @@ export const replySchema = z
     error: z.string().optional(),
   })
   .strict();
+export const maxLongCommandSeconds = 3600;
+export const commandPreviewWindow = 64 * 1024;
+export const commandProgressSchema = z
+  .object({
+    id: z.string().uuid(),
+    progress: z
+      .object({
+        text: z.string().max(commandPreviewWindow),
+        truncated: z.boolean(),
+      })
+      .strict(),
+  })
+  .strict();
+export type CommandPreview = z.infer<typeof commandProgressSchema>["progress"];
+export type CommandProgress = (preview: CommandPreview) => void;
 export interface Runner {
   ready(): Promise<void>;
   terminal?(io: TerminalIO, signal: AbortSignal): Promise<void>;
@@ -112,6 +129,7 @@ export interface Runner {
     op: WorkerRequest["op"],
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    onProgress?: CommandProgress,
   ): Promise<WorkerResult>;
   close(): Promise<void>;
 }

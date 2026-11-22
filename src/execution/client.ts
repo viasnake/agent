@@ -7,11 +7,18 @@ import { dirname } from "node:path";
 import { readInstallation } from "../installation.js";
 import { AppError } from "../security.js";
 import {
+  commandProgressSchema,
   executableOperations,
+  maxLongCommandSeconds,
   PROTOCOL_BYTES,
   replySchema,
 } from "./protocol.js";
-import type { Runner, WorkerRequest, WorkerResult } from "./protocol.js";
+import type {
+  CommandProgress,
+  Runner,
+  WorkerRequest,
+  WorkerResult,
+} from "./protocol.js";
 import { relayWorkerTerminal } from "./terminal.js";
 import type { TerminalIO } from "./terminal.js";
 
@@ -29,7 +36,11 @@ class WorkerProcess implements Runner {
   private child?: ChildProcessWithoutNullStreams;
   private pending = new Map<
     string,
-    { resolve: (value: WorkerResult) => void; reject: (error: Error) => void }
+    {
+      resolve: (value: WorkerResult) => void;
+      reject: (error: Error) => void;
+      onProgress?: CommandProgress;
+    }
   >();
   private opening?: Promise<void>;
   private buffer = Buffer.alloc(0);
@@ -92,10 +103,18 @@ class WorkerProcess implements Runner {
       let end: number;
       while ((end = this.buffer.indexOf(10)) >= 0) {
         try {
-          const reply = replySchema.parse(
-            JSON.parse(this.buffer.subarray(0, end).toString("utf8")),
+          const value: unknown = JSON.parse(
+            this.buffer.subarray(0, end).toString("utf8"),
           );
           this.buffer = this.buffer.subarray(end + 1);
+          if (value && typeof value === "object" && "progress" in value) {
+            const { id, progress } = commandProgressSchema.parse(value);
+            const onProgress = this.pending.get(id)?.onProgress;
+            if (!onProgress) throw new Error("Unsolicited command output");
+            onProgress(progress);
+            continue;
+          }
+          const reply = replySchema.parse(value);
           const pending = this.pending.get(reply.id);
           if (!pending) throw new Error("Unsolicited runner response");
           this.pending.delete(reply.id);
@@ -144,6 +163,7 @@ class WorkerProcess implements Runner {
     op: WorkerRequest["op"],
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    onProgress?: CommandProgress,
   ): Promise<WorkerResult> {
     if (!this.child || this.broken)
       throw new AppError(503, "作業環境を利用できません");
@@ -157,7 +177,7 @@ class WorkerProcess implements Runner {
       this.child?.stdin.write(JSON.stringify({ type: "cancel", id }) + "\n");
     try {
       return await new Promise<WorkerResult>((resolve, reject) => {
-        this.pending.set(id, { resolve, reject });
+        this.pending.set(id, { resolve, reject, onProgress });
         signal?.addEventListener("abort", cancel, { once: true });
         if (signal?.aborted) cancel();
         timer = setTimeout(
@@ -165,7 +185,11 @@ class WorkerProcess implements Runner {
             cancel();
             this.fail();
           },
-          op === "health" ? 10_000 : 330_000,
+          op === "health"
+            ? 10_000
+            : op === "long_command"
+              ? (maxLongCommandSeconds + 30) * 1000
+              : 330_000,
         );
         this.child!.stdin.write(wire, (error) => {
           if (error) this.fail();
@@ -220,6 +244,7 @@ export class WorkerClient implements Runner {
     op: WorkerRequest["op"],
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    onProgress?: CommandProgress,
   ): Promise<WorkerResult> {
     if (this.broken)
       throw new Error("Worker cleanup failed; restart the service");
@@ -237,7 +262,7 @@ export class WorkerClient implements Runner {
     const combined = signal
       ? AbortSignal.any([controller.signal, signal])
       : controller.signal;
-    const finished = this.execute(id, op, args, combined);
+    const finished = this.execute(id, op, args, combined, onProgress);
     this.operations.set(id, { controller, finished });
     try {
       return await finished;
@@ -251,8 +276,11 @@ export class WorkerClient implements Runner {
     op: WorkerRequest["op"],
     args: Record<string, unknown>,
     signal: AbortSignal,
+    onProgress?: CommandProgress,
   ) {
-    return this.runOperation(signal, (worker) => worker.call(id, op, args));
+    return this.runOperation(signal, (worker) =>
+      worker.call(id, op, args, undefined, onProgress),
+    );
   }
 
   async terminal(io: TerminalIO, signal: AbortSignal): Promise<void> {

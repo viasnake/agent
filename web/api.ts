@@ -1,3 +1,5 @@
+import type { PendingQuestion } from "../src/choices.js";
+import type { LongCommand } from "../src/long-command.js";
 import type { ConversationUsage } from "../src/usage.js";
 import type { ModelSelection } from "../src/state.js";
 
@@ -35,6 +37,8 @@ export type View = {
   cursor: unknown;
   modelConfigured: boolean;
   pendingInputs: number;
+  question?: PendingQuestion;
+  command?: ReturnType<LongCommand["snapshot"]>;
   progress: {
     generating: boolean;
     partial: string;

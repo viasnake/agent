@@ -11,6 +11,7 @@ import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import type { Config } from "../src/config.js";
 import type {
+  CommandProgress,
   Runner,
   WorkerRequest,
   WorkerResult,
@@ -34,6 +35,7 @@ export class TestRunner implements Runner {
     op: WorkerRequest["op"],
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    onProgress?: CommandProgress,
   ): Promise<WorkerResult> {
     let worker = this.workers.get(conversationId);
     if (!worker) {
@@ -43,6 +45,7 @@ export class TestRunner implements Runner {
     return worker.execute(
       { id: randomUUID(), conversationId, op, args },
       signal ?? new AbortController().signal,
+      onProgress,
     );
   }
   async close() {

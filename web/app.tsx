@@ -59,6 +59,7 @@ type ThreadProps = {
   attachments: File[];
   setAttachments: (files: File[]) => void;
   onSend: (message: AppendMessage) => Promise<void>;
+  onChoice: (entryId: number, option: number) => Promise<void>;
   onEarlier: () => Promise<void>;
 };
 function SendButton({
@@ -96,6 +97,7 @@ function Chat({
   attachments,
   setAttachments,
   onSend,
+  onChoice,
   onEarlier,
   modelPicker,
   loading,
@@ -224,6 +226,50 @@ function Chat({
                   )
                 }
               </ThreadPrimitive.Messages>
+              {view?.question && (
+                <div
+                  className="conversation-notice d-grid gap-2"
+                  role="group"
+                  aria-labelledby="pending-question"
+                >
+                  <span id="pending-question" className="text-break">
+                    {view.question.question}
+                  </span>
+                  <div className="d-flex flex-wrap gap-2">
+                    {view.question.options.map((option, index) => (
+                      <button
+                        key={index}
+                        type="button"
+                        className="btn-outline theme-primary btn-sm text-break"
+                        disabled={sending || waitingForModel}
+                        onClick={() =>
+                          void onChoice(view.question!.entryId, index)
+                        }
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {view?.command?.state === "running" && (
+                <details
+                  className="activity-details tool-card"
+                  data-aui-quote-selectable="false"
+                >
+                  <summary>コマンドの途中出力</summary>
+                  {view.command.output ? (
+                    <pre
+                      className="overflow-auto"
+                      style={{ maxBlockSize: "12rem" }}
+                    >
+                      {view.command.output}
+                    </pre>
+                  ) : (
+                    <p className="fg-2">出力を待っています…</p>
+                  )}
+                </details>
+              )}
               {view?.conversation.status === "interrupted" && (
                 <div id="detail" className="conversation-notice" role="status">
                   {view.conversation.detail}
@@ -673,6 +719,36 @@ function App() {
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [sidebar]);
+  const [choiceFocus, setChoiceFocus] = useState<string | null>(null);
+  useEffect(() => {
+    if (sending || !choiceFocus) return;
+    if (selectedRef.current === choiceFocus)
+      document.getElementById("message")?.focus({ preventScroll: true });
+    setChoiceFocus(null);
+  }, [choiceFocus, sending]);
+  async function sendChoice(entryId: number, option: number) {
+    const id = selectedRef.current;
+    if (!id || sending) return;
+    const choice = { entryId, option };
+    const key = `choice-${id}-${entryId}`;
+    setSending(true);
+    setError("");
+    try {
+      await api(`/api/conversations/${id}/choices`, "POST", {
+        requestId: await requestId(key, choice),
+        choice,
+      });
+      forget(key);
+      setChoiceFocus(id);
+      await api<View>(`/api/conversations/${id}`).then(merge).catch(notice);
+      await list().catch(notice);
+    } catch (error) {
+      notice(error);
+    } finally {
+      setSending(false);
+    }
+  }
+
   async function send(message: AppendMessage) {
     const text = message.content
       .filter((part) => part.type === "text")
@@ -1410,6 +1486,7 @@ function App() {
                       attachments={attachments}
                       setAttachments={setAttachments}
                       onSend={send}
+                      onChoice={sendChoice}
                       onEarlier={earlier}
                     />
                   </MessageActions.Provider>
