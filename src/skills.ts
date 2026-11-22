@@ -17,9 +17,6 @@ import { parseDocument } from "yaml";
 import { z } from "zod";
 import { AppError, byteHash, hash, safeRelative } from "./security.js";
 
-const autoUpdateFile = ".agent-auto-update";
-const autoUpdateMarker = "enabled\n";
-
 export const skillName = z
   .string()
   .max(64)
@@ -41,7 +38,6 @@ export type SkillsView = {
     state: "ready" | "invalid";
     error?: string;
     revision?: string;
-    autoUpdate?: boolean;
   }[];
   errors: string[];
 };
@@ -258,11 +254,9 @@ export class SkillsLoader {
       const before = stamp(await handle.stat());
       const dir = await opendir(`/proc/self/fd/${handle.fd}`);
       for await (const entry of dir) {
-        const child = relative ? `${relative}/${entry.name}` : entry.name;
-        if (child !== autoUpdateFile && ++count > SKILL_LIMITS.files)
+        if (++count > SKILL_LIMITS.files)
           failure("Skill のファイル件数が上限を超えています");
-        if (child === autoUpdateFile && !entry.isFile())
-          failure("自動更新設定のファイル種別が不正です");
+        const child = relative ? `${relative}/${entry.name}` : entry.name;
         safeRelative(child);
         if (entry.isDirectory()) {
           const next = await this.directory(
@@ -319,19 +313,10 @@ export class SkillsLoader {
     const revision = hash([...files]);
     if (expected && expected !== revision)
       failure("Skill が変更されています。再読み込みして確認してください");
-    return { revision, files };
-  }
-  private async autoUpdateEnabled(name: string, files: Map<string, string>) {
-    const expected = files.get(autoUpdateFile);
-    if (!expected) return false;
-    return (
-      (
-        await this.read(name, autoUpdateFile, autoUpdateMarker.length, expected)
-      ).toString("utf8") === autoUpdateMarker
-    );
+    return revision;
   }
   async detail(name: string) {
-    const { revision } = await this.revision(name);
+    const revision = await this.revision(name);
     const content = text(
       await this.read(name, "SKILL.md", SKILL_LIMITS.fileBytes),
     );
@@ -340,11 +325,10 @@ export class SkillsLoader {
   }
   // Mutations run under the service's admission lock, with all execution idle.
   // Stage on the same mount in the private control directory; publish by rename.
-  async create(input: SkillImport, autoUpdate = false) {
+  async create(input: SkillImport) {
     await this.assertWritable();
     const files = validateSkillImport(input);
     const name = parseSkill(files.get("SKILL.md")!).metadata.name;
-    if (autoUpdate) files.set(autoUpdateFile, Buffer.from(autoUpdateMarker));
     const names = await readdir(this.root);
     if (names.includes(name)) failure("同名の Skill があります");
     if (names.length >= SKILL_LIMITS.entries)
@@ -370,47 +354,9 @@ export class SkillsLoader {
       await rm(stage, { recursive: true, force: true });
     }
   }
-  async setAutoUpdate(name: string, enabled: boolean, expected: string) {
+  async update(name: string, content: string, expected: string) {
     await this.assertWritable();
-    const { files } = await this.revision(name, expected);
-    const installed = await this.read(
-      name,
-      "SKILL.md",
-      SKILL_LIMITS.fileBytes,
-      files.get("SKILL.md"),
-    );
-    if (parseSkill(installed).metadata.name !== name)
-      failure("Skill 名が指定と一致しません");
-    if (!enabled) {
-      await this.revision(name, expected);
-      await rm(join(this.root, name, autoUpdateFile), { force: true });
-      return;
-    }
-    const stage = await mkdtemp(join(dirname(this.root), "control/skill-"));
-    try {
-      await this.write(
-        join(stage, autoUpdateFile),
-        Buffer.from(autoUpdateMarker),
-      );
-      await this.revision(name, expected);
-      await rename(
-        join(stage, autoUpdateFile),
-        join(this.root, name, autoUpdateFile),
-      );
-    } finally {
-      await rm(stage, { recursive: true, force: true });
-    }
-  }
-  async update(
-    name: string,
-    content: string,
-    expected: string,
-    automatic = false,
-  ) {
-    await this.assertWritable();
-    const { files } = await this.revision(name, expected);
-    if (automatic && !(await this.autoUpdateEnabled(name, files)))
-      failure("この Skill の自動更新はオフです");
+    await this.revision(name, expected);
     const bytes = validateSkillBody(name, content);
     await this.checkCatalogBytes(name, bytes.length);
     const stage = await mkdtemp(join(dirname(this.root), "control/skill-"));
@@ -507,8 +453,6 @@ export class SkillsLoader {
           if (metadata.name !== entry.name)
             failure("Skill 名とディレクトリ名が一致しません");
           const digest = byteHash(content);
-          row.autoUpdate = await this.autoUpdateEnabled(entry.name, files);
-          files.delete(autoUpdateFile);
           const version = hash([digest, [...files]]);
           skills.set(metadata.name, { metadata, version, files, digest });
           Object.assign(row, {
@@ -660,8 +604,6 @@ function validateSkillImport(input: SkillImport): Map<string, Buffer> {
   let total = 0;
   for (const { path, data } of input.files) {
     safeRelative(path);
-    if (path.split("/")[0] === autoUpdateFile)
-      failure("自動更新設定は取り込めません");
     if (/[\x00-\x1f\x7f]/.test(path)) failure("Skill のパスが不正です");
     const parts = path.split("/");
     if (parts.length > SKILL_LIMITS.depth + 1)

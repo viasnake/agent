@@ -318,36 +318,6 @@ export function Skills({
           {skill.compatibility && <p>互換性: {skill.compatibility}</p>}
           {skill.error && <p role="alert">{skill.error}</p>}
           <div className="d-flex align-items-center flex-wrap gap-3 border-top pt-4">
-            {skill.state === "ready" && skill.revision && (
-              <label className="settings-check me-2">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  className="form-check-input"
-                  aria-label={`${skill.name} の自動更新`}
-                  checked={!!skill.autoUpdate}
-                  disabled={busy || !view?.writable || !!draft}
-                  onChange={(event) => {
-                    const enabled = event.currentTarget.checked;
-                    void action(async () => {
-                      setView(
-                        await api<SkillsManagement>(
-                          `/api/skills/${skill.name}/auto-update`,
-                          "PUT",
-                          { enabled, revision: skill.revision },
-                        ),
-                      );
-                      notify(
-                        enabled
-                          ? "自動更新をオンにしました"
-                          : "自動更新をオフにしました",
-                      );
-                    });
-                  }}
-                />
-                自動更新
-              </label>
-            )}
             <button
               type="button"
               className="btn-text theme-secondary"

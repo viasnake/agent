@@ -165,7 +165,7 @@ export function skillWriteTool(
       {
         name: "skill_save",
         description:
-          "Create a reusable Skill or update one whose auto-update is enabled, using verified lessons from the current work or a direct user request. Send the full SKILL.md with YAML frontmatter and a short user-facing summary. No resource files, secrets, or private data. Call only for a substantive change, at most once per response. Preparation is not publication.",
+          "Create a reusable Skill or update a safely loaded existing Skill, using verified lessons from the current work or a direct user request. Send the full SKILL.md with YAML frontmatter and a short user-facing summary. No resource files, secrets, or private data. Call only for a substantive change, at most once per response. Preparation is not publication.",
         parameters: z.toJSONSchema(args),
         replay: "unsafe",
         execute: async (input, api) => {

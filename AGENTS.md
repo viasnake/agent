@@ -148,14 +148,11 @@ search index or Git job system.
 
 Shared Skills live only in dataRoot/skills, with control ownership, root-owned
 ancestors and read/execute access for work. Settings can import, edit SKILL.md and
-delete Skills only while all execution is idle, under the admission lock. Users
-can toggle automatic maintenance independently of execution. Store the setting
-as trusted control metadata, never in imported or model-authored Markdown. An
+delete Skills only while all execution is idle, under the admission lock. An
 ordinary response may propose one reusable SKILL.md creation or update without
-an extra model pass; do not persist unverified, private, or permission-bearing
-material. Default existing and imported Skills to manual management. Automatically
-created Skills start with maintenance enabled. Check the target's revision and
-opt-in again at publication. Publish only after successful response completion
+an extra model pass or per-Skill opt-in; do not persist unverified, private, or
+permission-bearing material. Check the target's revision again at publication.
+Publish only after successful response completion
 and while all runs and terminals are idle; report the confirmed change in the
 requesting conversation. Do not replay pending drafts after restart. Automatic
 maintenance never imports resources or deletes Skills. Validate

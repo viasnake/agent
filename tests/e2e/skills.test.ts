@@ -76,24 +76,16 @@ test("Skills settings import folders, edit and delete with validation in light, 
     await page.getByRole("button", { name: "Skills", exact: true }).click();
     const panel = page.getByRole("region", { name: "Skills 一覧" });
     await panel.getByText("release-checklist", { exact: true }).waitFor();
-    const toggle = panel.getByRole("switch", {
-      name: "release-checklist の自動更新",
+    assert.equal(await panel.getByRole("switch").count(), 0);
+    assert.equal(await panel.getByRole("checkbox").count(), 0);
+    const skillEdit = panel.getByRole("button", {
+      name: "release-checklist を編集",
     });
-    assert.equal(await toggle.isChecked(), true);
-    await toggle.click();
-    await page.getByText("自動更新をオフにしました", { exact: true }).waitFor();
-    assert.equal(await toggle.isChecked(), false);
-    assert.equal(
-      await panel
-        .getByRole("switch", { name: "pdf-processing の自動更新" })
-        .isChecked(),
-      false,
-    );
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 844 });
-      await toggle.scrollIntoViewIfNeeded();
+      await skillEdit.scrollIntoViewIfNeeded();
       await page.screenshot({
-        path: `test-results/skill-auto-update-${width}.png`,
+        path: `test-results/skill-management-${width}.png`,
       });
     }
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -113,7 +105,6 @@ test("Skills settings import folders, edit and delete with validation in light, 
       (await s.loader.detail("release-checklist")).content,
       reviewed,
     );
-    assert.equal(await toggle.isChecked(), false);
     await panel.getByText("pdf-processing", { exact: true }).waitFor();
     await panel.getByText("PDF からテキストを抽出", { exact: true }).waitFor();
     await panel.getByText("互換性: Python 3", { exact: true }).waitFor();
