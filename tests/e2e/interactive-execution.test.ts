@@ -61,19 +61,17 @@ test("the conversation displays live command output and submits a choice without
     const composer = page.locator("#message");
     await composer.fill("始めてください");
     await page.locator("#send").click();
-    await page.getByText("コマンドの途中出力", { exact: true }).click();
-    await page
-      .locator("details[open] pre")
-      .filter({ hasText: /^first-log\s*$/ })
-      .waitFor();
+    const disclosure = page.getByText("コマンドの途中出力", { exact: true });
+    const preview = page
+      .locator("details[open]", { has: disclosure })
+      .locator("pre");
+    await disclosure.click();
+    await preview.filter({ hasText: /^first-log\s*$/ }).waitFor();
     await writeFile(
       join(f.root, "work/conversations", id, "attachments/release"),
       "",
     );
-    await page
-      .locator("details[open] pre")
-      .filter({ hasText: "later-log" })
-      .waitFor();
+    await preview.filter({ hasText: "later-log" }).waitFor();
     allowQuestion = true;
     const choose = page.getByRole("button", {
       name: "指定のブランチ",
