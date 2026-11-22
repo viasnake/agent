@@ -246,6 +246,7 @@ function toolLabel(name: string): string {
     session_search: "過去の会話の検索",
     session_read: "過去の会話の読み取り",
     skill_activate: "Skill の読み込み",
+    skill_save: "Skill の保存準備",
     skill_read_resource: "Skill の資料の読み取り",
   };
   return (

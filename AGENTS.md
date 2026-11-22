@@ -148,7 +148,14 @@ search index or Git job system.
 
 Shared Skills live only in dataRoot/skills, with control ownership, root-owned
 ancestors and read/execute access for work. Settings can import, edit SKILL.md and
-delete Skills only while all execution is idle, under the admission lock. Validate
+delete Skills only while all execution is idle, under the admission lock. An
+ordinary response may propose one reusable SKILL.md creation or update without
+an extra model pass or per-Skill opt-in; do not persist unverified, private, or
+permission-bearing material. Check the target's revision again at publication.
+Publish only after successful response completion
+and while all runs and terminals are idle; report the confirmed change in the
+requesting conversation. Do not replay pending drafts after restart. Automatic
+maintenance never imports resources or deletes Skills. Validate
 bounded imports before publishing and revision-check edits and deletion. The
 stopped-service installer migrates only validated legacy root-owned trees,
 preserving their contents. Never repair unsafe ownership or permissions.

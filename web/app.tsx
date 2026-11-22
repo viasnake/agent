@@ -271,6 +271,11 @@ function Chat({
                   )}
                 </details>
               )}
+              {view?.conversation.skillNotice && (
+                <div className="conversation-notice" role="status">
+                  {view.conversation.skillNotice}
+                </div>
+              )}
               {view?.conversation.status === "interrupted" && (
                 <div id="detail" className="conversation-notice" role="status">
                   {view.conversation.detail}
