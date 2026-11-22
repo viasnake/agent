@@ -53,7 +53,13 @@ import { ConversationsDoc, promoteRecentModel } from "./state.js";
 import type { Conversation } from "./state.js";
 import { AppError, hash, safeRelative } from "./security.js";
 import { WorkerCleanupError, WorkerClient } from "./execution/client.js";
-import type { Runner } from "./execution/protocol.js";
+import { maxLongCommandSeconds } from "./execution/protocol.js";
+import type { CommandProgress, Runner } from "./execution/protocol.js";
+import {
+  findCommand,
+  LongCommand,
+  redactCommandPreview,
+} from "./long-command.js";
 import type { TerminalIO } from "./execution/terminal.js";
 import { gitIdentityInput } from "./execution/git-identity.js";
 import type { GitReviewRequest, GitReviewResult } from "./git-review.js";
@@ -110,6 +116,7 @@ type Active = {
   timer: NodeJS.Timeout;
   credentials: ReturnType<typeof sharedCredentials>;
   controller: AbortController;
+  command?: LongCommand;
 };
 const interrupted =
   "実行を中断しました。Shell・CLI・外部更新は完了した可能性があります。履歴と作業ファイルを確認し、通常の CLI/API で状態を調べてから続けてください。判断できない場合は利用者に確認し、同じ更新を無条件に再送しないでください。";
@@ -550,6 +557,11 @@ export class AgentService {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ) {
+    if (server.transport === "stdio" && this.runs.get(id)?.command?.running)
+      throw new AppError(
+        409,
+        "先に実行中のコマンドを確認または停止してください",
+      );
     try {
       if (server.transport === "stdio") {
         const result = await this.runner.call(
@@ -1188,12 +1200,33 @@ export class AgentService {
   ) {
     const id = await this.toolConversation(piId);
     const active = this.runs.get(id)!;
-    const credentials = active.credentials;
-    signal = AbortSignal.any([
-      ...(signal ? [signal] : []),
-      active.controller.signal,
-      AbortSignal.timeout(active.limits.commandSeconds * 1000),
-    ]);
+    if (active.command?.running)
+      throw new AppError(
+        409,
+        "先に実行中のコマンドを確認または停止してください",
+      );
+    return this.runWorkspaceTool(
+      active,
+      name,
+      args,
+      AbortSignal.any([
+        ...(signal ? [signal] : []),
+        active.controller.signal,
+        AbortSignal.timeout(active.limits.commandSeconds * 1000),
+      ]),
+      active.limits.commandSeconds,
+    );
+  }
+
+  private async runWorkspaceTool(
+    active: Active,
+    name: string,
+    args: unknown,
+    signal: AbortSignal,
+    commandSeconds: number,
+    onProgress?: CommandProgress,
+  ) {
+    const { id, piId, credentials } = active;
     let signer: Awaited<ReturnType<typeof openSshAgent>> | undefined;
     try {
       if (name === "bash" && credentials.keys.length) {
@@ -1207,17 +1240,18 @@ export class AgentService {
       await this.toolConversation(piId);
       const result = await this.runner.call(
         id,
-        "tool",
+        onProgress ? "long_command" : "tool",
         {
           name,
           args,
           ...(name === "bash"
             ? { environment: credentials.env, sshSocket: signer?.socket }
             : {}),
-          commandSeconds: active.limits.commandSeconds,
+          commandSeconds,
           commandBytes: active.limits.commandBytes,
         },
         signal,
+        onProgress,
       );
       if (!result.result) throw new Error("Missing worker result");
       return this.sanitize(result.result);
@@ -1227,13 +1261,87 @@ export class AgentService {
           await signer.close();
         } catch (error) {
           this.fail();
-          throw error;
+          throw new WorkerCleanupError("SSH signer cleanup failed", {
+            cause: error,
+          });
         } finally {
           active.signers.delete(signer);
         }
       }
     }
   }
+  async startCommand(
+    piId: ConversationId,
+    args: { command: string; timeout?: number },
+    signal?: AbortSignal,
+  ) {
+    const id = await this.toolConversation(piId);
+    const active = this.runs.get(id)!;
+    signal?.throwIfAborted();
+    if (active.command?.running)
+      throw new AppError(
+        409,
+        "先に実行中のコマンドを確認または停止してください",
+      );
+    const seconds = Math.min(
+      maxLongCommandSeconds,
+      active.limits.runSeconds,
+      args.timeout ?? Infinity,
+    );
+    const command = new LongCommand(
+      (bounded, progress) =>
+        this.runWorkspaceTool(
+          active,
+          "bash",
+          { command: args.command },
+          bounded,
+          seconds,
+          progress,
+        ),
+      active.controller.signal,
+      seconds * 1000,
+      (preview) =>
+        redactCommandPreview(preview, [
+          ...this.secrets,
+          ...this.settings.secrets(),
+        ]),
+      () => this.notify(),
+      (error) => {
+        if (!(error instanceof WorkerCleanupError)) return false;
+        this.fail();
+        return true;
+      },
+    );
+    active.command = command;
+    this.notify();
+    await command.wait(750, signal);
+    return command.snapshot();
+  }
+
+  async checkCommand(
+    piId: ConversationId,
+    commandId: string,
+    waitMs: number,
+    signal?: AbortSignal,
+  ) {
+    const id = await this.toolConversation(piId);
+    const command = findCommand(this.runs.get(id)?.command, commandId);
+    await command.wait(waitMs, signal);
+    return command.snapshot();
+  }
+
+  async stopCommand(
+    piId: ConversationId,
+    commandId: string,
+    signal?: AbortSignal,
+  ) {
+    const id = await this.toolConversation(piId);
+    const command = findCommand(this.runs.get(id)?.command, commandId);
+    signal?.throwIfAborted();
+    await command.stop();
+    return command.snapshot();
+  }
+
   private configuredModel(modelId: string, model?: string) {
     const config = this.settings
       .snapshot()
@@ -1573,6 +1681,8 @@ ${this.config.instructions}${this.redact(catalog)}`;
         if (version !== active.version) return false;
         const current = await this.conversation(active.id);
         if (current.status !== "running") return true;
+        await active.command?.stop();
+        this.assertHealthy();
         const cleanup = await this.runner.call(active.id, "cleanup", {});
         if (!cleanup.cleanup) {
           throw new Error("Unconfirmed child cleanup");
@@ -1654,6 +1764,8 @@ ${this.config.instructions}${this.redact(catalog)}`;
       active?.controller.abort();
       for (const signer of active?.signers ?? []) await signer.close();
       await this.abortRetainingInput(await this.pi(conversation));
+      await active?.command?.stop();
+      this.assertHealthy();
       await this.runner.ready();
       if (!(await this.runner.call(id, "cleanup", {})).cleanup) {
         this.fail();
@@ -1998,6 +2110,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
         ),
       pendingInputs:
         inbox?.items.filter((item) => "content" in item).length ?? 0,
+      command: this.runs.get(id)?.command?.snapshot(),
       progress: {
         generating: !!live?.generation,
         reasoning: this.redact(
@@ -2036,6 +2149,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
         active.controller.abort();
         clearTimeout(active.timer);
         for (const signer of active.signers) await signer.close();
+        await active.command?.stop();
       }
       this.closing = true;
       this.terminalRun?.controller.abort();

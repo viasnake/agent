@@ -224,6 +224,24 @@ function Chat({
                   )
                 }
               </ThreadPrimitive.Messages>
+              {view?.command?.state === "running" && (
+                <details
+                  className="activity-details tool-card"
+                  data-aui-quote-selectable="false"
+                >
+                  <summary>コマンドの途中出力</summary>
+                  {view.command.output ? (
+                    <pre
+                      className="overflow-auto"
+                      style={{ maxBlockSize: "12rem" }}
+                    >
+                      {view.command.output}
+                    </pre>
+                  ) : (
+                    <p className="fg-2">出力を待っています…</p>
+                  )}
+                </details>
+              )}
               {view?.conversation.status === "interrupted" && (
                 <div id="detail" className="conversation-notice" role="status">
                   {view.conversation.detail}

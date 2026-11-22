@@ -1,25 +1,112 @@
-import { hash } from "./security.js";
+import { z } from "zod";
+import type { LongCommand } from "./long-command.js";
+import { AppError, hash } from "./security.js";
 import type { McpConfig } from "./settings.js";
-import { defineExtension } from "@earendil-works/pi-durable";
+import {
+  defineExtension,
+  type ToolRegistration,
+} from "@earendil-works/pi-durable";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import type { ToolInfo } from "./execution/protocol.js";
 import type { AgentService } from "./service.js";
 
+const startInput = z
+  .object({
+    command: z.string().min(1).max(64000),
+    timeout: z.number().int().min(1).max(3600).optional(),
+  })
+  .strict();
+const commandInput = z.object({ commandId: z.string().uuid() }).strict();
+const statusInput = commandInput.extend({
+  waitSeconds: z.number().min(0).max(60).optional(),
+});
+
+function commandResult(command: ReturnType<LongCommand["snapshot"]>) {
+  return {
+    output: [
+      {
+        type: "text" as const,
+        text: `Command ID: ${command.id}\nState: ${command.state}${command.exitCode === undefined ? "" : `\nExit code: ${command.exitCode}`}\n${command.output}`,
+      },
+    ],
+    isError:
+      command.state === "failed" ||
+      command.state === "timed_out" ||
+      (command.exitCode !== undefined && command.exitCode !== 0),
+  };
+}
+
 export function agentTools(service: AgentService) {
   return defineExtension({
     name: "workspace",
-    tools: createCodingTools().tools!.map((tool) => ({
-      ...tool,
-      replay: "unsafe" as const,
-      execute: async (args, api, context) => {
-        return service.callTool(
-          api.conversationId,
-          tool.name,
-          args,
-          context.abortSignal,
-        );
+    tools: [
+      ...createCodingTools().tools!.map(
+        (tool): ToolRegistration => ({
+          ...tool,
+          replay: "unsafe" as const,
+          execute: async (args, api, context) => {
+            return service.callTool(
+              api.conversationId,
+              tool.name,
+              args,
+              context.abortSignal,
+            );
+          },
+        }),
+      ),
+      {
+        name: "bash_start",
+        description:
+          "Start a long Bash command in the session directory. Returns a command ID, state, and available output after a short wait. Use bash_status to check it or bash_stop to cancel it. Only one command at a time, with the conversation's execution deadline. While it runs, do not call other workspace or stdio MCP operations. Check the final state before reporting success. The command is stopped when this response ends. No stdin or PTY.",
+        parameters: z.toJSONSchema(startInput),
+        replay: "unsafe",
+        execute: async (value, api, context) => {
+          const args = startInput.parse(value);
+          return commandResult(
+            await service.startCommand(
+              api.conversationId,
+              args,
+              context.abortSignal,
+            ),
+          );
+        },
       },
-    })),
+      {
+        name: "bash_status",
+        description:
+          "Check a command started by bash_start in this response. While running, shows a bounded preview of recent output; after exit, shows the retained tail and exit code. Waits up to waitSeconds (default 10, max 60) if still running.",
+        parameters: z.toJSONSchema(statusInput),
+        replay: "unsafe",
+        execute: async (value, api, context) => {
+          const { commandId, waitSeconds } = statusInput.parse(value);
+          return commandResult(
+            await service.checkCommand(
+              api.conversationId,
+              commandId,
+              (waitSeconds ?? 10) * 1000,
+              context.abortSignal,
+            ),
+          );
+        },
+      },
+      {
+        name: "bash_stop",
+        description:
+          "Stop a command started by bash_start in this response and wait for cleanup. Does not undo side effects. Returns the final state if it already exited.",
+        parameters: z.toJSONSchema(commandInput),
+        replay: "unsafe",
+        execute: async (value, api, context) => {
+          const { commandId } = commandInput.parse(value);
+          return commandResult(
+            await service.stopCommand(
+              api.conversationId,
+              commandId,
+              context.abortSignal,
+            ),
+          );
+        },
+      },
+    ],
   });
 }
 export function mcpToolName(server: string, tool: string): string {
