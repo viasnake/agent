@@ -10,7 +10,7 @@ export function serveTerminal(
   socket: WebSocket,
   service: AgentService,
   sessionValid: () => boolean,
-): void {
+): Promise<void> {
   const controller = new AbortController();
   let input: Parameters<TerminalIO["ready"]>[0] | undefined;
   let outputBytes = 0;
@@ -70,7 +70,7 @@ export function serveTerminal(
       if (error) close(1011);
     });
   };
-  void service
+  return service
     .terminal(
       {
         ready: (write) => {

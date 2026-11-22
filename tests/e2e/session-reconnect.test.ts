@@ -6,7 +6,7 @@ import { chromium } from "playwright";
 import { fixture } from "../support.js";
 import { createServer } from "../../src/server.js";
 
-test("deletion renews a browser session after server restart without losing a draft", async () => {
+test("a restarted server gets a new browser session and restores the live subscription without losing a draft", async () => {
   const f = await fixture();
   const target = await f.service.create(randomUUID(), "削除するセッション");
   const visible = await f.service.create(randomUUID(), "表示中のセッション");
@@ -65,12 +65,15 @@ test("deletion renews a browser session after server restart without losing a dr
       "server shutdown closes the active conversation subscription",
     );
     server = await createServer(f.service, resolve("dist/web") + "/");
-    await listen();
-    const rejected = page.waitForResponse(
-      (r) => r.request().method() === "DELETE" && r.status() === 401,
+    const restored = page.waitForResponse(
+      (response) =>
+        response.url() === `${origin}/api/conversations/${visible.id}/events` &&
+        response.ok(),
+      { timeout: 15000 },
     );
+    await listen();
+    await restored;
     await dialog.getByRole("button", { name: "削除", exact: true }).click();
-    await rejected;
     await dialog.waitFor({ state: "hidden", timeout: 5000 });
     assert.equal(
       (await f.service.list()).some((s) => s.id === target.id),

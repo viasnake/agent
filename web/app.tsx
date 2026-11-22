@@ -30,6 +30,7 @@ import {
   modelChoices,
   ApiError,
   setCsrf,
+  renewBrowserSession,
   fileSize,
   forget,
   requestId,
@@ -619,7 +620,8 @@ function App() {
     const id = selected;
     setLoadError("");
     setConnection("接続中");
-    const events = new EventSource(`/api/conversations/${id}/events`);
+    let events: EventSource | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
     void api<View>(`/api/conversations/${id}`)
       .then((next) => {
         if (isCurrent()) {
@@ -635,24 +637,50 @@ function App() {
         else if (!snapshotReceived)
           setLoadError("セッションを読み込めませんでした");
       });
-    events.addEventListener("snapshot", (event) => {
-      if (!isCurrent()) return;
-      const next: View = JSON.parse((event as MessageEvent).data);
-      if (!historyInitialized) setCursor(next.cursor);
-      historyInitialized = true;
-      snapshotReceived = true;
-      setLoadError("");
-      merge(next);
-    });
-    events.onopen = () => {
-      if (isCurrent()) setConnection("接続中");
+    const reconnect = () => {
+      retry = setTimeout(() => {
+        void renewBrowserSession().then(
+          () => {
+            if (isCurrent()) subscribe();
+          },
+          () => {
+            if (isCurrent()) reconnect();
+          },
+        );
+      }, 1500);
     };
-    events.onerror = () => {
-      if (isCurrent()) setConnection("再接続中");
+    const subscribe = () => {
+      const stream = (events = new EventSource(
+        `/api/conversations/${id}/events`,
+      ));
+      const current = () => isCurrent() && events === stream;
+      stream.addEventListener("snapshot", (event) => {
+        if (!current()) return;
+        const next: View = JSON.parse((event as MessageEvent).data);
+        if (!historyInitialized) setCursor(next.cursor);
+        historyInitialized = true;
+        snapshotReceived = true;
+        setLoadError("");
+        merge(next);
+      });
+      stream.onopen = () => {
+        if (current()) setConnection("接続中");
+      };
+      stream.onerror = () => {
+        if (!current()) return;
+        setConnection("再接続中");
+        // EventSource retries transport failures but not a rejected browser session.
+        if (stream.readyState === EventSource.CLOSED) {
+          events = undefined;
+          reconnect();
+        }
+      };
     };
+    subscribe();
     return () => {
       active = false;
-      events.close();
+      clearTimeout(retry);
+      events?.close();
     };
   }, [ready, selected, reload, merge, notice]);
   const currentStatus = view?.conversation.status;

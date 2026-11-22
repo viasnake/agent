@@ -17,8 +17,9 @@ Python 3.14.10 for Agent. Keep them root-owned under /opt/agent-node and
 on or replace host Node.js/Python. Ubuntu systemd, nftables, sudo and other
 OS utilities remain host dependencies. Build as the invoking regular user;
 use sudo only for OS packages, deployment and service control. --build-only
-must never request sudo or change the installation. Updates require an
-explicitly stopped service and preserve settings, credentials and work data.
+must never request sudo or change the installation. Updates preserve settings,
+credentials and work data. Runtime, installation and incompatible storage
+changes require an explicitly stopped service.
 
 Do not add a host daemon, VM manager, automatic host startup, Proxmox,
 Firecracker, distributed workers, workflow engine or plugin management system.
@@ -202,9 +203,16 @@ auto-discover work-owned Skills, or replace a changed version during resume.
   Never format, mount, partition or create storage here. Record the actual users
   and persistent mount in root-owned /etc/agent/installation.json. Refuse missing
   or changed mounts, shared identities, unsafe ownership and unexpected existing
-  installations. Updates require a stopped service and preserve configuration,
-  credentials and work files; keep the previous application/runtime as backups.
-  Use Ubuntu's resolver configuration without modifying it; allow only its DNS
+  installations. Keep the previous application/runtime as backups. For hot
+  updates, stage the app without replacing any live files. Use only the private
+  systemd runtime socket to stop admission and wait for requests, runs and PTYs
+  to finish. Release admission on timeout or installer disconnect before stop
+  is committed. Switch only after a clean exit, with the single SQLite writer
+  lock unchanged. Never automatically stop a new process of uncertain readiness.
+  Keep `agentHotDeployEpoch` in `package.json` equal for mutually compatible
+  persisted data and configuration; increment it for incompatible changes.
+  Require a stopped update for changes to `install/` or the locked Pi Durable
+  package. Use Ubuntu's resolver configuration without modifying it; allow only its DNS
   addresses on TCP/UDP 53. Apply nftables atomically and fail closed on errors.
 
 Inspect installed SDK exports/declarations before changing integration code.

@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/chord/context";
 import type { AgentService } from "./service.js";
 import { AppError } from "./security.js";
+import { DeploymentGate } from "./deploy.js";
 import { gitChangesQuery, gitPatchQuery } from "./git-review.js";
 import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
@@ -112,6 +113,7 @@ function inputError(error: z.ZodError): string {
 export async function createServer(
   service: AgentService,
   webRoot = fileURLToPath(new URL("../web/", import.meta.url)),
+  deployment = new DeploymentGate(),
 ): Promise<FastifyInstance> {
   if (!service.config.server.origins.every(isLocalOrigin))
     throw new Error("Only loopback browser origins are supported");
@@ -137,6 +139,28 @@ export async function createServer(
         ),
       );
     },
+  });
+  app.addHook("onRoute", (route) => {
+    // Count handler completion, not socket lifetime: a client disconnect does
+    // not necessarily cancel a settings write or a worker operation.
+    if (
+      !(route.url.startsWith("/api/") || route.url === "/oauth/callback") ||
+      [
+        "/api/session",
+        "/api/terminal",
+        "/api/conversations/:id/events",
+      ].includes(route.url)
+    )
+      return;
+    const handler = route.handler;
+    route.handler = async function (request, reply) {
+      const release = deployment.enter();
+      try {
+        return await handler.call(this, request, reply);
+      } finally {
+        release();
+      }
+    };
   });
   const sessions = new Map<string, Session>();
   const allowedOrigins = new Set(service.config.server.origins),
@@ -266,13 +290,20 @@ export async function createServer(
       },
     },
     (socket, request) => {
+      let release: () => void;
+      try {
+        release = deployment.enter();
+      } catch {
+        socket.close(1013);
+        return;
+      }
       const token = request.cookies.agent_session!;
       const session = sessions.get(token)!;
-      serveTerminal(
+      void serveTerminal(
         socket,
         service,
         () => sessions.get(token) === session && session.expires > Date.now(),
-      );
+      ).finally(release);
     },
   );
   app.get("/api/model-options", async () => service.conversationModelOptions());
