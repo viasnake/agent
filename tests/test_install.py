@@ -116,14 +116,37 @@ class SystemChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             etc = Path(temporary)
             template = (INSTALL / "egress.nft").read_text()
-            old = template.replace("tcp dport { 22, 80, 443 }", "tcp dport { 80, 443 }")
+            old = """# Reserved public documentation ranges are blocked along with local/private routes.
+define work_uid = @WORK_UID@
+include "/etc/agent/protected-cidrs.nft"
+table inet agent_work {
+  set blocked_v4 {
+    type ipv4_addr
+    flags interval
+    elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4 }
+  }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    meta skuid != $work_uid return
+    @DNS_RULES@
+    meta nfproto ipv6 reject
+    ct state established,related accept
+    ip daddr 127.0.0.1 tcp dport 3000-3999 accept
+    ip daddr @blocked_v4 reject
+    ip daddr $protected_cidrs reject
+    tcp dport { 22, 80, 443 } accept
+    reject
+  }
+}
+"""
             policy = etc / "egress.nft"
             protected = etc / "protected-cidrs.nft"
             protected.write_text("custom protected networks")
             with patch.object(installer, "ETC", etc), patch.object(installer, "trusted"):
-                policy.write_text(old)
-                installer.install_network_policy(INSTALL)
-                self.assertEqual(policy.read_text(), template)
+                for stock in [old, old.replace("22, 80, 443", "80, 443")]:
+                    policy.write_text(stock)
+                    installer.install_network_policy(INSTALL)
+                    self.assertEqual(policy.read_text(), template)
                 policy.write_text(old + "# administrator policy\n")
                 installer.install_network_policy(INSTALL)
                 self.assertEqual(policy.read_text(), old + "# administrator policy\n")
@@ -213,9 +236,11 @@ class SystemChecks(unittest.TestCase):
     def test_legacy_skills_migration_validates_before_reowning_and_preserves_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "skills"
-            path.mkdir(mode=0o755)
+            path.mkdir()
+            path.chmod(0o755)
             directory = path / "sample"
-            directory.mkdir(mode=0o755)
+            directory.mkdir()
+            directory.chmod(0o755)
             skill = directory / "SKILL.md"
             skill.write_bytes(b"unchanged skill")
             skill.chmod(0o644)
@@ -339,6 +364,7 @@ class SystemChecks(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.object(system, "READY", Path(temporary) / "ready"),
+            patch.object(system, "egress_lock", return_value=nullcontext()),
             patch.object(os, "geteuid", return_value=0),
             patch.object(system, "trusted"),
             patch.object(Path, "read_text", return_value="nameserver 127.0.0.53"),

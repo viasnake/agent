@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+[ "$#" -eq 0 ] || exit 64
+exec /opt/agent-python/bin/python3 -I -B /opt/agent/install/system.py destinations
