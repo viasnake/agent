@@ -38,6 +38,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
   });
   const context = await browser.newContext({
     reducedMotion: "reduce",
+    timezoneId: "Asia/Tokyo",
     permissions: ["clipboard-read", "clipboard-write"],
     viewport: { width: 1360, height: 960 },
   });
@@ -226,9 +227,56 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       (await day.getByRole("cell").allTextContents()).slice(0, 3),
       ["4", "2", "1"],
     );
-    await dialog.getByLabel("開始日").fill("2020-01-01");
-    await dialog.getByLabel("終了日").fill("2020-01-01");
-    await dialog.getByRole("button", { name: "集計", exact: true }).click();
+    await dialog.getByText("Asia/Tokyo", { exact: true }).waitFor();
+    const startDate = dialog.getByLabel("開始日");
+    const endDate = dialog.getByLabel("終了日");
+    const aggregate = dialog.getByRole("button", { name: "集計", exact: true });
+    const breakdown = dialog.getByRole("table", {
+      name: "回数・トークン・費用の内訳",
+    });
+    await breakdown
+      .getByRole("rowheader", { name: "合計", exact: true })
+      .waitFor();
+    assert.equal(
+      await dialog.getByText(/費用不明|保存されたモデル応答/).count(),
+      0,
+    );
+    await mkdir("test-results", { recursive: true });
+    for (const [width, height, colorScheme, screenshot] of [
+      [1360, 960, "dark", "usage-statistics-desktop"],
+      [375, 812, "light", "usage-statistics-mobile"],
+    ] as const) {
+      await page.setViewportSize({ width, height });
+      await page.emulateMedia({ colorScheme });
+      const startBox = (await startDate.boundingBox())!;
+      const endBox = (await endDate.boundingBox())!;
+      const buttonBox = (await aggregate.boundingBox())!;
+      assert.ok(startBox.x + startBox.width <= endBox.x);
+      assert.ok(endBox.x + endBox.width <= buttonBox.x);
+      assert.ok(Math.abs(startBox.y - endBox.y) < 1);
+      assert.ok(
+        Math.abs(endBox.y + endBox.height - buttonBox.y - buttonBox.height) < 1,
+      );
+      assert.ok(startBox.height <= 34 && buttonBox.height <= 34);
+      assert.equal(
+        await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
+        true,
+      );
+      await dialog.screenshot({ path: `test-results/${screenshot}.png` });
+    }
+    const scroller = dialog.locator("[aria-label='使用量の内訳']");
+    await scroller.focus();
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction(
+      () =>
+        (document.querySelector(".usage-dialog [aria-label='使用量の内訳']")
+          ?.scrollLeft ?? 0) > 0,
+    );
+    await page.setViewportSize({ width: 1360, height: 960 });
+    await page.emulateMedia({ colorScheme: null });
+    await startDate.fill("2020-01-01");
+    await endDate.fill("2020-01-01");
+    await aggregate.click();
     await dialog.getByText("この期間の使用記録はありません").waitFor();
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "hidden" });
