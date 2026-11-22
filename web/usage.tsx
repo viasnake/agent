@@ -78,6 +78,43 @@ function UsageRows({
   });
 }
 
+function UsageSummary({
+  usage,
+  activity,
+}: {
+  usage: UsageTotals;
+  activity?: RecordedUsage;
+}) {
+  return (
+    <dl className="usage-summary">
+      <div>
+        <dt>合計トークン</dt>
+        <dd>{numbers.format(usage.totalTokens)}</dd>
+      </div>
+      {activity && (
+        <>
+          <div>
+            <dt>モデル呼び出し</dt>
+            <dd>
+              {count(activity.models.reduce((sum, row) => sum + row.calls, 0))}
+            </dd>
+          </div>
+          <div>
+            <dt>ツール呼び出し</dt>
+            <dd>
+              {count(activity.tools.reduce((sum, row) => sum + row.calls, 0))}
+            </dd>
+          </div>
+        </>
+      )}
+      <div>
+        <dt>参考費用（USD）</dt>
+        <dd>{cost(usage.cost)}</dd>
+      </div>
+    </dl>
+  );
+}
+
 function UsageBreakdown({
   usage,
   activity,
@@ -85,77 +122,52 @@ function UsageBreakdown({
   usage: ConversationUsage;
   activity?: RecordedUsage;
 }) {
-  const modelCalls =
-    activity?.models.reduce((sum, row) => sum + row.calls, 0) ?? 0;
-  const toolCalls =
-    activity?.tools.reduce((sum, row) => sum + row.calls, 0) ?? 0;
-  const errors =
+  const totals =
     activity &&
     [...activity.models, ...activity.tools].reduce(
-      (sum, row) => sum + row.errors,
-      0,
+      (sum, row) => ({
+        calls: sum.calls + row.calls,
+        errors: sum.errors + row.errors,
+      }),
+      { calls: 0, errors: 0 },
     );
   return (
-    <>
-      <dl className="usage-summary">
-        <div>
-          <dt>合計トークン</dt>
-          <dd>{numbers.format(usage.total.totalTokens)}</dd>
-        </div>
-        {activity && (
-          <>
-            <div>
-              <dt>モデル呼び出し</dt>
-              <dd>{count(modelCalls)}</dd>
-            </div>
-            <div>
-              <dt>ツール呼び出し</dt>
-              <dd>{count(toolCalls)}</dd>
-            </div>
-          </>
-        )}
-        <div>
-          <dt>参考費用（USD）</dt>
-          <dd>{cost(usage.total.cost)}</dd>
-        </div>
-      </dl>
-      <div
-        className="table-card table-responsive mb-0"
-        tabIndex={0}
-        aria-label="使用量の内訳"
-      >
-        <table className="table table-sm table-striped usage-table mb-0">
-          <caption className="visually-hidden">
-            回数・トークン・費用の内訳
-          </caption>
-          <thead className="table-active">
-            <tr>
-              <th scope="col">モデル / ツール</th>
-              <th scope="col">回数</th>
-              <th scope="col">エラー</th>
-              <th scope="col">入力</th>
-              <th scope="col">出力</th>
-              <th scope="col">キャッシュ読込</th>
-              <th scope="col">キャッシュ書込</th>
-              <th scope="col">合計トークン</th>
-              <th scope="col">参考費用（USD）</th>
-            </tr>
-          </thead>
-          <tbody>
-            <UsageRows usage={usage.models} activity={activity?.models} />
-            <UsageRows usage={usage.tools} activity={activity?.tools} tool />
-          </tbody>
-          <tfoot className="table-active fw-semibold">
-            <UsageRow
-              name="合計"
-              usage={usage.total}
-              calls={activity && modelCalls + toolCalls}
-              errors={errors}
-            />
-          </tfoot>
-        </table>
-      </div>
-    </>
+    <div
+      className="table-card table-responsive mb-0"
+      tabIndex={0}
+      aria-label="使用量の内訳"
+    >
+      <table className="table table-sm table-striped usage-table mb-0">
+        <caption className="visually-hidden">
+          回数・トークン・費用の内訳
+        </caption>
+        <thead className="table-active">
+          <tr>
+            <th scope="col">モデル / ツール</th>
+            <th scope="col">回数</th>
+            <th scope="col">エラー</th>
+            <th scope="col">入力</th>
+            <th scope="col">出力</th>
+            <th scope="col">キャッシュ読込</th>
+            <th scope="col">キャッシュ書込</th>
+            <th scope="col">合計トークン</th>
+            <th scope="col">参考費用（USD）</th>
+          </tr>
+        </thead>
+        <tbody>
+          <UsageRows usage={usage.models} activity={activity?.models} />
+          <UsageRows usage={usage.tools} activity={activity?.tools} tool />
+        </tbody>
+        <tfoot className="table-active fw-semibold">
+          <UsageRow
+            name="合計"
+            usage={usage.total}
+            calls={totals?.calls}
+            errors={totals?.errors}
+          />
+        </tfoot>
+      </table>
+    </div>
   );
 }
 
@@ -223,37 +235,55 @@ export function SessionUsage({
   return (
     <section className="session-usage" aria-label="使用量">
       {status}
+      <UsageSummary usage={usage.total} activity={activity} />
       <UsageBreakdown usage={usage} activity={activity} />
     </section>
   );
 }
 
-function DailyUsage({ days }: { days: RecordedUsage["days"] }) {
+function DailyUsage({
+  days,
+  calls = false,
+}: {
+  days: RecordedUsage["days"];
+  calls?: boolean;
+}) {
+  const name = calls ? "日別の呼び出し件数" : "日別の使用量";
   return (
     <div
-      className="table-card table-responsive mb-0"
-      tabIndex={0}
-      aria-label="日別の使用量"
+      className={calls ? "table-card table-responsive mb-0" : "table-card mb-0"}
+      tabIndex={calls ? 0 : undefined}
+      aria-label={calls ? name : undefined}
     >
-      <table className="table table-sm table-striped usage-table mb-0">
-        <caption className="visually-hidden">日別の使用量</caption>
+      <table className="table table-striped usage-table mb-0">
+        <caption className="visually-hidden">{name}</caption>
         <thead className="table-active">
           <tr>
             <th scope="col">日付</th>
-            <th scope="col">モデル呼び出し</th>
-            <th scope="col">ツール呼び出し</th>
-            <th scope="col">ツールエラー</th>
-            <th scope="col">合計トークン</th>
+            {calls ? (
+              <>
+                <th scope="col">モデル呼び出し</th>
+                <th scope="col">ツール呼び出し</th>
+                <th scope="col">ツールエラー</th>
+              </>
+            ) : (
+              <th scope="col">合計トークン</th>
+            )}
           </tr>
         </thead>
         <tbody>
           {days.map((day) => (
             <tr key={day.date}>
               <th scope="row">{day.date}</th>
-              <td>{count(day.modelCalls)}</td>
-              <td>{count(day.toolCalls)}</td>
-              <td>{count(day.toolErrors)}</td>
-              <td>{numbers.format(day.totalTokens)}</td>
+              {calls ? (
+                <>
+                  <td>{count(day.modelCalls)}</td>
+                  <td>{count(day.toolCalls)}</td>
+                  <td>{count(day.toolErrors)}</td>
+                </>
+              ) : (
+                <td>{numbers.format(day.totalTokens)}</td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -314,14 +344,21 @@ function UsagePeriod() {
         <button className="btn-solid theme-primary btn-sm" type="submit">
           集計
         </button>
-        <span className="small fg-2 pb-1">{timezone}</span>
       </form>
       {status}
       {activity &&
         (activity.days.length ? (
           <>
-            <UsageBreakdown usage={activity} activity={activity} />
-            <h3 className="h6 mt-3">日別</h3>
+            <UsageSummary usage={activity.total} />
+            <details className="usage-details mb-4">
+              <summary className="py-2 fw-semibold">詳しい内訳</summary>
+              <div className="pt-2">
+                <UsageBreakdown usage={activity} activity={activity} />
+                <h3 className="h6 mt-4">日別の呼び出し件数</h3>
+                <DailyUsage days={activity.days} calls />
+              </div>
+            </details>
+            <h3 className="h6 mb-2">日別の使用量</h3>
             <DailyUsage days={activity.days} />
           </>
         ) : (

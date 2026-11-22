@@ -217,26 +217,43 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     );
 
     const statistics = page.getByRole("button", { name: "全セッションの統計" });
+    const usageRequest = page.waitForRequest(
+      (request) => new URL(request.url()).pathname === "/api/statistics/usage",
+    );
     await statistics.click();
+    assert.equal(
+      new URL((await usageRequest).url()).searchParams.get("timezone"),
+      "Asia/Tokyo",
+    );
     const dialog = page.getByRole("dialog", { name: "全セッションの統計" });
     const daily = dialog.getByRole("table", { name: "日別の使用量" });
     const today = await dialog.getByLabel("終了日").inputValue();
     const day = daily.getByRole("row", { name: new RegExp(today) });
     await day.waitFor();
-    assert.deepEqual(
-      (await day.getByRole("cell").allTextContents()).slice(0, 3),
-      ["4", "2", "1"],
+    assert.deepEqual(await daily.getByRole("columnheader").allTextContents(), [
+      "日付",
+      "合計トークン",
+    ]);
+    assert.equal(
+      await day.getByRole("cell").textContent(),
+      await dialog.locator(".usage-summary dd").first().textContent(),
     );
-    await dialog.getByText("Asia/Tokyo", { exact: true }).waitFor();
+    assert.deepEqual(
+      await dialog.locator(".usage-summary dt").allTextContents(),
+      ["合計トークン", "参考費用（USD）"],
+    );
+    assert.equal(
+      await dialog.getByText("Asia/Tokyo", { exact: true }).count(),
+      0,
+    );
     const startDate = dialog.getByLabel("開始日");
     const endDate = dialog.getByLabel("終了日");
     const aggregate = dialog.getByRole("button", { name: "集計", exact: true });
     const breakdown = dialog.getByRole("table", {
       name: "回数・トークン・費用の内訳",
     });
-    await breakdown
-      .getByRole("rowheader", { name: "合計", exact: true })
-      .waitFor();
+    const details = dialog.locator("summary").filter({ hasText: "詳しい内訳" });
+    assert.equal(await breakdown.isVisible(), false);
     assert.equal(
       await dialog.getByText(/費用不明|保存されたモデル応答/).count(),
       0,
@@ -262,8 +279,32 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
         await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth),
         true,
       );
+      assert.equal(
+        await daily.evaluate(
+          (node) => node.scrollWidth <= node.parentElement!.clientWidth,
+        ),
+        true,
+      );
       await dialog.screenshot({ path: `test-results/${screenshot}.png` });
     }
+    await details.focus();
+    await page.keyboard.press("Enter");
+    await breakdown
+      .getByRole("rowheader", { name: "合計", exact: true })
+      .waitFor();
+    const dailyCalls = dialog.getByRole("table", {
+      name: "日別の呼び出し件数",
+    });
+    assert.deepEqual(
+      await dailyCalls
+        .getByRole("row", { name: new RegExp(today) })
+        .getByRole("cell")
+        .allTextContents(),
+      ["4", "2", "1"],
+    );
+    await dialog.screenshot({
+      path: "test-results/usage-statistics-details.png",
+    });
     const scroller = dialog.locator("[aria-label='使用量の内訳']");
     await scroller.focus();
     await page.keyboard.press("ArrowRight");
@@ -272,6 +313,9 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
         (document.querySelector(".usage-dialog [aria-label='使用量の内訳']")
           ?.scrollLeft ?? 0) > 0,
     );
+    await details.focus();
+    await page.keyboard.press("Enter");
+    await breakdown.waitFor({ state: "hidden" });
     await page.setViewportSize({ width: 1360, height: 960 });
     await page.emulateMedia({ colorScheme: null });
     await startDate.fill("2020-01-01");
