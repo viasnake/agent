@@ -13,6 +13,7 @@ import {
 import { join } from "node:path";
 import { createServer } from "../src/server.js";
 import { answer, fixture, until } from "./support.js";
+import { gitReview } from "../src/execution/git-review.js";
 import { git, reviewRepository } from "./git-review-fixture.js";
 
 test("Git review compares actual checkout and commits without changing the index or widening downloads", async (t) => {
@@ -74,6 +75,36 @@ test("Git review compares actual checkout and commits without changing the index
     repositories: [repo, "other"],
     limited: false,
   });
+  const history = await response("history", { repo });
+  assert.equal(history.kind, "history");
+  assert.deepEqual(history.commits, [
+    {
+      oid: base,
+      date: await git(path, "show", "-s", "--format=%as", base),
+      subject: "original",
+    },
+  ]);
+  assert.equal(history.limited, false);
+  const shallow = join(work, "shallow");
+  await git(work, "clone", "--no-local", "--depth=1", "--", path, shallow);
+  assert.deepEqual(await response("history", { repo: "shallow" }), {
+    kind: "history",
+    commits: [],
+    limited: false,
+  });
+  await git(
+    work,
+    "clone",
+    "--no-local",
+    "--depth=2",
+    "--",
+    path,
+    join(work, "shallow-history"),
+  );
+  assert.deepEqual(
+    await response("history", { repo: "shallow-history" }),
+    history,
+  );
   assert.deepEqual(await response("changes", { repo }), {
     kind: "changes",
     files: [
@@ -227,5 +258,33 @@ test("Git review rejects paths and metadata outside the session and ignores repo
   assert.deepEqual(
     await f.service.gitReview(id, { kind: "changes", repo: "repo" }),
     { kind: "unavailable", reason: "repository" },
+  );
+});
+
+test("discovery can hit the depth limit without finding any repository", async (t) => {
+  const f = await fixture();
+  t.after(async () => {
+    await f.service.close();
+    await rm(f.root, { recursive: true, force: true });
+  });
+  const workspace = join(f.root, "work");
+  const nested = join(
+    workspace,
+    ...Array.from({ length: 9 }, (_, i) => `level-${i}`),
+    "repo",
+  );
+  await reviewRepository(nested);
+  assert.deepEqual(
+    await gitReview(
+      workspace,
+      workspace,
+      { kind: "repositories" },
+      new AbortController().signal,
+    ),
+    {
+      kind: "repositories",
+      repositories: [],
+      limited: true,
+    },
   );
 });

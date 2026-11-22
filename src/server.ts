@@ -15,7 +15,11 @@ import {
 import type { AgentService } from "./service.js";
 import { AppError } from "./security.js";
 import { DeploymentGate } from "./deploy.js";
-import { gitChangesQuery, gitPatchQuery } from "./git-review.js";
+import {
+  gitChangesQuery,
+  gitPatchQuery,
+  gitRepositoryQuery,
+} from "./git-review.js";
 import { isLocalOrigin } from "./config.js";
 import type { Cursor } from "@earendil-works/pi-durable";
 import { memoryId, memoryInput, memoryEdit, historyInput } from "./memory.js";
@@ -645,6 +649,22 @@ export async function createServer(
   app.get("/api/conversations/:id/git/repositories", async (request) => {
     const { id } = identifier.parse(request.params);
     return service.gitReview(id, { kind: "repositories" });
+  });
+  app.get("/api/conversations/:id/git/history", async (request) => {
+    const { id } = identifier.parse(request.params);
+    const result = await service.gitReview(id, {
+      kind: "history",
+      ...gitRepositoryQuery.parse(request.query),
+    });
+    return result.kind === "history"
+      ? {
+          ...result,
+          commits: result.commits.map((commit) => ({
+            ...commit,
+            subject: service.redact(commit.subject),
+          })),
+        }
+      : result;
   });
   app.get("/api/conversations/:id/git/changes", async (request) => {
     const { id } = identifier.parse(request.params);

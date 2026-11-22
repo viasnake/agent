@@ -6,12 +6,13 @@ import { Icon } from "./icons.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 
 type Repositories = Extract<GitReviewResult, { kind: "repositories" }>;
+type History = Extract<GitReviewResult, { kind: "history" }>;
 type Changes = Extract<GitReviewResult, { kind: "changes" }>;
 type FileChange = Changes["files"][number];
 type Comparison = "working" | "committed";
 const reasons = {
   repository: "このリポジトリには対応していません。",
-  commit: "比較できるコミットがありません。基準コミットを確認してください。",
+  commit: "比較できるコミットがありません。一覧を更新してください。",
   changed: "HEAD が変わりました。一覧を更新してください。",
   binary: "バイナリまたは UTF-8 以外の差分は表示できません。",
   limit: "取得上限を超えたため表示できません。",
@@ -50,7 +51,8 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
   const [repositories, setRepositories] = useState<Repositories>();
   const [repo, setRepo] = useState("");
   const [mode, setMode] = useState<Comparison>("working");
-  const [commit, setCommit] = useState("");
+  const [history, setHistory] = useState<History>();
+  const [historyError, setHistoryError] = useState("");
   const [base, setBase] = useState("");
   const [changes, setChanges] = useState<Changes>();
   const [selection, setSelection] = useState<string>();
@@ -62,7 +64,6 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
   const [repositoriesError, setRepositoriesError] = useState("");
   const [changesError, setChangesError] = useState("");
   const [refresh, setRefresh] = useState(0);
-  const [comparisonVersion, setComparisonVersion] = useState(0);
   const list = useRef<HTMLUListElement>(null);
   const back = useRef<HTMLButtonElement>(null);
   const focusMobileDetail = useRef(false);
@@ -98,7 +99,36 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
     return () => request.abort();
   }, [endpoint, running, refresh]);
 
-  const comparison = mode === "committed" ? base : "";
+  useEffect(() => {
+    setHistory(undefined);
+    setHistoryError("");
+    if (running || !repo || mode !== "committed") return;
+    const request = new AbortController();
+    const params = new URLSearchParams({ repo });
+    void api<GitReviewResult>(
+      `${endpoint}/history?${params}`,
+      "GET",
+      undefined,
+      request.signal,
+    )
+      .then((result) => {
+        if (request.signal.aborted) return;
+        if (result.kind === "history") {
+          setHistory(result);
+          setBase((previous) =>
+            result.commits.some(({ oid }) => oid === previous) ? previous : "",
+          );
+        } else setHistoryError(unavailable(result));
+      })
+      .catch((error: Error) => {
+        if (!request.signal.aborted) setHistoryError(error.message);
+      });
+    return () => request.abort();
+  }, [endpoint, repo, mode, running, refresh]);
+
+  const selectedCommit = history?.commits.find(({ oid }) => oid === base);
+  const comparison = mode === "committed" ? (selectedCommit?.oid ?? "") : "";
+
   useEffect(() => {
     setChanges(undefined);
     setChangesError("");
@@ -123,7 +153,7 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
         if (!request.signal.aborted) setChangesError(error.message);
       });
     return () => request.abort();
-  }, [endpoint, repo, mode, comparison, running, refresh, comparisonVersion]);
+  }, [endpoint, repo, mode, comparison, running, refresh]);
 
   const file = changes?.files.find((entry) => fileKey(entry) === selection);
   const head = changes?.head;
@@ -193,6 +223,8 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
           disabled={running}
           onClick={() => {
             setChanges(undefined);
+            setHistory(undefined);
+            setHistoryError("");
             setRefresh((value) => value + 1);
           }}
         >
@@ -233,7 +265,8 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
                   setChanges(undefined);
                   setSelection(undefined);
                   setRepo(event.target.value);
-                  setCommit("");
+                  setHistory(undefined);
+                  setHistoryError("");
                   setBase("");
                   setMode("working");
                 }}
@@ -255,6 +288,8 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
               setChanges(undefined);
               setChangesError("");
               setSelection(undefined);
+              setHistory(undefined);
+              setHistoryError("");
               setMode(value === "committed" ? "committed" : "working");
             }}
           >
@@ -263,50 +298,58 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
               <TabsTrigger value="committed">コミット済み</TabsTrigger>
             </TabsList>
             <TabsContent value={mode}>
-              {mode === "committed" && (
-                <form
-                  className="git-review-compare"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    setChanges(undefined);
-                    setSelection(undefined);
-                    setBase(commit.trim());
-                    setComparisonVersion((value) => value + 1);
-                  }}
-                >
-                  <label className="form-label mb-0" htmlFor="git-base">
-                    基準コミット
-                  </label>
-                  <div className="d-flex gap-2">
-                    <input
+              {mode === "committed" &&
+                history &&
+                history.commits.length > 0 && (
+                  <div className="git-review-compare">
+                    <label className="form-label mb-0" htmlFor="git-base">
+                      比較の起点
+                    </label>
+                    <select
                       id="git-base"
-                      className="form-control form-control-sm font-monospace"
-                      placeholder="40 桁のコミット SHA"
-                      value={commit}
-                      required
-                      pattern="[0-9a-fA-F]{40}"
-                      maxLength={40}
-                      spellCheck={false}
-                      autoComplete="off"
-                      onChange={(event) => setCommit(event.target.value)}
-                    />
-                    <button
-                      className="btn-outline theme-secondary btn-sm text-nowrap"
-                      type="submit"
+                      className="form-select"
+                      value={comparison}
+                      onChange={(event) => {
+                        setChanges(undefined);
+                        setSelection(undefined);
+                        setBase(event.target.value);
+                      }}
                     >
-                      比較
-                    </button>
+                      <option value="">コミットを選択</option>
+                      {history.commits.map(({ oid, subject, date }) => (
+                        <option key={oid} value={oid}>
+                          {subject || "メッセージなし"} — {date} ·{" "}
+                          {oid.slice(0, 8)}
+                        </option>
+                      ))}
+                    </select>
+                    {history.limited && (
+                      <small className="fg-2">
+                        直近 {history.commits.length} 件を表示
+                      </small>
+                    )}
                   </div>
-                </form>
-              )}
+                )}
               {changesError ? (
                 <p className="git-review-state" role="alert">
                   {changesError}
                 </p>
               ) : waitingForBase ? (
-                <p className="git-review-state">
-                  基準コミットを指定すると、現在の HEAD までの変更を表示します。
-                </p>
+                historyError ? (
+                  <p className="git-review-state" role="alert">
+                    {historyError}
+                  </p>
+                ) : !history ? (
+                  <p className="git-review-state" role="status">
+                    コミット履歴を読み込み中…
+                  </p>
+                ) : (
+                  <p className="git-review-state">
+                    {history.commits.length
+                      ? "選んだコミットの状態から現在のコミットまでの変更を表示します。"
+                      : "このクローンには、現在のコミットより前の履歴がありません。"}
+                  </p>
+                )
               ) : !changes ? (
                 <p className="git-review-state" role="status">
                   変更一覧を読み込み中…
@@ -316,10 +359,13 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
                   <div className="git-review-summary small fg-2">
                     {comparison ? (
                       <>
-                        <code title={comparison}>{comparison.slice(0, 8)}</code>
+                        <bdi title={comparison}>
+                          {selectedCommit?.subject || "メッセージなし"}
+                        </bdi>
                         <span> → </span>
                         <span>
-                          HEAD <code title={head}>{head?.slice(0, 8)}</code>
+                          現在のコミット{" "}
+                          <code title={head}>{head?.slice(0, 8)}</code>
                         </span>
                       </>
                     ) : (
