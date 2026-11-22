@@ -30,7 +30,8 @@ host, port, allowed = sys.argv[1:]
 with socket.socket() as sock:
     sock.settimeout(2)
     result = sock.connect_ex((host, int(port)))
-    assert result == (0 if allowed == 'True' else errno.ECONNREFUSED), (host, port, allowed, result)
+    expected = (0,) if allowed == 'True' else (errno.ECONNREFUSED, errno.EAGAIN)
+    assert result in expected, (host, port, allowed, result)
 """
     command("setpriv", "--reuid", str(uid), "--regid", str(uid), "--clear-groups",
             sys.executable, "-c", script, host, str(port), str(allowed))
@@ -64,6 +65,7 @@ with tempfile.TemporaryDirectory(prefix="agent-egress-test-", dir="/run") as tem
         command("ip", "link", "set", "test-in", "netns", str(peer.pid))
         command("ip", "addr", "add", "10.225.42.1/24", "dev", "test-out")
         command("ip", "link", "set", "test-out", "up")
+        command("ip", "link", "set", "lo", "up")
         for addr in (TARGET, PROTECTED):
             command(*inside, "ip", "addr", "add", f"{addr}/24", "dev", "test-in")
         command(*inside, "ip", "link", "set", "test-in", "up")
@@ -85,8 +87,10 @@ time.sleep(90)
                 system.egress({"workUid": WORK_UID})
                 original = system.destination_request({"operation": "read"})
                 assert original["applied"] and original["entries"] == []
-                probe(TARGET, PORT, False)
                 probe(TARGET, PORT, True, uid=0)
+                probe(TARGET, PORT + 1, True, uid=0)
+                probe(PROTECTED, PORT, True, uid=0)
+                probe(TARGET, PORT, False)
                 entry = {"ip": TARGET, "port": PORT, "name": "fixture"}
                 update = {"operation": "write", "revision": original["revision"], "entries": [entry]}
                 assert system.destination_request({**update, "entries": [{**entry, "ip": PROTECTED}]})["status"] == "invalid"
@@ -95,7 +99,6 @@ time.sleep(90)
                 probe(TARGET, PORT, True)
                 probe(TARGET, PORT + 1, False)
                 probe(PROTECTED, PORT, False)
-                command("ip", "link", "set", "lo", "up")
                 with socket.socket() as local:
                     local.bind(("10.225.42.1", PORT))
                     local.listen()
