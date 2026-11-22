@@ -238,6 +238,7 @@ function toolLabel(name: string): string {
     bash_start: "コマンドの開始",
     bash_status: "コマンドの確認",
     bash_stop: "コマンドの停止",
+    request_user_input: "選択肢付きの確認",
     memory_save: "記憶の保存",
     memory_update: "記憶の更新",
     memory_forget: "記憶の削除",

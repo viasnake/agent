@@ -1,3 +1,4 @@
+import { pendingQuestion, questionTool, type Choice } from "./choices.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { stat } from "node:fs/promises";
@@ -1426,6 +1427,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
     options: {
       continuing?: boolean;
       source?: { sessionId: string; entryId: number };
+      choice?: Choice;
     } = {},
   ): Promise<{ id: string }> {
     if (
@@ -1444,6 +1446,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
         resume,
         ...(options.continuing ? { continuing: true } : {}),
         ...(options.source ? { source: options.source } : {}),
+        ...(options.choice ? { choice: options.choice } : {}),
         ...(attachments.length ? { attachments } : {}),
       });
       const previous = (await this.harness.snapshot(ConversationsDoc, ctx))!
@@ -1455,6 +1458,26 @@ ${this.config.instructions}${this.redact(catalog)}`;
       }
       let active = this.runs.get(id);
       const starting = !active;
+      if (options.choice) {
+        if (!starting || conversation.status !== "idle")
+          throw new AppError(409, "この質問には回答できません");
+        const pi = await this.pi(conversation);
+        const page = await pi.entries(
+          { order: "descending" },
+          40,
+          undefined,
+          ctx,
+        );
+        const question = pendingQuestion(page.items, conversation.piId);
+        const option = question?.options[options.choice.option];
+        if (
+          !question ||
+          question.entryId !== options.choice.entryId ||
+          option === undefined
+        )
+          throw new AppError(409, "この質問には回答できません");
+        text = `選択：${option}`;
+      }
       const requestedSkill = explicitSkill(text);
       if (requestedSkill && (active || resume))
         throw new AppError(
@@ -1813,6 +1836,15 @@ ${this.config.instructions}${this.redact(catalog)}`;
       conversation.requests++;
     }, ctx);
   }
+  async mixedQuestionRound(piId: ConversationId, context: Context) {
+    const tools = (await this.harness.snapshot(LiveDoc, piId, context))?.tools;
+    return (
+      !!tools &&
+      tools.length > 1 &&
+      tools.some((tool) => tool.name === questionTool && !tool.unoffered)
+    );
+  }
+
   async toolConversation(piId: ConversationId): Promise<string> {
     this.assertHealthy();
     const active = [...this.runs.values()].find((run) => run.piId === piId);
@@ -2110,6 +2142,10 @@ ${this.config.instructions}${this.redact(catalog)}`;
         ),
       pendingInputs:
         inbox?.items.filter((item) => "content" in item).length ?? 0,
+      question:
+        !cursor && conversation.status === "idle"
+          ? this.sanitize(pendingQuestion(entries.items, conversation.piId))
+          : undefined,
       command: this.runs.get(id)?.command?.snapshot(),
       progress: {
         generating: !!live?.generation,

@@ -166,6 +166,10 @@ auto-discover work-owned Skills, or replace a changed version during resume.
   per active response. Keep command IDs in memory, scoped to that response;
   stop and confirm cleanup on completion, abort, deadline and shutdown. Do not
   stream unredacted output to inference, durable storage or the browser.
+- src/choices.ts: the choice tool runs alone and uses Pi's terminal tool result.
+  Derive the pending card from that session's latest history, and admit a
+  validated answer as ordinary deduplicated user input only after the response
+  is idle.
 - src/execution/: bounded stdio adapter, standard Pi tools/NodeExecutionEnv,
   official MCP client and bounded attachment/output transfers.
 - src/provider.ts: model dispatch limit and active-conversation binding.

@@ -1,9 +1,12 @@
 import { z } from "zod";
+import { questionInput, questionTool } from "./choices.js";
 import type { LongCommand } from "./long-command.js";
 import { AppError, hash } from "./security.js";
 import type { McpConfig } from "./settings.js";
 import {
   defineExtension,
+  hook,
+  ToolTask,
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
@@ -39,6 +42,20 @@ function commandResult(command: ReturnType<LongCommand["snapshot"]>) {
 export function agentTools(service: AgentService) {
   return defineExtension({
     name: "workspace",
+    hooks: [
+      hook(ToolTask, {
+        beforeTool: async (call, api, context) => {
+          if (
+            !call.parent &&
+            (await service.mixedQuestionRound(api.conversationId, context))
+          )
+            return {
+              block:
+                "Call request_user_input on its own, with no other tool calls in the same response.",
+            };
+        },
+      }),
+    ],
     tools: [
       ...createCodingTools().tools!.map(
         (tool): ToolRegistration => ({
@@ -104,6 +121,35 @@ export function agentTools(service: AgentService) {
               context.abortSignal,
             ),
           );
+        },
+      },
+      {
+        name: questionTool,
+        description:
+          "Ask a single focused question with 2–5 short, distinct options when user input is necessary before continuing. Call this tool alone. It ends the current response; the user can choose an option or reply in the composer. A displayed option is not authorization until the user responds.",
+        parameters: z.toJSONSchema(questionInput),
+        replay: "unsafe",
+        execute: async (value, api) => {
+          await service.toolConversation(api.conversationId);
+          const question = questionInput.safeParse(
+            service.sanitize(questionInput.parse(value)),
+          );
+          if (!question.success)
+            throw new AppError(400, "質問と重複しない選択肢を指定してください");
+          const details = question.data;
+          return {
+            details,
+            output: [
+              {
+                type: "text" as const,
+                text: [
+                  details.question,
+                  ...details.options.map((option, i) => `${i + 1}. ${option}`),
+                ].join("\n"),
+              },
+            ],
+            control: { terminate: true },
+          };
         },
       },
     ],
