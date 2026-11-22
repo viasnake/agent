@@ -7,6 +7,7 @@ import { Icon } from "./icons.js";
 import { CredentialSettings } from "./credentials.js";
 import { Skills } from "./skills.js";
 import { GitSettings } from "./git-settings.js";
+import { NetworkSettings } from "./network-settings.js";
 import { MemoryNotes } from "./memory.js";
 import type { MemoryDraft, MemorySource } from "./memory.js";
 import { useNotify } from "./notifications.js";
@@ -22,6 +23,7 @@ const settingsSections = [
   ["mcp", "MCP"],
   ["credentials", "クレデンシャル"],
   ["git", "Git"],
+  ["network", "ネットワーク"],
   ["skills", "Skills"],
   ["agent", "指示・制限"],
   ["memory", "記憶"],
@@ -134,6 +136,7 @@ export function Settings({
   const [memoryDirty, setMemoryDirty] = useState(false);
   const [skillsDirty, setSkillsDirty] = useState(false);
   const [gitDirty, setGitDirty] = useState(false);
+  const [networkDirty, setNetworkDirty] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const navigation = useRef<HTMLElement>(null);
   const [busy, setBusy] = useState(false),
@@ -145,9 +148,12 @@ export function Settings({
     memory: memoryDirty,
     skills: skillsDirty,
     git: gitDirty,
+    network: networkDirty,
   };
-  const unsaved = dirty || memoryDirty || skillsDirty || gitDirty;
-  const separateEditor = tab === "git" || tab === "skills" || tab === "memory";
+  const unsaved =
+    dirty || memoryDirty || skillsDirty || gitDirty || networkDirty;
+  const separateEditor =
+    tab === "git" || tab === "network" || tab === "skills" || tab === "memory";
   function canLeave() {
     return confirmSettingsExit(unsaved);
   }
@@ -460,6 +466,11 @@ export function Settings({
               {visited.has("git") && (
                 <div hidden={tab !== "git"}>
                   <GitSettings onDirtyChange={setGitDirty} />
+                </div>
+              )}
+              {visited.has("network") && (
+                <div hidden={tab !== "network"}>
+                  <NetworkSettings onDirtyChange={setNetworkDirty} />
                 </div>
               )}
               {visited.has("skills") && (

@@ -4,6 +4,7 @@
 import argparse
 import fcntl
 import grp
+import hashlib
 import ipaddress
 import json
 import os
@@ -53,14 +54,17 @@ def install_network_policy(source):
     destination = ETC / "egress.nft"
     if os.path.lexists(destination):
         trusted(destination)
-        previous = template.replace(
-            "tcp dport { 22, 80, 443 }", "tcp dport { 80, 443 }"
-        )
-        # Upgrade only the shipped policy; administrator rules remain authoritative.
-        if destination.read_text() == previous:
+        # Only the two previous shipped templates (with and without public SSH).
+        if hashlib.sha256(destination.read_bytes()).hexdigest() in {
+            "d0c8314db56fb96ce5e4e58d0f269dbfb76092aaace35d5dcd4d160fb9612479",
+            "6d57d6950964d2b804e41fa804666337c9dcdb4d0cbbbfdf1be9873168a5b407",
+        }:
             atomic_write(destination, template)
     else:
         atomic_write(destination, template)
+    state = ETC / "egress.d"
+    state.mkdir(mode=0o700, exist_ok=True)
+    trusted(state)
     protected = ETC / "protected-cidrs.nft"
     if not os.path.lexists(protected):
         atomic_write(protected, (source / "protected-cidrs.nft").read_text())
@@ -537,7 +541,7 @@ def install(args):
         atomic_write(ETC / "config.yaml", json.dumps(config, indent=2) + "\n", 0o640)
         os.chown(ETC / "config.yaml", 0, control.pw_gid)
     LIBEXEC.mkdir(parents=True, exist_ok=True)
-    for name in ["agent-work", "agent-preflight"]:
+    for name in ["agent-work", "agent-preflight", "agent-destinations"]:
         atomic_write(
             LIBEXEC / name,
             (APP / "install" / name).read_text().replace("@DATA_ROOT@", str(root)),

@@ -102,6 +102,27 @@ assert.notEqual(
   ]).status,
   0,
 );
+const destinationsHelper = "/usr/local/libexec/agent-destinations";
+const readDestinations = { input: '{"operation":"read"}' };
+const helperArgs = ["sudo", "-n", "-u", "root", "--", destinationsHelper];
+const destinations = JSON.parse(
+  command("sudo", ["-u", "agent-control", ...helperArgs], readDestinations),
+);
+assert.equal(destinations.status, "ok");
+assert.equal(destinations.applied, true);
+assert.notEqual(
+  spawnSync("sudo", ["-u", "agent-work", ...helperArgs], readDestinations)
+    .status,
+  0,
+);
+assert.notEqual(
+  spawnSync(
+    "sudo",
+    ["-u", "agent-control", ...helperArgs, "unexpected-argument"],
+    readDestinations,
+  ).status,
+  0,
+);
 const { WorkerClient } = await import(
   "/opt/agent/dist/src/execution/client.js"
 );
