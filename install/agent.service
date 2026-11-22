@@ -14,6 +14,8 @@ ExecStartPre=+/usr/local/libexec/agent-preflight
 ExecStart=/opt/agent-node/bin/node /opt/agent/dist/src/main.js /etc/agent/config.yaml
 Environment=PATH=/opt/agent-node/bin:/opt/agent-python/bin:/usr/bin:/bin
 UMask=0077
+RuntimeDirectory=agent
+RuntimeDirectoryMode=0700
 Restart=on-failure
 RestartSec=5
 KillMode=control-group

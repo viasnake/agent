@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -10,10 +11,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 INSTALL = Path(__file__).resolve().parents[1] / "install"
 sys.path.insert(0, str(INSTALL))
@@ -30,6 +31,84 @@ def user(name, uid, gid, home="/nonexistent"):
     return SimpleNamespace(
         pw_name=name, pw_uid=uid, pw_gid=gid, pw_shell="/usr/sbin/nologin", pw_dir=home
     )
+
+
+class HotUpdateChecks(unittest.TestCase):
+    def make_app(self, app, marker):
+        for name in ["dist/src", "dist/web", "install", "scripts", "examples", "node_modules"]:
+            (app / name).mkdir(parents=True)
+        for name in ["dist/src/main.js", "dist/src/deploy.js", "dist/web/app.js", "README.md"]:
+            (app / name).write_text(marker)
+        (app / "install/agent.service").write_text("unchanged unit")
+        (app / "package.json").write_text(json.dumps({"agentHotDeployEpoch": 1}))
+        sdk = "node_modules/@earendil-works/pi-durable"
+        (app / "package-lock.json").write_text(json.dumps({"packages": {sdk: {"version": "1.6.0"}}}))
+
+    def test_application_is_exchanged_only_after_confirmed_clean_stop(self):
+        for responses in [b"timeout\n", b"drained\nstopping\n"]:
+            with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+                root = Path(temp)
+                current, source = root / "agent", root / "source"
+                self.make_app(current, "previous")
+                self.make_app(source, "next")
+                connection = Mock()
+                order = []
+
+                def clean_stop():
+                    self.assertEqual((current / "README.md").read_text(), "previous")
+                    order.append("stop")
+
+                def command(*args):
+                    if args[0] == installer.SYSTEMCTL:
+                        self.assertEqual(args[1:], ("start", "agent.service"))
+                        self.assertEqual((current / "README.md").read_text(), "next")
+                        order.append("start")
+                        return
+                    return run(*args)
+
+                run = installer.run
+                for name, value in {
+                    "APP": current,
+                    "trusted": Mock(),
+                    "check": Mock(return_value={"controlUid": 1234}),
+                    "load_record": Mock(),
+                    "unit_status": Mock(return_value={"ActiveState": "active"}),
+                    "deployment_connection": Mock(return_value=nullcontext((connection, io.BytesIO(responses)))),
+                    "wait_for_clean_stop": clean_stop,
+                    "run": command,
+                    "wait_for_ready": lambda uid: order.append("ready"),
+                }.items():
+                    stack.enter_context(patch.object(installer, name, value))
+                if responses.startswith(b"timeout"):
+                    with self.assertRaisesRegex(RuntimeError, "not drained"):
+                        installer.hot_update(source)
+                    connection.sendall.assert_called_once_with(b"drain 1\n")
+                    self.assertEqual(order, [])
+                    self.assertEqual((current / "README.md").read_text(), "previous")
+                    self.assertEqual(list(root.glob("agent.previous-*")), [])
+                else:
+                    installer.hot_update(source)
+                    self.assertEqual(order, ["stop", "start", "ready"])
+                    (backup,) = root.glob("agent.previous-*")
+                    self.assertEqual((backup / "README.md").read_text(), "previous")
+
+    def test_incompatible_platform_or_storage_files_require_a_stopped_update(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(installer, "trusted"):
+            current, staged = (Path(temp) / name for name in ["current", "staged"])
+            self.make_app(current, "previous")
+            self.make_app(staged, "next")
+            installer.check_hot_compatibility(current, staged)
+            for relative, content, error in [
+                ("install/agent.service", "changed unit", "Installation files"),
+                ("package.json", '{"agentHotDeployEpoch": 2}', "Storage or configuration"),
+                ("package-lock.json", '{"packages":{"node_modules/@earendil-works/pi-durable":{"version":"1.7.0"}}}', "Pi Durable"),
+            ]:
+                file = staged / relative
+                original = file.read_text()
+                file.write_text(content)
+                with self.assertRaisesRegex(RuntimeError, error):
+                    installer.check_hot_compatibility(current, staged)
+                file.write_text(original)
 
 
 class SystemChecks(unittest.TestCase):

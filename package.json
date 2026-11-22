@@ -2,6 +2,7 @@
   "name": "@viasnake/agent",
   "version": "0.2.0",
   "private": true,
+  "agentHotDeployEpoch": 1,
   "description": "A web-accessible Pi Durable agent for prepared Ubuntu systems",
   "type": "module",
   "engines": {

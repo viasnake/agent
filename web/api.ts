@@ -87,7 +87,7 @@ export function setCsrf(value: string) {
   csrf = value;
 }
 let reconnecting: Promise<void> | undefined;
-async function reconnect() {
+export async function renewBrowserSession() {
   reconnecting ??= api<{ csrf: string }>("/api/session")
     .then((session) => setCsrf(session.csrf))
     .finally(() => {
@@ -121,7 +121,7 @@ export async function api<T>(
       response.status === 401 &&
       value.code === "session_expired"
     ) {
-      if (csrf === sentCsrf) await reconnect();
+      if (csrf === sentCsrf) await renewBrowserSession();
       continue;
     }
     if (!response.ok)
