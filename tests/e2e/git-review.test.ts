@@ -95,8 +95,14 @@ test("changes tab shows Git patches separately from downloadable files", async (
     const working = page.getByRole("tab", { name: "未コミット", exact: true });
     await working.focus();
     await working.press("ArrowRight");
-    await page.getByLabel("基準コミット", { exact: true }).fill(base);
-    await page.getByRole("button", { name: "比較", exact: true }).click();
+    const picker = page.getByRole("combobox", { name: "比較の起点" });
+    const original = picker
+      .locator("option")
+      .filter({ hasText: /^original — \d{4}-\d{2}-\d{2}/ });
+    await original.waitFor({ state: "attached" });
+    assert.equal(await original.getAttribute("value"), base);
+    assert.equal(await picker.locator("option").count(), 2);
+    await picker.selectOption({ label: (await original.textContent())! });
     await file.click();
     await patch.waitFor();
     assert.deepEqual(

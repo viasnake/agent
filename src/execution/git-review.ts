@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
   gitReviewPatchBytes,
+  gitReviewHistoryLimit,
   type GitReviewRequest,
   type GitReviewResult,
 } from "../git-review.js";
@@ -195,6 +196,7 @@ async function copyMetadata(gitDir: string, shadow: string, working: boolean) {
       throw new Unavailable("repository");
   } else if (!/^[0-9a-f]{40}$/.test(head)) throw new Unavailable("repository");
   await copy("packed-refs");
+  await copy("shallow");
   if (working) {
     await copy("index");
     await copy("info/exclude");
@@ -232,7 +234,11 @@ async function compare(
   const scratch = await mkdtemp(join(temp, "git-review-"));
   try {
     const shadow = join(scratch, "git");
-    await copyMetadata(gitDir, shadow, !request.base);
+    await copyMetadata(
+      gitDir,
+      shadow,
+      request.kind !== "history" && !request.base,
+    );
     const git = async (
       argv: string[],
       working = root,
@@ -308,6 +314,55 @@ async function compare(
       }
     };
     const head = await resolve("HEAD");
+    if (request.kind === "history") {
+      const values = fields(
+        await git([
+          "log",
+          "--first-parent",
+          "--skip=1",
+          `--max-count=${gitReviewHistoryLimit + 1}`,
+          "--no-show-signature",
+          "-z",
+          "--format=%H%x00%as%x00%s",
+          head,
+          "--",
+        ]),
+      );
+      const commits = [];
+      for (
+        let i = 0;
+        i < values.length && commits.length < gitReviewHistoryLimit;
+        i += 3
+      ) {
+        const [oid, date, subject] = values
+          .slice(i, i + 3)
+          .map((value) => value.toString("utf8"));
+        if (
+          !oid ||
+          !/^[0-9a-f]{40}$/.test(oid) ||
+          !date ||
+          subject === undefined
+        )
+          throw new Unavailable("commit");
+        commits.push({
+          oid,
+          date,
+          subject: subject
+            .replace(
+              /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g,
+              " ",
+            )
+            .trim()
+            .slice(0, 240),
+        });
+      }
+      return {
+        kind: "history",
+        commits,
+        limited: values.length > gitReviewHistoryLimit * 3,
+      };
+    }
+
     if (request.kind === "patch" && request.head.toLowerCase() !== head)
       throw new Unavailable("changed");
     const revisions = request.base

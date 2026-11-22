@@ -1706,6 +1706,7 @@ button {
 }
 .git-review-summary {
   padding: 12px 0;
+  overflow-wrap: anywhere;
 }
 .git-review-summary code,
 .git-patch-line code {
