@@ -291,13 +291,18 @@ button {
   padding: 24px;
 }
 .session-dialog.usage-dialog {
-  width: min(960px, calc(100vw - 32px));
-  max-height: calc(100dvh - 32px);
+  width: min(960px, calc(100vw - 16px));
+  max-width: none;
+  max-height: calc(100dvh - 16px);
+  padding: clamp(12px, 3vw, 24px);
+}
+.usage-period label {
+  inline-size: 8.25rem;
 }
 .usage-summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 24px 48px;
+  gap: 8px 24px;
   font-variant-numeric: tabular-nums;
 }
 .usage-summary dt {
@@ -306,8 +311,14 @@ button {
   font-weight: 500;
 }
 .usage-summary dd {
-  margin: 4px 0 0;
-  font-size: 24px;
+  margin: 0;
+  font-size: 20px;
+}
+@media (max-width: 480px) {
+  .usage-dialog .usage-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .usage-table {
   font-size: 13px;
@@ -315,6 +326,7 @@ button {
 }
 .usage-table th,
 .usage-table td {
+  --bs-table-cell-padding-x: 0.5rem;
   text-align: right;
   white-space: nowrap;
 }
@@ -322,7 +334,7 @@ button {
   text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
-  min-width: 160px;
+  min-width: 120px;
 }
 #actions {
   display: flex;
@@ -1297,7 +1309,7 @@ button {
 .image-dialog::backdrop {
   background: rgb(0 0 0 / 40%);
 }
-.session-dialog form {
+.session-dialog:not(.usage-dialog) form {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -1322,7 +1334,7 @@ button {
 .session-dialog label {
   font-size: 13px;
 }
-.session-dialog input.form-control {
+.session-dialog:not(.usage-dialog) input.form-control {
   margin-top: 8px;
 }
 .session-dialog footer {

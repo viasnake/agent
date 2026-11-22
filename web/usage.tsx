@@ -119,12 +119,16 @@ function UsageBreakdown({
           <dd>{cost(usage.total.cost)}</dd>
         </div>
       </dl>
-      <div className="table-responsive" tabIndex={0} aria-label="使用量の内訳">
-        <table className="table usage-table">
+      <div
+        className="table-card table-responsive mb-0"
+        tabIndex={0}
+        aria-label="使用量の内訳"
+      >
+        <table className="table table-sm table-striped usage-table mb-0">
           <caption className="visually-hidden">
             回数・トークン・費用の内訳
           </caption>
-          <thead>
+          <thead className="table-active">
             <tr>
               <th scope="col">モデル / ツール</th>
               <th scope="col">回数</th>
@@ -141,7 +145,7 @@ function UsageBreakdown({
             <UsageRows usage={usage.models} activity={activity?.models} />
             <UsageRows usage={usage.tools} activity={activity?.tools} tool />
           </tbody>
-          <tfoot>
+          <tfoot className="table-active fw-semibold">
             <UsageRow
               name="合計"
               usage={usage.total}
@@ -151,9 +155,6 @@ function UsageBreakdown({
           </tfoot>
         </table>
       </div>
-      <p className="small fg-2">
-        N/A：費用不明。実際の請求額・利用枠は契約先で確認してください。
-      </p>
     </>
   );
 }
@@ -229,10 +230,14 @@ export function SessionUsage({
 
 function DailyUsage({ days }: { days: RecordedUsage["days"] }) {
   return (
-    <div className="table-responsive" tabIndex={0} aria-label="日別の使用量">
-      <table className="table usage-table">
+    <div
+      className="table-card table-responsive mb-0"
+      tabIndex={0}
+      aria-label="日別の使用量"
+    >
+      <table className="table table-sm table-striped usage-table mb-0">
         <caption className="visually-hidden">日別の使用量</caption>
-        <thead>
+        <thead className="table-active">
           <tr>
             <th scope="col">日付</th>
             <th scope="col">モデル呼び出し</th>
@@ -276,7 +281,7 @@ function UsagePeriod() {
   return (
     <>
       <form
-        className="d-flex flex-row flex-wrap align-items-end gap-3 my-3"
+        className="usage-period d-flex flex-wrap align-items-end gap-2 my-3"
         onSubmit={(event) => {
           event.preventDefault();
           if (period.from === start && period.to === end) reload();
@@ -286,10 +291,10 @@ function UsagePeriod() {
         <label>
           開始日
           <input
-            className="form-control"
+            className="form-control form-control-sm mt-1"
             type="date"
             required
-            max={end || undefined}
+            max={end || "9999-12-31"}
             value={start}
             onChange={(event) => setStart(event.target.value)}
           />
@@ -297,28 +302,26 @@ function UsagePeriod() {
         <label>
           終了日
           <input
-            className="form-control"
+            className="form-control form-control-sm mt-1"
             type="date"
             required
             min={start || undefined}
+            max="9999-12-31"
             value={end}
             onChange={(event) => setEnd(event.target.value)}
           />
         </label>
-        <button className="btn-solid theme-primary" type="submit">
+        <button className="btn-solid theme-primary btn-sm" type="submit">
           集計
         </button>
-        <span className="small fg-2 align-self-center">{timezone}</span>
+        <span className="small fg-2 pb-1">{timezone}</span>
       </form>
       {status}
       {activity &&
         (activity.days.length ? (
           <>
             <UsageBreakdown usage={activity} activity={activity} />
-            <p className="small fg-2 mb-3">
-              保存されたモデル応答とツール結果を集計します。コンテキスト圧縮のトークンはセッションの累計に含まれます。
-            </p>
-            <h3 className="h6 mt-4">日別</h3>
+            <h3 className="h6 mt-3">日別</h3>
             <DailyUsage days={activity.days} />
           </>
         ) : (
