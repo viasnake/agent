@@ -3,15 +3,14 @@ import { createPortal } from "react-dom";
 import { Icon } from "./icons.js";
 
 export type MessageAction = {
-  kind: "fork" | "edit" | "regenerate";
+  kind: "fork" | "regenerate";
   entryId: number;
-  text: string;
-  images: boolean;
 };
 export const MessageActions = createContext<{
   disabled: boolean;
   activeEntry: number | null;
   onAction: (action: MessageAction) => void;
+  onEdit?: (entryId: number, text: string) => Promise<void>;
   onRemember?: (entryId: number, text: string) => void;
 }>({ disabled: true, activeEntry: null, onAction: () => {} });
 export function MessageActionDialog({
@@ -21,23 +20,17 @@ export function MessageActionDialog({
 }: {
   action: MessageAction;
   onClose: () => void;
-  onSubmit: (text: string) => Promise<void>;
+  onSubmit: () => Promise<void>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useId();
-  const [text, setText] = useState(action.text);
   const [approved, setApproved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     dialog.current?.showModal();
   }, []);
-  const label =
-    action.kind === "edit"
-      ? "編集して送信"
-      : action.kind === "regenerate"
-        ? "回答を再生成"
-        : "ここから分岐";
+  const label = action.kind === "regenerate" ? "回答を再生成" : "ここから分岐";
   return createPortal(
     <dialog
       ref={dialog}
@@ -51,16 +44,11 @@ export function MessageActionDialog({
       <form
         onSubmit={async (event) => {
           event.preventDefault();
-          if (
-            busy ||
-            (action.kind !== "fork" && !approved) ||
-            (action.kind === "edit" && !text.trim())
-          )
-            return;
+          if (busy || (action.kind === "regenerate" && !approved)) return;
           setBusy(true);
           setError("");
           try {
-            await onSubmit(text);
+            await onSubmit();
             dialog.current?.close();
           } catch (error) {
             setError(
@@ -74,40 +62,12 @@ export function MessageActionDialog({
         }}
       >
         <h2 id={heading}>
-          <Icon
-            name={
-              action.kind === "edit"
-                ? "edit"
-                : action.kind === "regenerate"
-                  ? "retry"
-                  : "fork"
-            }
-          />
+          <Icon name={action.kind === "regenerate" ? "retry" : "fork"} />
           {label}
         </h2>
         <p>
           元の履歴を残し、新しいセッションに分岐します。作業ファイルはコピーしません。
         </p>
-        {action.kind === "edit" && (
-          <>
-            <textarea
-              className="form-control"
-              aria-label="メッセージを編集"
-              rows={7}
-              maxLength={64000}
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              disabled={busy}
-              autoFocus
-            />
-            {action.images && (
-              <span className="small fg-2">
-                <Icon name="attach" />
-                元の画像を保持
-              </span>
-            )}
-          </>
-        )}
         {action.kind !== "fork" && (
           <label className="settings-check">
             <input
@@ -133,11 +93,7 @@ export function MessageActionDialog({
           <button
             type="submit"
             className="btn-solid theme-primary"
-            disabled={
-              busy ||
-              (action.kind !== "fork" && !approved) ||
-              (action.kind === "edit" && !text.trim())
-            }
+            disabled={busy || (action.kind === "regenerate" && !approved)}
           >
             <Icon
               name={busy ? "more" : action.kind === "fork" ? "fork" : "send"}

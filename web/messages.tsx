@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -321,25 +322,124 @@ function HighlightedCode({
 }
 
 export function UserMessage() {
-  const id = useAuiState((state) => state.message.id);
-  const { activeEntry } = useContext(MessageActions);
+  const message = useAuiState((state) => state.message);
+  const entryId = Number(message.id.split("-")[0]);
+  const { activeEntry, disabled, onEdit } = useContext(MessageActions);
+  const [draft, setDraft] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const editing = draft !== undefined;
+  const editor = useRef<HTMLTextAreaElement>(null);
+  const editButton = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (editing) editor.current?.focus({ preventScroll: true });
+    else if (editButton.current) {
+      editButton.current.focus({ preventScroll: true });
+      editButton.current = null;
+    }
+  }, [editing]);
+
+  function beginEdit() {
+    editButton.current = document.activeElement as HTMLElement;
+    setError("");
+    setDraft(
+      message.parts
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n"),
+    );
+  }
+  const cancel = () => setDraft(undefined);
+  const canSubmit = !!draft?.trim() && !disabled && !busy;
   return (
     <MessagePrimitive.Root
-      data-entry-id={id.split("-")[0]}
-      className={`message user-message ${activeEntry === Number(id.split("-")[0]) ? "search-current" : ""}`}
+      data-entry-id={entryId}
+      className={`message user-message ${activeEntry === entryId ? "search-current" : ""}`}
     >
       <div className="visually-hidden">あなた</div>
-      <div className="user-bubble">
-        <MessagePrimitive.Parts>
-          {({ part }) => {
-            if (part.type === "text") return <UserText text={part.text} />;
-            if (part.type === "image")
-              return <ImagePreview image={part.image} />;
-            return null;
+      {editing ? (
+        <form
+          className="user-bubble user-editor d-grid gap-2"
+          aria-label="メッセージの編集"
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
+            if (event.key === "Escape" && !busy) {
+              event.stopPropagation();
+              cancel();
+            } else if (
+              event.key === "Enter" &&
+              (event.ctrlKey || event.metaKey)
+            ) {
+              event.preventDefault();
+              event.currentTarget.requestSubmit();
+            }
           }}
-        </MessagePrimitive.Parts>
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (!canSubmit || !onEdit) return;
+            setBusy(true);
+            setError("");
+            try {
+              await onEdit(entryId, draft);
+              setDraft(undefined);
+            } catch (error) {
+              setError(
+                error instanceof Error ? error.message : "送信できませんでした",
+              );
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <textarea
+            ref={editor}
+            className="form-control"
+            aria-label="メッセージを編集"
+            rows={5}
+            maxLength={64000}
+            value={draft}
+            readOnly={busy}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          {message.parts.some((part) => part.type === "image") && (
+            <span className="small fg-2">
+              <Icon name="attach" /> 元の画像を保持
+            </span>
+          )}
+          {error && <div role="alert">{error}</div>}
+          <div className="d-flex flex-wrap justify-content-end gap-2">
+            <button
+              type="button"
+              className="btn-outline theme-secondary btn-sm"
+              disabled={busy}
+              onClick={cancel}
+            >
+              キャンセル
+            </button>
+            <button
+              type="submit"
+              className="btn-solid theme-primary btn-sm"
+              disabled={!canSubmit}
+            >
+              {busy ? "送信中…" : "送信"}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div className="user-bubble">
+          <MessagePrimitive.Parts>
+            {({ part }) => {
+              if (part.type === "text") return <UserText text={part.text} />;
+              if (part.type === "image")
+                return <ImagePreview image={part.image} />;
+              return null;
+            }}
+          </MessagePrimitive.Parts>
+        </div>
+      )}
+      <div hidden={editing}>
+        <MessageFooter user onEdit={beginEdit} />
       </div>
-      <MessageFooter user />
     </MessagePrimitive.Root>
   );
 }
@@ -436,11 +536,17 @@ function AssistantParts({ finalAnswer }: { finalAnswer: boolean }) {
   );
 }
 
-function MessageFooter({ user = false }: { user?: boolean }) {
+function MessageFooter({
+  user = false,
+  onEdit,
+}: {
+  user?: boolean;
+  onEdit?: () => void;
+}) {
   return (
     <div className="message-footer" data-aui-quote-selectable="false">
       <MessageBranches />
-      <MessageControlScope>
+      <MessageControlScope onEdit={onEdit}>
         <MessageToolbar user={user} />
       </MessageControlScope>
     </div>
@@ -514,9 +620,7 @@ function MessageToolbar({ user = false }: { user?: boolean }) {
             aria-label="ここから分岐"
             title="ここから分岐"
             disabled={disabled}
-            onClick={() =>
-              onAction({ kind: "fork", entryId, text, images: false })
-            }
+            onClick={() => onAction({ kind: "fork", entryId })}
           >
             <Icon name="fork" />
           </button>

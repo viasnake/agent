@@ -427,6 +427,13 @@ button {
   border-radius: 18px;
   background: var(--bs-bg-2);
 }
+.user-editor {
+  width: min(100%, 34rem);
+  min-width: 0;
+}
+.user-editor textarea {
+  resize: vertical;
+}
 .user-text {
   white-space: pre-wrap;
 }
@@ -1332,10 +1339,6 @@ button {
 }
 .message-dialog {
   width: min(560px, calc(100vw - 32px));
-}
-.message-dialog textarea {
-  min-height: 160px;
-  resize: vertical;
 }
 .message-actions {
   display: flex;
