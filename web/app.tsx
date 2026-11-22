@@ -939,11 +939,20 @@ function App() {
         : view,
     );
   }
-  async function branchMessage(text: string) {
-    if (!selected || !messageAction) return;
+  async function branchMessage(
+    entryId: number,
+    mode: MessageAction["kind"] | "edit",
+    text = "",
+  ) {
+    if (!selected) return;
     const sourceId = selected;
-    const body = { entryId: messageAction.entryId, mode: messageAction.kind };
-    const key = `branch-${sourceId}`;
+    const version = selectionVersion.current;
+    const body = { entryId, mode };
+    const key =
+      mode === "edit"
+        ? `branch-${sourceId}-edit-${entryId}`
+        : `branch-${sourceId}`;
+    setActing(true);
     try {
       const branch = await api<{ id: string }>(
         `/api/conversations/${sourceId}/branch`,
@@ -952,25 +961,26 @@ function App() {
       );
       // Creation and execution have separate durable receipts. A lost response never
       // authorizes another inference or tool mutation with a different identity.
-      if (messageAction.kind !== "fork") {
+      if (mode !== "fork") {
         const sendKey = `branch-send-${branch.id}`;
         const content =
-          messageAction.kind === "edit"
+          mode === "edit"
             ? {
                 text,
-                source: { sessionId: sourceId, entryId: messageAction.entryId },
+                source: { sessionId: sourceId, entryId },
               }
             : {};
         await api(
-          `/api/conversations/${branch.id}/${messageAction.kind === "edit" ? "messages" : "continue"}`,
+          `/api/conversations/${branch.id}/${mode === "edit" ? "messages" : "continue"}`,
           "POST",
           { ...content, requestId: await requestId(sendKey, content) },
         );
         forget(sendKey);
       }
       forget(key);
-      select(branch.id);
+      if (selectionVersion.current === version) select(branch.id);
     } finally {
+      setActing(false);
       await list().catch(notice);
     }
   }
@@ -1468,6 +1478,8 @@ function App() {
                         currentStatus === "running" ||
                         currentStatus === "stopping",
                       activeEntry,
+                      onEdit: (entryId, text) =>
+                        branchMessage(entryId, "edit", text),
                       onRemember: (entryId, text) => {
                         if (selected)
                           openMemory({
@@ -1490,6 +1502,7 @@ function App() {
                       cursor={cursor}
                       sending={
                         sending ||
+                        acting ||
                         deleting ||
                         changingModel ||
                         (selected !== null && !view)
@@ -1561,7 +1574,9 @@ function App() {
                       .getElementById("message")
                       ?.focus({ preventScroll: true });
                 }}
-                onSubmit={branchMessage}
+                onSubmit={() =>
+                  branchMessage(messageAction.entryId, messageAction.kind)
+                }
               />
             )}
           </main>

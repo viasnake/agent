@@ -390,28 +390,61 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     await search.waitFor({ state: "hidden" });
     assert.equal(await page.locator(".search-current").count(), 1);
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
-    f.faux.setResponses([answer("編集後の応答")]);
-    await page
+    const original = page
       .locator(".user-message")
-      .filter({ hasText: "最初の検索ワード" })
-      .getByRole("button", { name: "メッセージを編集", exact: true })
-      .click();
-    const edit = page.getByRole("dialog", {
-      name: "編集して送信",
+      .filter({ hasText: "最初の検索ワード" });
+    const editButton = original.getByRole("button", {
+      name: "メッセージを編集",
       exact: true,
     });
-    await edit.getByRole("textbox").fill("変更した入力");
+    const edit = page.locator(".user-message").getByRole("form", {
+      name: "メッセージの編集",
+    });
+    const input = edit.getByRole("textbox");
+    const sendEdit = edit.getByRole("button", { name: "送信", exact: true });
+    await editButton.click();
+    assert.equal(await input.inputValue(), "最初の検索ワード");
     assert.equal(
-      await edit
-        .getByRole("button", { name: "編集して送信", exact: true })
-        .isDisabled(),
+      await input.evaluate((node) => node === document.activeElement),
       true,
     );
-    await edit.getByRole("checkbox").check();
-    await edit
-      .getByRole("button", { name: "編集して送信", exact: true })
-      .click();
+    assert.equal(await page.getByRole("dialog").count(), 0);
+    await input.fill(" ");
+    assert.equal(await sendEdit.isDisabled(), true);
+    await input.press("Escape");
+    await edit.waitFor({ state: "hidden" });
+    assert.equal(
+      await editButton.evaluate((node) => node === document.activeElement),
+      true,
+    );
+    assert.equal(
+      (await f.service.list()).some((session) => session.parentId === a.id),
+      false,
+    );
+    assert.equal(await page.locator("#message").inputValue(), "A の下書き");
+
+    f.faux.setResponses([answer("編集後の応答")]);
+    let editResponseLost = false;
+    await page.route("**/api/conversations/*/messages", async (route) => {
+      if (!editResponseLost) {
+        editResponseLost = true;
+        await route.fetch();
+        await route.abort("failed");
+      } else await route.continue();
+    });
+    await editButton.click();
+    await input.fill("変更した入力");
+    await sendEdit.click();
+    await edit.getByRole("alert").waitFor();
+    assert.equal(await input.inputValue(), "変更した入力");
+    await input.press("Control+Enter");
     await page.getByText("編集後の応答", { exact: true }).waitFor();
+    await page.unroute("**/api/conversations/*/messages");
+    const editBranches = (await f.service.list()).filter(
+      (session) => session.parentId === a.id,
+    );
+    assert.equal(editBranches.length, 1);
+    assert.equal(editBranches[0]!.requests, 1);
     const edited = (await f.service.list()).find(
       (session) => session.parentId === a.id,
     )!;

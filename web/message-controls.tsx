@@ -34,7 +34,13 @@ const ControlComposer = resource(
   (client: ClientOutput<"composer">): ClientOutput<"composer"> => client,
 );
 
-export function MessageControlScope({ children }: { children: ReactNode }) {
+export function MessageControlScope({
+  children,
+  onEdit,
+}: {
+  children: ReactNode;
+  onEdit?: () => void;
+}) {
   const aui = useAui();
   const message = useAuiState((state) => state.message);
   const thread = useAuiState((state) => state.thread);
@@ -43,22 +49,14 @@ export function MessageControlScope({ children }: { children: ReactNode }) {
     () => ({
       ...thread,
       isDisabled: disabled,
-      capabilities: { ...thread.capabilities, edit: true, reload: true },
+      capabilities: { ...thread.capabilities, edit: !!onEdit, reload: true },
     }),
-    [thread, disabled],
+    [thread, disabled, onEdit],
   );
   function open(kind: MessageAction["kind"]) {
     const entryId = Number(message.id.split("-")[0]);
     if (disabled || !Number.isFinite(entryId)) return;
-    onAction({
-      kind,
-      entryId,
-      text: message.parts
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join("\n"),
-      images: message.parts.some((part) => part.type === "image"),
-    });
+    onAction({ kind, entryId });
   }
   return (
     <AuiProvider
@@ -72,7 +70,9 @@ export function MessageControlScope({ children }: { children: ReactNode }) {
         }),
         composer: ControlComposer({
           ...aui.composer(),
-          beginEdit: () => open("edit"),
+          beginEdit: () => {
+            if (!disabled) onEdit?.();
+          },
         }),
       })}
     >

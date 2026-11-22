@@ -58,8 +58,9 @@ browser-local; retain unsent File objects only in memory, never imply they survi
 Search reads bounded Pi history pages and must not fetch models or run work.
 Edits, regenerations and forks preserve the original session and use public Pi
 conversation creation/fork APIs with fresh work directories. Do not copy work files
-or imply filesystem rollback. Branch creation never runs inference or tools; explicit
-edit/regeneration confirmation admits a separately deduplicated input or continue.
+or imply filesystem rollback. Branch creation never runs inference or tools. Sending
+an inline edit or confirming regeneration admits a separately deduplicated input or
+continue. Opening or cancelling an editor never admits work.
 Keep each branch's metadata and creation receipt in the same Pi Document commit.
 Preserve admitted image bytes for edits, without rereading mutable attachments.
 
