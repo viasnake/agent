@@ -146,3 +146,39 @@ export function skillsTools(
   });
   return { extension, activate };
 }
+
+export function skillWriteTool(
+  service: AgentService,
+  id: string,
+  name: string,
+) {
+  const args = z
+    .object({ content: z.string().max(SKILL_LIMITS.fileBytes) })
+    .strict();
+  return defineExtension({
+    name: "skill-write-" + id,
+    tools: [
+      {
+        name: "skill_save",
+        description: `Prepare the complete UTF-8 SKILL.md for the explicitly requested Skill ${name}, including YAML frontmatter. Only this name can be saved. No resource files, credentials or private data. Call once; preparation is not confirmation of publication.`,
+        parameters: z.toJSONSchema(args),
+        replay: "unsafe",
+        execute: async (input, api) => {
+          service.prepareSkillWrite(
+            id,
+            api.conversationId,
+            args.parse(input).content,
+          );
+          return {
+            output: [
+              {
+                type: "text",
+                text: "SKILL.md を保存できる状態にしました。まだ登録完了ではありません。",
+              },
+            ],
+          };
+        },
+      },
+    ],
+  });
+}

@@ -148,7 +148,13 @@ search index or Git job system.
 
 Shared Skills live only in dataRoot/skills, with control ownership, root-owned
 ancestors and read/execute access for work. Settings can import, edit SKILL.md and
-delete Skills only while all execution is idle, under the admission lock. Validate
+delete Skills only while all execution is idle, under the admission lock. Chat
+can prepare a single SKILL.md creation or revision-checked update only from a
+fresh explicit `/skill-create:name` or `/skill-update:name` user command. No
+implicit grants from history, steering, rewrites, or tool output. Publish only
+once the response finishes successfully and all runs and terminals are idle;
+report the confirmed outcome in the requesting conversation. Pending drafts are
+not replayed on restart. Chat never imports resources or deletes Skills. Validate
 bounded imports before publishing and revision-check edits and deletion. The
 stopped-service installer migrates only validated legacy root-owned trees,
 preserving their contents. Never repair unsafe ownership or permissions.

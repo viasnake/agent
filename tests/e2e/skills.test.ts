@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createServer as portProbe } from "node:net";
 import { chromium } from "playwright";
-import { fixture } from "../support.js";
+import { answer, call, fixture } from "../support.js";
 import { skillsFixture } from "../skills-fixture.js";
 import { createServer } from "../../src/server.js";
 
@@ -15,7 +16,17 @@ test("Skills settings import folders, edit and delete with validation in light, 
     "name: pdf-processing\ndescription: PDF からテキストを抽出\ncompatibility: Python 3",
   );
   await s.add("invalid", "name: invalid\ndescription: ''");
-  const f = await fixture([], { root: s.root, skills: s.loader });
+  const f = await fixture(
+    [
+      call("skill_save", {
+        content:
+          "---\nname: release-checklist\ndescription: リリース前後の確認手順\n---\nCI が成功したことを確認する。更新後にサービスの応答を確認する。",
+      }),
+      answer("リリース前後の確認手順をまとめました。"),
+    ],
+    { root: s.root, skills: s.loader },
+  );
+  const session = await f.service.create(randomUUID(), "リリース手順の整理");
   const probe = portProbe();
   await new Promise<void>((done) => probe.listen(0, "127.0.0.1", done));
   const address = probe.address();
@@ -35,9 +46,36 @@ test("Skills settings import folders, edit and delete with validation in light, 
   page.on("pageerror", (e) => errors.push(e.message));
   try {
     await page.goto(origin);
+    await page
+      .locator(`[data-session-id="${session.id}"] .conversation-item`)
+      .click();
+    await page
+      .locator("#message")
+      .fill(
+        "/skill-create:release-checklist CI の確認とリリース後の動作確認をスキルにまとめてください。",
+      );
+    await page.locator("#send").click();
+    const saved = page
+      .getByRole("status")
+      .filter({ hasText: "Skill「release-checklist」を登録しました" });
+    await saved.waitFor();
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await saved.scrollIntoViewIfNeeded();
+      assert.equal(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+        true,
+      );
+      await mkdir("test-results", { recursive: true });
+      await page.screenshot({ path: `test-results/chat-skill-${width}.png` });
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.getByRole("button", { name: "設定", exact: true }).click();
     await page.getByRole("button", { name: "Skills", exact: true }).click();
     const panel = page.getByRole("region", { name: "Skills 一覧" });
+    await panel.getByText("release-checklist", { exact: true }).waitFor();
     await panel.getByText("pdf-processing", { exact: true }).waitFor();
     await panel.getByText("PDF からテキストを抽出", { exact: true }).waitFor();
     await panel.getByText("互換性: Python 3", { exact: true }).waitFor();

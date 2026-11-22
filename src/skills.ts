@@ -357,11 +357,7 @@ export class SkillsLoader {
   async update(name: string, content: string, expected: string) {
     await this.assertWritable();
     await this.revision(name, expected);
-    const bytes = Buffer.from(content);
-    if (bytes.length > SKILL_LIMITS.fileBytes)
-      failure("Skill の本文は64 KiBまでです");
-    if (parseSkill(bytes).metadata.name !== name)
-      failure("Skill 名は変更できません");
+    const bytes = validateSkillBody(name, content);
     await this.checkCatalogBytes(name, bytes.length);
     const stage = await mkdtemp(join(dirname(this.root), "control/skill-"));
     try {
@@ -567,6 +563,25 @@ export function explicitSkill(input: string): string | undefined {
   if (!skillName.safeParse(name).success)
     failure("/skill: に有効な Skill 名を指定してください");
   return name;
+}
+
+export function skillWriteRequest(input: string) {
+  const match = /^\/skill-(create|update):([^\s]+)\s+\S/u.exec(input);
+  if (!/^\/skill-(create|update):/u.test(input)) return;
+  if (!match || !skillName.safeParse(match[2]).success)
+    failure(
+      "/skill-create:名前 または /skill-update:名前 の後に依頼を書いてください",
+    );
+  return { mode: match[1] as "create" | "update", name: match[2]! };
+}
+
+export function validateSkillBody(name: string, content: string) {
+  const bytes = Buffer.from(content);
+  if (bytes.length > SKILL_LIMITS.fileBytes)
+    failure("Skill の本文は64 KiBまでです");
+  if (parseSkill(bytes).metadata.name !== name)
+    failure("Skill 名が指定と一致しません");
+  return bytes;
 }
 
 export const skillImport = z

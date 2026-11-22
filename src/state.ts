@@ -22,6 +22,7 @@ export type Conversation = {
   modelConfigId?: string;
   model?: string;
   skills?: SkillVersions;
+  skillNotice?: string;
   requests: number;
   deadlineAt: number | null;
 };

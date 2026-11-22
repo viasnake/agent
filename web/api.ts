@@ -21,6 +21,7 @@ export type Conversation = {
   title: string;
   status: string;
   detail: string;
+  skillNotice?: string;
   updatedAt: number;
   modelConfigId?: string;
   model?: string;
