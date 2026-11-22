@@ -484,7 +484,9 @@ function App() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<unknown>(null);
   const [files, setFiles] = useState<Files>({ files: [] });
-  const [tab, setTab] = useState<"chat" | "files" | "usage">("chat");
+  const [tab, setTab] = useState<"chat" | "changes" | "files" | "usage">(
+    "chat",
+  );
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
   const filesVersion = useRef(0);
@@ -1292,6 +1294,15 @@ function App() {
                 会話
               </TabsTrigger>
               <TabsTrigger
+                value="changes"
+                id="changes-tab"
+                aria-controls="changes-panel"
+                disabled={!selected}
+              >
+                <Icon name="diff" />
+                変更
+              </TabsTrigger>
+              <TabsTrigger
                 value="files"
                 id="files-tab"
                 aria-controls="files-panel"
@@ -1329,6 +1340,29 @@ function App() {
                 )}
               </TabsContent>
               <TabsContent
+                value="changes"
+                forceMount
+                id="changes-panel"
+                aria-labelledby="changes-tab"
+                aria-hidden={tab !== "changes"}
+                inert={tab !== "changes"}
+                className="session-panel"
+                tabIndex={0}
+              >
+                <div className="files-workspace">
+                  {selected && tab === "changes" && (
+                    <GitReview
+                      key={selected}
+                      id={selected}
+                      running={
+                        currentStatus === "running" ||
+                        currentStatus === "stopping"
+                      }
+                    />
+                  )}
+                </div>
+              </TabsContent>
+              <TabsContent
                 value="files"
                 forceMount
                 id="files-panel"
@@ -1339,21 +1373,7 @@ function App() {
                 tabIndex={0}
               >
                 <div className="files-workspace">
-                  {selected && tab === "files" && (
-                    <GitReview
-                      key={selected}
-                      id={selected}
-                      running={
-                        currentStatus === "running" ||
-                        currentStatus === "stopping"
-                      }
-                    />
-                  )}
-                  <section
-                    id="files-section"
-                    className="files-downloads"
-                    aria-label="添付・生成ファイル"
-                  >
+                  <section id="files-section" aria-label="添付・生成ファイル">
                     <div className="files-section-heading">
                       <div className="d-flex align-items-center gap-2">
                         <Icon name="down" />

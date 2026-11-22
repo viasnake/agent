@@ -7,10 +7,13 @@ import { test } from "node:test";
 import { chromium, type Browser } from "playwright";
 import { createServer } from "../../src/server.js";
 import { reviewRepository } from "../git-review-fixture.js";
-import { answer, fixture, until } from "../support.js";
+import { answer, call, fixture, until } from "../support.js";
 
-test("files tab opens a lazy, plain-text Git patch for the selected session and comparison", async (t) => {
-  const f = await fixture([answer("review ready")]);
+test("changes tab shows Git patches separately from downloadable files", async (t) => {
+  const f = await fixture([
+    call("write", { path: "outputs/review.txt", content: "Review notes" }),
+    answer("review ready"),
+  ]);
   t.after(async () => {
     await f.service.close();
     await rm(f.root, { recursive: true, force: true });
@@ -41,19 +44,28 @@ test("files tab opens a lazy, plain-text Git patch for the selected session and 
       viewport: { width: 1280, height: 800 },
     });
     let patchRequests = 0;
+    let reviewRequests = 0;
     page.on("request", (request) => {
-      if (new URL(request.url()).pathname.endsWith("/git/patch"))
-        patchRequests++;
+      const path = new URL(request.url()).pathname;
+      if (path.includes("/git/")) reviewRequests++;
+      if (path.endsWith("/git/patch")) patchRequests++;
     });
     const selectSession = (id: string) =>
       page.locator(`[data-session-id="${id}"] .conversation-item`).click();
     const files = () =>
       page.getByRole("tab", { name: "ファイル", exact: true }).click();
+    const changes = () =>
+      page.getByRole("tab", { name: "変更", exact: true }).click();
+    const downloads = page.getByRole("region", { name: "添付・生成ファイル" });
     const file = page.getByRole("button", { name: "変更: app.txt" });
     const patch = page.locator(".git-review-patch");
     await page.goto(origin);
     await selectSession(a.id);
     await files();
+    await downloads.getByRole("link", { name: /review.txt/ }).waitFor();
+    assert.equal(reviewRequests, 0);
+    await changes();
+    assert.equal(await downloads.isVisible(), false);
     await file.waitFor();
     assert.equal(patchRequests, 0);
     await file.click();
@@ -107,15 +119,22 @@ test("files tab opens a lazy, plain-text Git patch for the selected session and 
       true,
     );
     assert.equal(await file.isVisible(), false);
+    const sessionTabs = page.getByRole("tablist", { name: "セッションの内容" });
+    assert.equal(
+      await sessionTabs.evaluate(
+        (node) => node.scrollWidth === node.clientWidth,
+      ),
+      true,
+    );
     assert.equal(
       await page
-        .locator("#files-panel")
+        .locator("#changes-panel")
         .evaluate((node) => node.scrollWidth === node.clientWidth),
       true,
     );
     await page.setViewportSize({ width: 1280, height: 800 });
     await selectSession(b.id);
-    await files();
+    await changes();
     await page.getByText("セッション内に Git クローンはありません").waitFor();
     assert.equal(await patch.count(), 0);
   } finally {
