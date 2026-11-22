@@ -551,7 +551,9 @@ printf 'CSV verified'`,
         new URL(response.url()).pathname === "/api/session" &&
         response.status() === 200,
     );
-    await page.getByRole("button", { name: "更新", exact: true }).click();
+    await page
+      .getByRole("button", { name: "添付・生成ファイルを更新", exact: true })
+      .click();
     await renewed;
     assert.equal(
       await page.getByRole("button", { name: "再接続", exact: true }).count(),
@@ -668,7 +670,10 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     assert.equal(await filesTab.getAttribute("aria-controls"), "files-panel");
     assert.equal(await chatTab.getAttribute("aria-controls"), "chat-panel");
     await chatTab.focus();
+    const changesTab = page.getByRole("tab", { name: "変更", exact: true });
     await chatTab.press("ArrowRight");
+    await changesTab.and(page.locator('[aria-selected="true"]')).waitFor();
+    await changesTab.press("ArrowRight");
     await filesTab.and(page.locator('[aria-selected="true"]')).waitFor();
     assert.equal(await filesTab.getAttribute("aria-selected"), "true");
     await page.getByText("ファイルはありません", { exact: true }).waitFor();
@@ -795,13 +800,17 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       }),
     );
     await filesTab.click();
-    await page.getByRole("button", { name: "更新", exact: true }).click();
+    await page
+      .getByRole("button", { name: "添付・生成ファイルを更新", exact: true })
+      .click();
     await page
       .getByRole("alert")
       .filter({ hasText: "ファイルを読み込めませんでした" })
       .waitFor();
     await page.unrouteAll({ behavior: "wait" });
-    await page.getByRole("button", { name: "更新", exact: true }).click();
+    await page
+      .getByRole("button", { name: "添付・生成ファイルを更新", exact: true })
+      .click();
     await page.getByText("ファイルはありません", { exact: true }).waitFor();
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });

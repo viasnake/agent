@@ -554,6 +554,46 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     await page.locator("#new-conversation").click();
     assert.equal(await page.locator(".attachment-chip").count(), 0);
     assert.equal(await page.locator("#message").inputValue(), "");
+    async function assertSidebarAlignment() {
+      const positions = await page
+        .locator(
+          ".sidebar-header .new-conversation, .conversation-item, .sidebar-statistics, .sidebar-terminal, .sidebar-settings",
+        )
+        .evaluateAll((rows) =>
+          rows.map((row) => ({
+            icon: row.querySelector("svg")!.getBoundingClientRect().left,
+            label: row.querySelector("span")!.getBoundingClientRect().left,
+          })),
+        );
+      assert.ok(positions.length > 4);
+      assert.ok(
+        positions.every(
+          ({ icon, label }) =>
+            Math.abs(icon - positions[0]!.icon) < 1 &&
+            Math.abs(label - positions[0]!.label) < 1,
+        ),
+        JSON.stringify(positions),
+      );
+    }
+    await assertSidebarAlignment();
+    await page.locator(".sidebar-toggle").click();
+    assert.equal(
+      await page.locator(".sidebar-statistics .sidebar-label-text").isVisible(),
+      false,
+    );
+    const centered = await page
+      .locator(".sidebar-statistics")
+      .evaluate((row) => {
+        const bounds = row.getBoundingClientRect();
+        const icon = row.querySelector("svg")!.getBoundingClientRect();
+        return (
+          Math.abs(
+            bounds.left + bounds.width / 2 - icon.left - icon.width / 2,
+          ) < 1
+        );
+      });
+    assert.ok(centered);
+    await page.locator(".sidebar-toggle").click();
     await mkdir("test-results", { recursive: true });
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
@@ -566,6 +606,31 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
         .getByRole("button", { name: "セッション一覧を開く", exact: true })
         .click();
       await more(a.id);
+      await assertSidebarAlignment();
+      const menuItems = await page
+        .locator(".session-popover > :is(button, a)")
+        .evaluateAll((rows) =>
+          rows.map((row) => {
+            const text = [...row.childNodes].find(
+              (node) =>
+                node.nodeType === Node.TEXT_NODE && node.textContent?.trim(),
+            )!;
+            const range = document.createRange();
+            range.selectNodeContents(text);
+            return {
+              icon: row.querySelector("svg")!.getBoundingClientRect().left,
+              label: range.getBoundingClientRect().left,
+            };
+          }),
+        );
+      assert.equal(menuItems.length, 5);
+      assert.ok(
+        menuItems.every(
+          ({ icon, label }) =>
+            icon === menuItems[0]!.icon && label === menuItems[0]!.label,
+        ),
+        JSON.stringify(menuItems),
+      );
       const menu = await page.locator(".session-popover").boundingBox();
       assert.ok(
         menu &&

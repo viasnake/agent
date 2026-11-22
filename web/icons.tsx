@@ -29,6 +29,7 @@ const paths = {
   close: "m6 6 12 12M6 18 18 6",
   send: "M12 19V5m-6 6 6-6 6 6",
   attach: "m8 12 7-7a3 3 0 0 1 4 4L9 19a5 5 0 0 1-7-7L12 2m-4 10 7-7",
+  diff: "M5 3h14v18H5zM8 8h5M10.5 5.5v5M8 15h5",
   file: "M14 2H5v20h14V7zm0 0v5h5M8 12h8M8 16h6",
   down: "M12 4v16m-6-6 6 6 6-6",
   terminal: "m4 6 6 6-6 6m9 0h7",

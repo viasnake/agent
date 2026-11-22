@@ -484,7 +484,9 @@ function App() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<unknown>(null);
   const [files, setFiles] = useState<Files>({ files: [] });
-  const [tab, setTab] = useState<"chat" | "files" | "usage">("chat");
+  const [tab, setTab] = useState<"chat" | "changes" | "files" | "usage">(
+    "chat",
+  );
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
   const filesVersion = useRef(0);
@@ -1292,6 +1294,15 @@ function App() {
                 会話
               </TabsTrigger>
               <TabsTrigger
+                value="changes"
+                id="changes-tab"
+                aria-controls="changes-panel"
+                disabled={!selected}
+              >
+                <Icon name="diff" />
+                変更
+              </TabsTrigger>
+              <TabsTrigger
                 value="files"
                 id="files-tab"
                 aria-controls="files-panel"
@@ -1329,6 +1340,29 @@ function App() {
                 )}
               </TabsContent>
               <TabsContent
+                value="changes"
+                forceMount
+                id="changes-panel"
+                aria-labelledby="changes-tab"
+                aria-hidden={tab !== "changes"}
+                inert={tab !== "changes"}
+                className="session-panel"
+                tabIndex={0}
+              >
+                <div className="files-workspace">
+                  {selected && tab === "changes" && (
+                    <GitReview
+                      key={selected}
+                      id={selected}
+                      running={
+                        currentStatus === "running" ||
+                        currentStatus === "stopping"
+                      }
+                    />
+                  )}
+                </div>
+              </TabsContent>
+              <TabsContent
                 value="files"
                 forceMount
                 id="files-panel"
@@ -1338,69 +1372,63 @@ function App() {
                 className="session-panel"
                 tabIndex={0}
               >
-                <section
-                  id="files-section"
-                  className="output-files"
-                  aria-label="添付・生成ファイル"
-                >
-                  <div className="output-label">
-                    <Icon name="file" />
-                    <span>添付・生成ファイル</span>
-                    <button
-                      id="refresh-files"
-                      className="btn-text theme-secondary btn-sm icon-button"
-                      aria-label="更新"
-                      title="更新"
-                      disabled={!selected || filesLoading}
-                      onClick={() => selected && void refreshFiles(selected)}
-                    >
-                      <Icon name="retry" />
-                    </button>
-                  </div>
-                  {filesLoading && <p role="status">読み込み中…</p>}
-                  {filesError && <p role="alert">{filesError}</p>}
-                  {!filesLoading && !filesError && !files.files.length && (
-                    <p className="files-empty">ファイルはありません</p>
-                  )}
-                  <div id="files">
-                    {files.files.map((file) => (
-                      <a
-                        key={file.path}
-                        className="output-file"
-                        href={`/api/conversations/${selected}/download?path=${encodeURIComponent(file.path)}`}
-                      >
+                <div className="files-workspace">
+                  <section id="files-section" aria-label="添付・生成ファイル">
+                    <div className="files-section-heading">
+                      <div className="d-flex align-items-center gap-2">
                         <Icon name="down" />
-                        <span>
-                          {file.path.startsWith("attachments/")
-                            ? file.path.replace(
-                                /^attachments\/[0-9a-f-]{36}-/i,
-                                "",
-                              )
-                            : file.path.slice(8)}
-                        </span>
-                        <small>
-                          {file.path.startsWith("attachments/")
-                            ? "添付"
-                            : "生成"}
-                        </small>
-                        <small>{fileSize(file.size)}</small>
-                      </a>
-                    ))}
-                    {files.truncated && (
-                      <span className="small fg-2">表示上限に達しました</span>
+                        <h2 className="h5 m-0">添付・生成ファイル</h2>
+                      </div>
+                      <button
+                        id="refresh-files"
+                        className="btn-outline theme-secondary btn-sm d-inline-flex align-items-center gap-2"
+                        aria-label="添付・生成ファイルを更新"
+                        title="添付・生成ファイルを更新"
+                        disabled={!selected || filesLoading}
+                        onClick={() => selected && void refreshFiles(selected)}
+                      >
+                        <Icon name="retry" />
+                        更新
+                      </button>
+                    </div>
+                    {filesLoading && <p role="status">読み込み中…</p>}
+                    {filesError && <p role="alert">{filesError}</p>}
+                    {!filesLoading && !filesError && !files.files.length && (
+                      <p className="files-empty">ファイルはありません</p>
                     )}
-                  </div>
-                </section>
-                {selected && tab === "files" && (
-                  <GitReview
-                    key={selected}
-                    id={selected}
-                    running={
-                      currentStatus === "running" ||
-                      currentStatus === "stopping"
-                    }
-                  />
-                )}
+                    <div
+                      id="files"
+                      hidden={!files.files.length && !files.truncated}
+                    >
+                      {files.files.map((file) => (
+                        <a
+                          key={file.path}
+                          className="output-file"
+                          href={`/api/conversations/${selected}/download?path=${encodeURIComponent(file.path)}`}
+                        >
+                          <Icon name="down" />
+                          <span>
+                            {file.path.startsWith("attachments/")
+                              ? file.path.replace(
+                                  /^attachments\/[0-9a-f-]{36}-/i,
+                                  "",
+                                )
+                              : file.path.slice(8)}
+                          </span>
+                          <small>
+                            {file.path.startsWith("attachments/")
+                              ? "添付"
+                              : "生成"}
+                          </small>
+                          <small>{fileSize(file.size)}</small>
+                        </a>
+                      ))}
+                      {files.truncated && (
+                        <span className="small fg-2">表示上限に達しました</span>
+                      )}
+                    </div>
+                  </section>
+                </div>
               </TabsContent>
               <TabsContent
                 value="chat"
