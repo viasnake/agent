@@ -19,6 +19,8 @@ test("Skills settings import folders, edit and delete with validation in light, 
   const f = await fixture(
     [
       call("skill_save", {
+        name: "release-checklist",
+        summary: "更新前後の確認を追加",
         content:
           "---\nname: release-checklist\ndescription: リリース前後の確認手順\n---\nCI が成功したことを確認する。更新後にサービスの応答を確認する。",
       }),
@@ -51,9 +53,7 @@ test("Skills settings import folders, edit and delete with validation in light, 
       .click();
     await page
       .locator("#message")
-      .fill(
-        "/skill-create:release-checklist CI の確認とリリース後の動作確認をスキルにまとめてください。",
-      );
+      .fill("CI の確認とリリース後の動作確認をスキルにまとめてください。");
     await page.locator("#send").click();
     const saved = page
       .getByRole("status")
@@ -76,6 +76,44 @@ test("Skills settings import folders, edit and delete with validation in light, 
     await page.getByRole("button", { name: "Skills", exact: true }).click();
     const panel = page.getByRole("region", { name: "Skills 一覧" });
     await panel.getByText("release-checklist", { exact: true }).waitFor();
+    const toggle = panel.getByRole("switch", {
+      name: "release-checklist の自動更新",
+    });
+    assert.equal(await toggle.isChecked(), true);
+    await toggle.click();
+    await page.getByText("自動更新をオフにしました", { exact: true }).waitFor();
+    assert.equal(await toggle.isChecked(), false);
+    assert.equal(
+      await panel
+        .getByRole("switch", { name: "pdf-processing の自動更新" })
+        .isChecked(),
+      false,
+    );
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await toggle.scrollIntoViewIfNeeded();
+      await page.screenshot({
+        path: `test-results/skill-auto-update-${width}.png`,
+      });
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await panel
+      .getByRole("button", { name: "release-checklist を編集" })
+      .click();
+    const autoSource = panel.getByRole("textbox", {
+      name: "SKILL.md",
+      exact: true,
+    });
+    const reviewed =
+      (await autoSource.inputValue()) + "\n人が追記した確認項目。";
+    await autoSource.fill(reviewed);
+    await panel.getByRole("button", { name: "保存", exact: true }).click();
+    await autoSource.waitFor({ state: "hidden" });
+    assert.equal(
+      (await s.loader.detail("release-checklist")).content,
+      reviewed,
+    );
+    assert.equal(await toggle.isChecked(), false);
     await panel.getByText("pdf-processing", { exact: true }).waitFor();
     await panel.getByText("PDF からテキストを抽出", { exact: true }).waitFor();
     await panel.getByText("互換性: Python 3", { exact: true }).waitFor();

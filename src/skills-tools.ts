@@ -150,24 +150,30 @@ export function skillsTools(
 export function skillWriteTool(
   service: AgentService,
   id: string,
-  name: string,
+  ticket: string,
 ) {
   const args = z
-    .object({ content: z.string().max(SKILL_LIMITS.fileBytes) })
+    .object({
+      name: skillName,
+      content: z.string().max(SKILL_LIMITS.fileBytes),
+      summary: z.string().trim().min(1).max(160),
+    })
     .strict();
   return defineExtension({
     name: "skill-write-" + id,
     tools: [
       {
         name: "skill_save",
-        description: `Prepare the complete UTF-8 SKILL.md for the explicitly requested Skill ${name}, including YAML frontmatter. Only this name can be saved. No resource files, credentials or private data. Call once; preparation is not confirmation of publication.`,
+        description:
+          "Create a reusable Skill or update one whose auto-update is enabled, using verified lessons from the current work or a direct user request. Send the full SKILL.md with YAML frontmatter and a short user-facing summary. No resource files, secrets, or private data. Call only for a substantive change, at most once per response. Preparation is not publication.",
         parameters: z.toJSONSchema(args),
         replay: "unsafe",
         execute: async (input, api) => {
           service.prepareSkillWrite(
             id,
             api.conversationId,
-            args.parse(input).content,
+            ticket,
+            args.parse(input),
           );
           return {
             output: [

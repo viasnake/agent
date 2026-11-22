@@ -341,6 +341,14 @@ export async function createServer(
       .parse(request.body);
     return service.changeSkill({ kind: "update", name, ...input });
   });
+  app.put("/api/skills/:name/auto-update", async (request) => {
+    const { name } = z.object({ name: skillName }).parse(request.params);
+    const input = z
+      .object({ revision: skillRevision, enabled: z.boolean() })
+      .strict()
+      .parse(request.body);
+    return service.changeSkill({ kind: "auto-update", name, ...input });
+  });
   app.delete("/api/skills/:name", async (request) => {
     const { name } = z.object({ name: skillName }).parse(request.params);
     const { revision } = z
