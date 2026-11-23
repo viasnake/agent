@@ -1,3 +1,4 @@
+import { autoModelId } from "./model-routing.js";
 import { choiceInput } from "./choices.js";
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -37,8 +38,9 @@ import {
 const requestId = z.string().uuid();
 const identifier = z.object({ id: z.string().uuid() });
 const fileQuery = z.object({ path: z.string().max(240) }).strict();
+const modelConnectionId = z.union([z.string().uuid(), z.literal(autoModelId)]);
 const modelSelection = z
-  .object({ modelId: z.string().uuid(), model: z.string().min(1).max(200) })
+  .object({ modelId: modelConnectionId, model: z.string().min(1).max(200) })
   .strict();
 const usagePeriod = z
   .object({
@@ -64,6 +66,11 @@ function inputError(error: z.ZodError): string {
   // Only trusted schema labels reach the UI; paths and values may contain secrets.
   const labels: Record<string, string> = {
     models: "モデル接続",
+    autoModel: "Auto の設定",
+    accountId: "Cloudflare アカウント ID",
+    token: "Workers AI トークン",
+    light: "軽量モデル",
+    standard: "標準モデル",
     mcp: "MCP",
     name: "名前",
     ip: "IPv4 アドレス",
@@ -492,7 +499,7 @@ export async function createServer(
       .object({
         requestId,
         title: z.string().min(1).max(200),
-        modelId: z.string().uuid().optional(),
+        modelId: modelConnectionId.optional(),
         model: z.string().min(1).max(200).optional(),
       })
       .strict()

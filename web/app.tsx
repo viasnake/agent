@@ -26,6 +26,7 @@ import {
 import type { AppendMessage } from "@assistant-ui/react";
 import {
   api,
+  autoModelChoiceId,
   modelChoiceId,
   modelChoices,
   ApiError,
@@ -455,11 +456,16 @@ function App() {
   const initialModel =
     choices.find((choice) => choice.connectionId === modelOptions.initialModel)
       ?.id ??
-    choices[0]?.id ??
+    choices.find((choice) => choice.id !== autoModelChoiceId)?.id ??
     "";
-  const draftModel =
-    recentChoices.find((id) => choices.some((choice) => choice.id === id)) ??
-    initialModel;
+  const [draftAuto, setDraftAuto] = useState(false);
+  const draftModel = draftAuto
+    ? autoModelChoiceId
+    : (recentChoices.find(
+        (id) =>
+          id !== autoModelChoiceId &&
+          choices.some((choice) => choice.id === id),
+      ) ?? initialModel);
   const [changingModel, setChangingModel] = useState(false);
   const modelSelectionVersion = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(
@@ -647,6 +653,7 @@ function App() {
           "PUT",
           selection,
         ));
+        setDraftAuto(choiceId === autoModelChoiceId);
       }
       modelSelectionVersion.current++;
       setModelOptions((previous) => ({
@@ -797,6 +804,8 @@ function App() {
       if (!id) {
         const title = text.slice(0, 80);
         const choice = choices.find((m) => m.id === draftModel);
+        if (draftAuto && !choice)
+          throw new Error("Auto を利用できません。モデルを選び直してください");
         const selection = {
           ...(choice
             ? { modelId: choice.connectionId, model: choice.model }
@@ -815,6 +824,7 @@ function App() {
           },
         );
         id = created.id;
+        setDraftAuto(false);
         saveDraft(null, "");
         attachmentDrafts.current.delete("new");
         // Keep the composer mounted so a rejected/lost response can restore its draft.
@@ -1525,19 +1535,21 @@ function App() {
                             label="セッションのモデル"
                             compact
                             value={
-                              view?.conversation.modelConfigId
-                                ? modelChoiceId(
-                                    view.conversation.modelConfigId,
-                                    view.conversation.model ??
-                                      modelOptions.models.find(
-                                        (m) =>
-                                          m.id ===
-                                          view.conversation.modelConfigId,
-                                      )?.model,
-                                  )
-                                : selected
-                                  ? initialModel
-                                  : draftModel
+                              view?.conversation.modelConfigId === "auto"
+                                ? autoModelChoiceId
+                                : view?.conversation.modelConfigId
+                                  ? modelChoiceId(
+                                      view.conversation.modelConfigId,
+                                      view.conversation.model ??
+                                        modelOptions.models.find(
+                                          (m) =>
+                                            m.id ===
+                                            view.conversation.modelConfigId,
+                                        )?.model,
+                                    )
+                                  : selected
+                                    ? initialModel
+                                    : draftModel
                             }
                             models={choices}
                             recent={recentChoices}

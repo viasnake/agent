@@ -170,11 +170,25 @@ export const mcpInput = z
       }
     }
   });
+const autoModelInput = z
+  .object({
+    connectionId: identifier,
+    light: z.string().trim().min(1).max(200),
+    standard: z.string().trim().min(1).max(200),
+    accountId: z.string().regex(/^[a-f0-9]{32}$/),
+    token: z.string().trim().min(1).max(1024).optional(),
+  })
+  .strict();
+export type AutoModelConfig = z.infer<typeof autoModelInput> & {
+  token: string;
+};
+
 export const settingsInput = z
   .object({
     revision: z.number().int().nonnegative(),
     models: z.array(modelInput).max(10),
     defaultModel: identifier.nullable(),
+    autoModel: autoModelInput.nullable().optional(),
     mcp: z.array(mcpInput).max(10),
     workCredentials: z.array(workCredentialInput).max(32).optional(),
     instructions: z.string().max(16000),
@@ -196,6 +210,16 @@ export const settingsInput = z
   })
   .strict()
   .superRefine((s, ctx) => {
+    if (
+      s.autoModel &&
+      (!s.models.some((m) => m.id === s.autoModel?.connectionId) ||
+        s.autoModel.light === s.autoModel.standard)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["autoModel"],
+        message: "Select two different models from the same connection",
+      });
     if (
       new Set(s.models.map((m) => m.id)).size !== s.models.length ||
       new Set(s.mcp.map((m) => m.id)).size !== s.mcp.length ||
@@ -246,9 +270,10 @@ export function modelCredential(model: ModelConfig): Credential | undefined {
 }
 export type Settings = Omit<
   SettingsInput,
-  "mcp" | "models" | "workCredentials"
+  "mcp" | "models" | "workCredentials" | "autoModel"
 > & {
   models: ModelConfig[];
+  autoModel?: AutoModelConfig;
   hostId: string;
   schemaVersion: 1;
   workCredentials: WorkCredential[];
@@ -288,7 +313,10 @@ export class SettingsStore {
       )
         throw new Error("Unsafe settings file");
       const saved = JSON.parse(await readFile(store.path, "utf8")) as Settings;
-      if (saved.schemaVersion !== 1)
+      if (
+        saved.schemaVersion !== 1 ||
+        (saved.autoModel && !saved.autoModel.token)
+      )
         throw new Error("Unknown settings version; preserve data");
       const { schemaVersion: _, hostId: __, ...savedInput } = saved;
       const parsed = settingsInput.parse({
@@ -303,6 +331,9 @@ export class SettingsStore {
       });
       store.value = {
         ...parsed,
+        autoModel: parsed.autoModel?.token
+          ? { ...parsed.autoModel, token: parsed.autoModel.token }
+          : undefined,
         schemaVersion: 1,
         workCredentials: await store.mergeCredentials(
           parsed.workCredentials ?? [],
@@ -385,6 +416,7 @@ export class SettingsStore {
   secrets(): string[] {
     return [
       ...this.retainedSecrets,
+      this.value.autoModel?.token ?? "",
       ...this.value.workCredentials.flatMap((c) =>
         c.kind === "env"
           ? Object.values(c.env)
@@ -477,8 +509,22 @@ export class SettingsStore {
     return this.exclusive(async () => {
       if (parsed.revision !== this.value.revision)
         throw new AppError(409, "設定が更新されています。読み直してください");
+      const oldAuto = this.value.autoModel;
+      const auto = parsed.autoModel === undefined ? oldAuto : parsed.autoModel;
+      const token =
+        auto?.token ??
+        (oldAuto?.accountId === auto?.accountId ? oldAuto?.token : undefined);
+      if (
+        auto &&
+        (!token || !parsed.models.some((m) => m.id === auto.connectionId))
+      )
+        throw new AppError(
+          400,
+          "Auto のモデル接続と Workers AI のトークンを確認してください",
+        );
       const next: Settings = {
         ...parsed,
+        autoModel: auto && token ? { ...auto, token } : undefined,
         schemaVersion: 1,
         hostId: this.value.hostId,
         revision: parsed.revision + 1,

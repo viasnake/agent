@@ -21,6 +21,7 @@ export type Conversation = {
   project?: { repositories: { key: string }[] };
   modelConfigId?: string;
   model?: string;
+  autoResolvedModel?: { connectionId: string; model: string };
   skills?: SkillVersions;
   skillNotice?: string;
   requests: number;

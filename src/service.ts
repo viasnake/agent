@@ -1,3 +1,4 @@
+import { autoModelId, preferLightModel } from "./model-routing.js";
 import { pendingQuestion, questionTool, type Choice } from "./choices.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -47,7 +48,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Config } from "./config.js";
 import { ModelAuth } from "./model-auth.js";
 import { SettingsStore, modelCredential } from "./settings.js";
-import type { McpConfig, ModelConfig } from "./settings.js";
+import type { AutoModelConfig, McpConfig, ModelConfig } from "./settings.js";
 import { RemoteMcp } from "./mcp.js";
 import type { McpStatus, RemoteOptions } from "./mcp.js";
 import { ConversationsDoc, promoteRecentModel } from "./state.js";
@@ -100,6 +101,19 @@ export type ServiceOptions = {
   modelOAuth?: OAuthAuth;
   modelTest?: (model: string, key: string) => Promise<void>;
   modelCatalog?: (model: ModelConfig, signal: AbortSignal) => Promise<string[]>;
+  classifyRoute?: typeof preferLightModel;
+};
+type SendOptions = {
+  continuing?: boolean;
+  source?: { sessionId: string; entryId: number };
+  choice?: Choice;
+};
+type AutoAdmission = {
+  requestId: string;
+  digest: string;
+  revision: number;
+  updatedAt: number;
+  result: Promise<string>;
 };
 type SkillDraft = { name: string; content: string; summary: string };
 type SkillWrite = SkillDraft & { revision?: string };
@@ -153,6 +167,7 @@ export class AgentService {
   readonly runner: Runner;
   readonly notifications = new Set<() => void>();
   private registry: Registry = createRegistry();
+  private readonly autoAdmissions = new Map<string, AutoAdmission>();
   private readonly runs = new Map<string, Active>();
   private readonly skillWrites = new Map<string, SkillWrite>();
   private publishingSkills = false;
@@ -380,74 +395,14 @@ export class AgentService {
       if (!currentKeys.has(key) || entry.expires <= Date.now())
         this.accountCatalogs.delete(key);
     const models = await Promise.all(
-      options.models.map(async (connection) => {
-        const config = snapshot.models.find(
-          (model) => model.id === connection.id,
-        )!;
-        if (!connection.available) return { ...connection, catalog: [] };
-        if (!["openai", "github-copilot"].includes(config.provider))
-          return {
-            ...connection,
-            catalog: modelProvider(config)
-              .getModels()
-              .map((model) => model.id),
-          };
-        const key = `${config.id}:${config.authVersion ?? ""}`;
-        let entry = this.accountCatalogs.get(key);
-        if (!entry || entry.expires <= Date.now()) {
-          const result = (async () => {
-            try {
-              const signal = AbortSignal.timeout(10000);
-              if (this.options.modelCatalog)
-                return {
-                  catalog: await this.options.modelCatalog(config, signal),
-                };
-              const credentials = this.settings.credentials(config);
-              const models = createModels({
-                credentials,
-                authContext: {
-                  env: async () => undefined,
-                  fileExists: async () => false,
-                },
-              });
-              models.setProvider(modelProvider(config));
-              if (config.provider === "github-copilot") {
-                const catalog = await copilotAccountModels(
-                  models,
-                  credentials,
-                  signal,
-                );
-                return {
-                  catalog,
-                  ...(!catalog.length
-                    ? { error: "利用できるモデルがありません" }
-                    : {}),
-                };
-              }
-              return {
-                catalog: await openaiAccountModels(
-                  models,
-                  signal,
-                  config.auth === "oauth" ? "oauth" : "api_key",
-                ),
-              };
-            } catch (error) {
-              return { catalog: [], error: modelTestFailure(error) };
-            }
-          })();
-          entry = {
-            expires: Math.min(
-              Date.now() + 60000,
-              config.provider === "github-copilot"
-                ? (config.oauth?.expires ?? Infinity)
-                : Infinity,
-            ),
-            result,
-          };
-          this.accountCatalogs.set(key, entry);
-        }
-        return { ...connection, ...(await entry.result) };
-      }),
+      options.models.map(async (connection) => ({
+        ...connection,
+        ...(connection.available
+          ? await this.connectionCatalog(
+              snapshot.models.find((model) => model.id === connection.id)!,
+            )
+          : { catalog: [] }),
+      })),
     );
     this.assertHealthy();
     const state = await this.harness.snapshot(ConversationsDoc, ctx);
@@ -456,9 +411,139 @@ export class AgentService {
     return this.sanitize({
       ...options,
       models,
+      autoAvailable:
+        !!snapshot.autoModel &&
+        !!models
+          .find((model) => model.id === snapshot.autoModel?.connectionId)
+          ?.catalog.includes(snapshot.autoModel.standard),
       recentModels: state?.recentModels ?? [],
     });
   }
+  private async connectionCatalog(config: ModelConfig) {
+    if (!["openai", "github-copilot"].includes(config.provider))
+      return {
+        catalog: modelProvider(config)
+          .getModels()
+          .map((model) => model.id),
+      };
+    const key = `${config.id}:${config.authVersion ?? ""}`;
+    let entry = this.accountCatalogs.get(key);
+    if (!entry || entry.expires <= Date.now()) {
+      const result = (async () => {
+        try {
+          const signal = AbortSignal.timeout(10000);
+          if (this.options.modelCatalog)
+            return {
+              catalog: await this.options.modelCatalog(config, signal),
+            };
+          const credentials = this.settings.credentials(config);
+          const models = createModels({
+            credentials,
+            authContext: {
+              env: async () => undefined,
+              fileExists: async () => false,
+            },
+          });
+          models.setProvider(modelProvider(config));
+          if (config.provider === "github-copilot") {
+            const catalog = await copilotAccountModels(
+              models,
+              credentials,
+              signal,
+            );
+            return {
+              catalog,
+              ...(!catalog.length
+                ? { error: "利用できるモデルがありません" }
+                : {}),
+            };
+          }
+          return {
+            catalog: await openaiAccountModels(
+              models,
+              signal,
+              config.auth === "oauth" ? "oauth" : "api_key",
+            ),
+          };
+        } catch (error) {
+          return { catalog: [], error: modelTestFailure(error) };
+        }
+      })();
+      entry = {
+        expires: Math.min(
+          Date.now() + 60000,
+          config.provider === "github-copilot"
+            ? (config.oauth?.expires ?? Infinity)
+            : Infinity,
+        ),
+        result,
+      };
+      this.accountCatalogs.set(key, entry);
+    }
+    return entry.result;
+  }
+
+  private autoConnection(settings = this.settings.snapshot()) {
+    const config = settings.autoModel;
+    const connection =
+      config && settings.models.find((m) => m.id === config.connectionId);
+    if (!config || !connection || !modelCredential(connection))
+      throw new AppError(409, "設定のモデルで Auto を設定してください");
+    return { config, connection };
+  }
+
+  private async routeAuto(
+    config: AutoModelConfig,
+    connection: ModelConfig,
+    text: string,
+    reusableModel: string | undefined,
+    revision: number,
+  ) {
+    const { catalog } = await this.connectionCatalog(connection);
+    const models = (
+      this.options.provider ??
+      modelProvider({ ...connection, model: undefined })
+    ).getModels();
+    const standard = models.find((m) => m.id === config.standard);
+    if (!standard || !catalog.includes(config.standard))
+      throw new AppError(
+        409,
+        "Auto の標準モデルを利用できません。設定のモデルを確認してください",
+      );
+    const light = models.find((m) => m.id === config.light);
+    // A routing decision must not remove capabilities available to the standard model.
+    if (
+      !light ||
+      !catalog.includes(config.light) ||
+      light.api !== standard.api ||
+      light.contextWindow < standard.contextWindow ||
+      standard.input.some((input) => !light.input.includes(input))
+    )
+      return standard.id;
+    if (reusableModel === light.id) return light.id;
+    if (
+      !text ||
+      !this.healthy() ||
+      this.settings.snapshot().revision !== revision
+    )
+      return standard.id;
+    const signal = AbortSignal.timeout(900);
+    try {
+      if (
+        (await (this.options.classifyRoute ?? preferLightModel)(
+          config,
+          text,
+          signal,
+        )) &&
+        !signal.aborted
+      )
+        return light.id;
+    } catch {
+      // A classifier outage must not prevent an otherwise valid standard response.
+    }
+    return standard.id;
+  }
+
   private selectedModel(config: ModelConfig | undefined, requested?: string) {
     if (
       requested &&
@@ -911,20 +996,24 @@ export class AgentService {
     conversation: Conversation,
     signal: AbortSignal,
     settings = this.settings.snapshot(),
+    resolvedAuto?: string,
   ): Promise<Active["model"]> {
-    const connection = settings.models.find(
-      (m) =>
-        m.id ===
-        (conversation.modelConfigId ??
-          settings.defaultModel ??
-          settings.models[0]?.id),
-    );
+    const connection = resolvedAuto
+      ? this.autoConnection(settings).connection
+      : settings.models.find(
+          (m) =>
+            m.id ===
+            (conversation.modelConfigId ??
+              settings.defaultModel ??
+              settings.models[0]?.id),
+        );
     if (conversation.modelConfigId && !connection)
       throw new AppError(
         409,
         "選択したモデルがありません。セッションのモデルを選び直してください",
       );
-    const modelId = this.selectedModel(connection, conversation.model);
+    const modelId =
+      resolvedAuto ?? this.selectedModel(connection, conversation.model);
     if (
       !modelId ||
       (!this.options.provider && (!connection || !modelCredential(connection)))
@@ -951,7 +1040,7 @@ export class AgentService {
 
     const model = models.getModel(provider.id, modelId);
     if (!model) throw new AppError(409, "モデルを選び直してください");
-    if (provider.id === "github-copilot") {
+    if (!resolvedAuto && provider.id === "github-copilot") {
       let available: string[];
       try {
         available = await copilotAccountModels(
@@ -1073,16 +1162,8 @@ export class AgentService {
             throw new AppError(410, "セッションは削除されています");
           return { id: previous.id };
         }
-        if (
-          modelId &&
-          !this.settings.snapshot().models.some((m) => m.id === modelId)
-        )
-          throw new AppError(400, "モデルを選び直してください");
-        if (model)
-          this.selectedModel(
-            this.settings.snapshot().models.find((m) => m.id === modelId),
-            model,
-          );
+        if (modelId) this.configuredModel(modelId, model);
+        else if (model) this.selectedModel(undefined, model);
         if (
           state.conversations.filter((c) => !c.deletedAt).length >= 1000 ||
           Object.keys(state.receipts).length >= 10000
@@ -1103,7 +1184,7 @@ export class AgentService {
           ...(modelId || this.modelOptions().initialModel
             ? { modelConfigId: modelId ?? this.modelOptions().initialModel! }
             : {}),
-          ...(model ? { model } : {}),
+          ...(model && modelId !== autoModelId ? { model } : {}),
           requests: 0,
           deadlineAt: null,
         });
@@ -1251,6 +1332,15 @@ export class AgentService {
             ? { modelConfigId: parent.modelConfigId }
             : {}),
           ...(parent.model ? { model: parent.model } : {}),
+          ...(mode === "regenerate" &&
+          parent.autoResolvedModel &&
+          target?.model?.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.model === parent.autoResolvedModel?.model,
+          )
+            ? { autoResolvedModel: parent.autoResolvedModel }
+            : {}),
           ...(branchSkills ? { skills: branchSkills } : {}),
           requests: 0,
           deadlineAt: null,
@@ -1452,6 +1542,12 @@ export class AgentService {
   }
 
   private configuredModel(modelId: string, model?: string) {
+    if (modelId === autoModelId) {
+      if (model !== undefined && model !== autoModelId)
+        throw new AppError(400, "モデルを選び直してください");
+      this.autoConnection();
+      return autoModelId;
+    }
     const config = this.settings
       .snapshot()
       .models.find((m) => m.id === modelId);
@@ -1483,7 +1579,10 @@ export class AgentService {
         const state = await tx.doc(ConversationsDoc);
         const record = state.conversations.find((c) => c.id === id)!;
         record.modelConfigId = modelId;
-        if (selectedModel) record.model = selectedModel;
+        if (modelId === autoModelId) delete record.model;
+        else if (selectedModel) record.model = selectedModel;
+        if (conversation.modelConfigId !== modelId)
+          delete record.autoResolvedModel;
         record.updatedAt = Date.now();
         return selectedModel
           ? promoteRecentModel(state, { modelId, model: selectedModel })
@@ -1532,12 +1631,45 @@ ${this.config.instructions}${this.redact(catalog)}`;
     text: string,
     resume = false,
     attachments: string[] = [],
-    options: {
-      continuing?: boolean;
-      source?: { sessionId: string; entryId: number };
-      choice?: Choice;
-    } = {},
+    options: SendOptions = {},
   ): Promise<{ id: string }> {
+    const first = await this.admit(
+      id,
+      requestId,
+      text,
+      resume,
+      attachments,
+      options,
+    );
+    if ("id" in first) return first;
+    const route = first.route;
+    try {
+      const resolvedAuto = await route.result;
+      const outcome = await this.admit(
+        id,
+        requestId,
+        text,
+        resume,
+        attachments,
+        options,
+        { route, resolvedAuto },
+      );
+      if ("id" in outcome) return outcome;
+      throw new Error("Unexpected repeated model classification");
+    } finally {
+      if (this.autoAdmissions.get(id) === route) this.autoAdmissions.delete(id);
+    }
+  }
+
+  private async admit(
+    id: string,
+    requestId: string,
+    text: string,
+    resume: boolean,
+    attachments: string[],
+    options: SendOptions,
+    prepared?: { route: AutoAdmission; resolvedAuto: string },
+  ): Promise<{ id: string } | { route: AutoAdmission }> {
     if (
       options.continuing &&
       (resume || text || attachments.length || options.source)
@@ -1597,11 +1729,80 @@ ${this.config.instructions}${this.redact(catalog)}`;
       if (conversation.status === "stopping")
         throw new AppError(409, "停止を確認しています");
       const settings = this.settings.snapshot();
+      const auto = conversation.modelConfigId === autoModelId;
+      if (
+        prepared &&
+        (!starting ||
+          !auto ||
+          prepared.route.revision !== settings.revision ||
+          prepared.route.updatedAt !== conversation.updatedAt)
+      )
+        throw new AppError(
+          409,
+          "判定中にセッションまたは設定が変更されました。もう一度送信してください",
+        );
+      if (starting && auto && !prepared) {
+        const pending = this.autoAdmissions.get(id);
+        if (pending) {
+          if (pending.requestId === requestId && pending.digest === digest)
+            return { route: pending };
+          throw new AppError(409, "前の依頼のモデルを判定しています");
+        }
+        if (this.autoAdmissions.size >= 16)
+          throw new AppError(
+            429,
+            "モデルの判定が混み合っています。もう一度送信してください",
+          );
+        const { config, connection } = this.autoConnection(settings);
+        const clean = this.redact(text);
+        const classifierText =
+          !resume &&
+          !options.continuing &&
+          !options.source &&
+          !options.choice &&
+          !attachments.length &&
+          !requestedSkill &&
+          text.length <= 1200 &&
+          clean === text
+            ? text.trim()
+            : "";
+        const reusable =
+          (resume || options.continuing) &&
+          conversation.autoResolvedModel?.connectionId === connection.id
+            ? conversation.autoResolvedModel.model
+            : undefined;
+        // Release the shared admission lock before doing any network I/O.
+        const result = new Promise<void>((resolve) =>
+          setImmediate(resolve),
+        ).then(() =>
+          this.routeAuto(
+            config,
+            connection,
+            classifierText,
+            reusable,
+            settings.revision,
+          ),
+        );
+        const route = {
+          requestId,
+          digest,
+          revision: settings.revision,
+          updatedAt: conversation.updatedAt,
+          result,
+        };
+        this.autoAdmissions.set(id, route);
+        return { route };
+      }
       if (starting) this.applySettings(settings);
       const controller = active?.controller ?? new AbortController();
       const model =
         active?.model ??
-        (await this.sessionModel(conversation, controller.signal, settings));
+        (await this.sessionModel(
+          conversation,
+          controller.signal,
+          settings,
+          prepared?.resolvedAuto,
+        ));
       const limits = active?.limits ?? { ...this.config.limits };
       const admittedCredentials =
         active?.credentials ?? sharedCredentials(settings.workCredentials);
@@ -1797,8 +1998,15 @@ ${this.config.instructions}${this.redact(catalog)}`;
           if (starting) {
             delete record.skillNotice;
             record.skills = skillState;
-            if (model.configId) record.modelConfigId = model.configId;
-            record.model = model.model;
+            if (auto && model.configId) {
+              record.autoResolvedModel = {
+                connectionId: model.configId,
+                model: model.model,
+              };
+            } else {
+              if (model.configId) record.modelConfigId = model.configId;
+              record.model = model.model;
+            }
             record.requests = 0;
             record.deadlineAt = active!.deadlineAt;
           }
@@ -2217,6 +2425,9 @@ ${this.config.instructions}${this.redact(catalog)}`;
           role: message.role,
           visibleInTranscript: isConversationMessage(message),
           timestamp: message.timestamp,
+          ...(message.role === "assistant" && message.model
+            ? { model: message.model }
+            : {}),
           isError: message.role === "toolResult" ? message.isError : false,
           toolName: message.role === "toolResult" ? message.toolName : null,
           toolCallId: message.role === "toolResult" ? message.toolCallId : null,
@@ -2276,13 +2487,19 @@ ${this.config.instructions}${this.redact(catalog)}`;
       ),
       cursor: entries.next ?? null,
       modelConfigured:
-        !!this.options.provider ||
-        this.modelOptions().models.some(
-          (m) =>
-            m.id ===
-              (conversation.modelConfigId ??
-                this.modelOptions().initialModel) && m.available,
-        ),
+        conversation.modelConfigId === autoModelId
+          ? this.modelOptions().models.some(
+              (m) =>
+                m.id === this.settings.snapshot().autoModel?.connectionId &&
+                m.available,
+            )
+          : !!this.options.provider ||
+            this.modelOptions().models.some(
+              (m) =>
+                m.id ===
+                  (conversation.modelConfigId ??
+                    this.modelOptions().initialModel) && m.available,
+            ),
       pendingInputs:
         inbox?.items.filter((item) => "content" in item).length ?? 0,
       question:
