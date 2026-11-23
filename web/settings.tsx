@@ -1,3 +1,4 @@
+import { AutoModelSettings } from "./auto-model-settings.js";
 import {
   SettingsToolbar,
   SettingsDisclosure,
@@ -36,6 +37,14 @@ function editable(s: PublicSettings): SettingsInput {
   return {
     revision: s.revision,
     defaultModel: s.defaultModel,
+    autoModel: s.autoModel
+      ? {
+          connectionId: s.autoModel.connectionId,
+          fallback: s.autoModel.fallback,
+          rules: s.autoModel.rules,
+          accountId: s.autoModel.accountId,
+        }
+      : undefined,
     instructions: s.instructions,
     limits: s.limits,
     workCredentials: s.workCredentials.map(({ id, name, kind }) => ({
@@ -950,6 +959,11 @@ export function Settings({
                                         models: draft.models.filter(
                                           (m) => m.id !== model.id,
                                         ),
+                                        autoModel:
+                                          draft.autoModel?.connectionId ===
+                                          model.id
+                                            ? null
+                                            : draft.autoModel,
                                         defaultModel:
                                           draft.defaultModel === model.id
                                             ? null
@@ -968,6 +982,17 @@ export function Settings({
                           </SettingsDisclosure>
                         );
                       })}
+                      {!!draft.models.length && (
+                        <AutoModelSettings
+                          value={draft.autoModel}
+                          saved={saved?.autoModel}
+                          models={draft.models}
+                          revision={draft.revision}
+                          onChange={(autoModel) =>
+                            change((s) => ({ ...s, autoModel }))
+                          }
+                        />
+                      )}
                     </>
                   )}
                   {tab === "credentials" && (

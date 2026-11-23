@@ -127,7 +127,12 @@ export function conversationThread(entries: Entry[], view: View | null) {
       role: message.role,
       createdAt: message.timestamp ? new Date(message.timestamp) : undefined,
       content,
-      metadata: { custom: { finalAnswer: message.role === "assistant" } },
+      metadata: {
+        custom: {
+          finalAnswer: message.role === "assistant",
+          model: message.model,
+        },
+      },
     });
   }
   if (progress?.generating && progress.reasoning)
@@ -485,6 +490,7 @@ export function AssistantMessage() {
   const finalAnswer = useAuiState(
     (state) => state.message.metadata.custom.finalAnswer === true,
   );
+  const model = useAuiState((state) => state.message.metadata.custom.model);
   const { activeEntry } = useContext(MessageActions);
   if (activity)
     return (
@@ -508,7 +514,16 @@ export function AssistantMessage() {
     >
       <div className="visually-hidden">アシスタント</div>
       <AssistantParts finalAnswer={finalAnswer} />
-      {finalAnswer && <MessageFooter />}
+      {finalAnswer && (
+        <>
+          {typeof model === "string" && (
+            <small className="fg-2 d-block" data-aui-quote-selectable="false">
+              {model}
+            </small>
+          )}
+          <MessageFooter />
+        </>
+      )}
     </MessagePrimitive.Root>
   );
 }

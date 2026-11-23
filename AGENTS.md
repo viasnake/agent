@@ -308,6 +308,17 @@ but never inference. Cache briefly per credential version, isolate failures and
 never fall back to the full catalog on failure. Other providers retain Pi catalogs;
 do not probe their external credential chains during catalog reads. Listing must
 not change a conversation's stored model selection.
+Auto is an explicit selection, separate from the last bound model. Limit it to
+one configured generation connection, bounded natural-language routing rules,
+and an explicit fallback chat model. Verify candidates against that connection's
+catalog and preserve the fallback model's input capabilities. Classify only a
+short eligible new request against the configured conditions, not history, files,
+tool output, memory, or other settings. Use a separate control-only Workers AI
+token, the fixed Clef Flash endpoint, a deadline and no retry. Resolve outside
+the shared admission lock and recheck settings and conversation state before
+submission. If no compatible rule wins confidently, use the configured fallback
+model. Never bind another connection or retry generation with another model.
+Manual selections do not call the classifier.
 Apply settings at the next idle execution admission. Do not mutate a running
 provider, tools or budgets. Install/uninstall server extensions using the Pi
 Registry; isolate each connection failure and never replay an ambiguous tool

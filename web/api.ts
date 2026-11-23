@@ -5,6 +5,7 @@ import type { ModelSelection } from "../src/state.js";
 
 export type Message = {
   role: string;
+  model?: string;
   visibleInTranscript: boolean;
   content: string;
   reasoning: string;
@@ -202,6 +203,7 @@ export type ModelOptions = {
     error?: string;
   }[];
   initialModel: string | null;
+  autoAvailable?: boolean;
   recentModels: ModelSelection[];
 };
 
@@ -209,8 +211,10 @@ export function modelChoiceId(modelId: string, model?: string) {
   return JSON.stringify([modelId, model]);
 }
 
+export const autoModelChoiceId = modelChoiceId("auto", "auto");
+
 export function modelChoices(options: ModelOptions) {
-  return options.models
+  const manual = options.models
     .filter((connection) => connection.available)
     .flatMap((connection) =>
       [
@@ -230,4 +234,17 @@ export function modelChoices(options: ModelOptions) {
         available: connection.available,
       })),
     );
+  return options.autoAvailable
+    ? [
+        {
+          id: autoModelChoiceId,
+          name: "Auto",
+          group: "自動選択",
+          connectionId: "auto",
+          model: "auto",
+          available: true,
+        },
+        ...manual,
+      ]
+    : manual;
 }
