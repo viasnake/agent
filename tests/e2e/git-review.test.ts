@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { createServer as portProbe } from "node:net";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { chromium, type Browser } from "playwright";
 import { createServer } from "../../src/server.js";
-import { reviewRepository } from "../git-review-fixture.js";
+import { git, reviewRepository } from "../git-review-fixture.js";
 import { answer, call, fixture, until } from "../support.js";
 
 test("changes tab shows Git patches separately from downloadable files", async (t) => {
@@ -24,9 +24,13 @@ test("changes tab shows Git patches separately from downloadable files", async (
   await until(
     async () => (await f.service.conversation(a.id)).status === "idle",
   );
-  const { base } = await reviewRepository(
-    join(f.root, "work/conversations", a.id, "repo"),
-  );
+  const repo = join(f.root, "work/conversations", a.id, "repo");
+  const { base, head: parent } = await reviewRepository(repo);
+  const appFile = join(repo, "app.txt");
+  const workingText = "working <script>text</script>\n";
+  await writeFile(appFile, "latest committed line\n");
+  await git(repo, "commit", "-am", "latest change");
+  await writeFile(appFile, workingText);
   const probe = portProbe();
   await new Promise<void>((done) => probe.listen(0, "127.0.0.1", done));
   const address = probe.address();
@@ -45,8 +49,13 @@ test("changes tab shows Git patches separately from downloadable files", async (
     });
     let patchRequests = 0;
     let reviewRequests = 0;
+    const requestedBases: (string | null)[] = [];
+    const errors: Error[] = [];
+    page.on("pageerror", (error) => errors.push(error));
     page.on("request", (request) => {
-      const path = new URL(request.url()).pathname;
+      const { pathname: path, searchParams } = new URL(request.url());
+      if (path.endsWith("/git/changes"))
+        requestedBases.push(searchParams.get("base"));
       if (path.includes("/git/")) reviewRequests++;
       if (path.endsWith("/git/patch")) patchRequests++;
     });
@@ -95,22 +104,74 @@ test("changes tab shows Git patches separately from downloadable files", async (
     const working = page.getByRole("tab", { name: "未コミット", exact: true });
     await working.focus();
     await working.press("ArrowRight");
-    const picker = page.getByRole("combobox", { name: "比較の起点" });
-    const original = picker
-      .locator("option")
-      .filter({ hasText: /^original — \d{4}-\d{2}-\d{2}/ });
-    await original.waitFor({ state: "attached" });
-    assert.equal(await original.getAttribute("value"), base);
-    assert.equal(await picker.locator("option").count(), 2);
-    await picker.selectOption({ label: (await original.textContent())! });
+    const picker = page.getByRole("button", { name: /^比較の起点/ });
+    const menu = page.getByRole("menu", { name: "比較の起点" });
+    const automatic = menu.getByRole("menuitemradio", { name: /^自動/ });
+    const original = menu.getByRole("menuitemradio", {
+      name: /^original \d{4}-\d{2}-\d{2}/,
+    });
+    await page
+      .getByRole("button", { name: "比較の起点 自動：committed change" })
+      .waitFor();
     await file.click();
     await patch.waitFor();
+    assert.equal(requestedBases.at(-1), parent);
     assert.deepEqual(
       await patch.locator(".git-patch-line code").allTextContents(),
-      ["@@ -1 +1 @@", "-original", "+committed line"],
+      ["@@ -1 +1 @@", "-committed line", "+latest committed line"],
     );
-    assert.equal(patchRequests, 2);
+    await picker.press("ArrowDown");
+    await menu.waitFor();
+    assert.equal(await picker.getAttribute("aria-expanded"), "true");
+    assert.equal(await automatic.getAttribute("aria-checked"), "true");
+    assert.equal(
+      await automatic.evaluate((node) => node === document.activeElement),
+      true,
+    );
+    await automatic.press("Escape");
+    await menu.waitFor({ state: "hidden" });
+    assert.equal(await picker.getAttribute("aria-expanded"), "false");
+    assert.equal(
+      await picker.evaluate((node) => node === document.activeElement),
+      true,
+    );
+    await picker.press("ArrowDown");
+    await automatic.press("ArrowDown");
+    await page
+      .getByRole("menuitemradio", { name: /^committed change/ })
+      .press("ArrowDown");
+    assert.equal(
+      await original.evaluate((node) => node === document.activeElement),
+      true,
+    );
+    await original.press("Enter");
+    await menu.waitFor({ state: "hidden" });
+    assert.equal(
+      await picker.evaluate((node) => node === document.activeElement),
+      true,
+    );
+    await file.click();
+    await patch.waitFor();
+    assert.equal(requestedBases.at(-1), base);
+    assert.deepEqual(
+      await patch.locator(".git-patch-line code").allTextContents(),
+      ["@@ -1 +1 @@", "-original", "+latest committed line"],
+    );
+    assert.equal(patchRequests, 3);
     await page.setViewportSize({ width: 390, height: 844 });
+    await picker.click();
+    await menu.waitFor();
+    const menuBounds = await menu.boundingBox();
+    assert.ok(
+      menuBounds &&
+        menuBounds.x >= 0 &&
+        menuBounds.x + menuBounds.width <= 390 &&
+        menuBounds.y >= 0 &&
+        menuBounds.y + menuBounds.height <= 844,
+    );
+    assert.equal(await original.getAttribute("aria-checked"), "true");
+    await picker.click();
+    await menu.waitFor({ state: "hidden" });
     const back = page.getByRole("button", { name: "変更ファイルに戻る" });
     await back.click();
     await file.waitFor();
@@ -138,11 +199,27 @@ test("changes tab shows Git patches separately from downloadable files", async (
         .evaluate((node) => node.scrollWidth === node.clientWidth),
       true,
     );
+    await picker.click();
+    await automatic.click();
+    await menu.waitFor({ state: "hidden" });
+    await file.click();
+    await patch.waitFor();
+    assert.equal(requestedBases.at(-1), parent);
+    const previousHead = await git(repo, "rev-parse", "HEAD");
+    await writeFile(appFile, "follow-up line\n");
+    await git(repo, "commit", "-am", "follow-up");
+    await page.getByRole("button", { name: "Git の変更を更新" }).click();
+    await page
+      .getByRole("button", { name: "比較の起点 自動：latest change" })
+      .waitFor();
+    await patch.getByText("+follow-up line", { exact: true }).waitFor();
+    assert.equal(requestedBases.at(-1), previousHead);
     await page.setViewportSize({ width: 1280, height: 800 });
     await selectSession(b.id);
     await changes();
     await page.getByText("セッション内に Git クローンはありません").waitFor();
     assert.equal(await patch.count(), 0);
+    assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
     await app.close();

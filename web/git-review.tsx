@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import Menu from "bootstrap/js/dist/menu.js";
+import { useEffect, useId, useRef, useState } from "react";
 import type { GitReviewResult } from "../src/git-review.js";
 import { api } from "./api.js";
 import { GitPatch } from "./git-patch.js";
@@ -44,6 +45,106 @@ function FileName({ path }: { path: string }) {
         <bdi className="small fg-2">{path.slice(0, lastSlash)}</bdi>
       )}
     </span>
+  );
+}
+
+function ComparisonMenu({
+  history,
+  base,
+  onSelect,
+}: {
+  history: History;
+  base: string;
+  onSelect: (oid: string) => void;
+}) {
+  const menuId = useId();
+  const labelId = useId();
+  const valueId = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const automatic = history.commits[0]!;
+  const selected = history.commits.find(({ oid }) => oid === base);
+  const subject = (commit: History["commits"][number]) =>
+    commit.subject || "メッセージなし";
+  useEffect(() => {
+    const button = trigger.current!;
+    return () => Menu.getInstance(button)?.dispose();
+  }, []);
+  function choose(oid: string) {
+    trigger.current?.focus({ preventScroll: true });
+    onSelect(oid);
+  }
+  function option(oid: string, title: string, description: string) {
+    const current = (selected?.oid ?? "") === oid;
+    return (
+      <button
+        key={oid}
+        type="button"
+        role="menuitemradio"
+        aria-checked={current}
+        className={`menu-item text-wrap${current ? " selected" : ""}`}
+        onClick={() => choose(oid)}
+      >
+        <span className="menu-item-content">
+          <bdi className="text-break">{title}</bdi>
+          <span className="menu-item-description">{description}</span>
+        </span>
+        <span className="menu-item-check">
+          <Icon name="check" />
+        </span>
+      </button>
+    );
+  }
+  return (
+    <div className="git-review-compare">
+      <span className="form-label mb-0" id={labelId}>
+        比較の起点
+      </span>
+      <div>
+        <button
+          ref={trigger}
+          type="button"
+          className="btn-outline theme-secondary w-100 d-flex align-items-center justify-content-between gap-2 text-start"
+          data-bs-toggle="menu"
+          data-bs-strategy="fixed"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          aria-controls={menuId}
+          aria-labelledby={`${labelId} ${valueId}`}
+        >
+          <span className="text-truncate" id={valueId}>
+            {selected ? (
+              <bdi>{subject(selected)}</bdi>
+            ) : (
+              <>
+                自動：<bdi>{subject(automatic)}</bdi>
+              </>
+            )}
+          </span>
+          <Icon name="chevron" />
+        </button>
+        <div
+          id={menuId}
+          className="menu menu-scrollable git-comparison-menu"
+          role="menu"
+          aria-labelledby={labelId}
+        >
+          {option("", "自動（直前のコミット）", subject(automatic))}
+          <hr className="menu-divider" role="separator" />
+          {history.commits.map((commit) =>
+            option(
+              commit.oid,
+              subject(commit),
+              `${commit.date} · ${commit.oid.slice(0, 8)}`,
+            ),
+          )}
+          {history.limited && (
+            <div className="menu-text small" role="presentation">
+              直近 {history.commits.length} 件を表示
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -126,7 +227,8 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
     return () => request.abort();
   }, [endpoint, repo, mode, running, refresh]);
 
-  const selectedCommit = history?.commits.find(({ oid }) => oid === base);
+  const selectedCommit =
+    history?.commits.find(({ oid }) => oid === base) ?? history?.commits[0];
   const comparison = mode === "committed" ? (selectedCommit?.oid ?? "") : "";
 
   useEffect(() => {
@@ -301,34 +403,17 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
               {mode === "committed" &&
                 history &&
                 history.commits.length > 0 && (
-                  <div className="git-review-compare">
-                    <label className="form-label mb-0" htmlFor="git-base">
-                      比較の起点
-                    </label>
-                    <select
-                      id="git-base"
-                      className="form-select"
-                      value={comparison}
-                      onChange={(event) => {
+                  <ComparisonMenu
+                    history={history}
+                    base={base}
+                    onSelect={(oid) => {
+                      if ((oid || history.commits[0]!.oid) !== comparison) {
                         setChanges(undefined);
                         setSelection(undefined);
-                        setBase(event.target.value);
-                      }}
-                    >
-                      <option value="">コミットを選択</option>
-                      {history.commits.map(({ oid, subject, date }) => (
-                        <option key={oid} value={oid}>
-                          {subject || "メッセージなし"} — {date} ·{" "}
-                          {oid.slice(0, 8)}
-                        </option>
-                      ))}
-                    </select>
-                    {history.limited && (
-                      <small className="fg-2">
-                        直近 {history.commits.length} 件を表示
-                      </small>
-                    )}
-                  </div>
+                      }
+                      setBase(oid);
+                    }}
+                  />
                 )}
               {changesError ? (
                 <p className="git-review-state" role="alert">
@@ -345,9 +430,7 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
                   </p>
                 ) : (
                   <p className="git-review-state">
-                    {history.commits.length
-                      ? "選んだコミットの状態から現在のコミットまでの変更を表示します。"
-                      : "このクローンには、現在のコミットより前の履歴がありません。"}
+                    このクローンには、現在のコミットより前の履歴がありません。
                   </p>
                 )
               ) : !changes ? (

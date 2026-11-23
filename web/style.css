@@ -1730,6 +1730,19 @@ button {
   max-width: 31rem;
   padding: 14px 0 0;
 }
+.git-comparison-menu {
+  --bs-menu-max-height: min(20rem, 50dvh);
+  /* The review can unmount immediately when switching tabs. */
+  --bs-menu-transition-duration: 0s;
+  width: min(31rem, calc(100vw - 32px));
+}
+.git-comparison-menu .menu-item-content {
+  min-width: 0;
+}
+.git-review-compare svg {
+  width: 16px;
+  height: 16px;
+}
 .git-review-summary {
   padding: 12px 0;
   overflow-wrap: anywhere;
