@@ -603,17 +603,6 @@ export function Settings({
                       {!draft.models.length && (
                         <SettingsEmpty>モデル接続はありません</SettingsEmpty>
                       )}
-                      {!!draft.models.length && (
-                        <AutoModelSettings
-                          value={draft.autoModel}
-                          saved={saved?.autoModel}
-                          models={draft.models}
-                          revision={draft.revision}
-                          onChange={(autoModel) =>
-                            change((s) => ({ ...s, autoModel }))
-                          }
-                        />
-                      )}
                       {draft.models.map((model) => {
                         const current = saved?.models.find(
                           (m) => m.id === model.id,
@@ -993,6 +982,17 @@ export function Settings({
                           </SettingsDisclosure>
                         );
                       })}
+                      {!!draft.models.length && (
+                        <AutoModelSettings
+                          value={draft.autoModel}
+                          saved={saved?.autoModel}
+                          models={draft.models}
+                          revision={draft.revision}
+                          onChange={(autoModel) =>
+                            change((s) => ({ ...s, autoModel }))
+                          }
+                        />
+                      )}
                     </>
                   )}
                   {tab === "credentials" && (
