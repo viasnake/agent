@@ -65,23 +65,42 @@ test("Auto is configured from saved models and remains selected after an answer 
     await panel
       .getByLabel("既定モデル", { exact: true })
       .selectOption("gpt-4.1");
-    const add = panel.getByRole("button", { name: "ルールを追加" });
-    for (const [index, condition, model] of [
-      [1, "短い翻訳・文章の整形", "gpt-4.1-mini"],
-      [2, "コードの実装・テストの修正", "gpt-4.1-nano"],
-      [3, "削除する条件", "gpt-4.1-mini"],
+    const rule = (index: number) =>
+      panel.getByRole("group", { name: `ルール ${index}`, exact: true });
+    for (const [index, condition] of [
+      [1, "短い翻訳・文章の整形"],
+      [2, "コードの実装・テストの修正"],
+      [3, "設計の比較・難しい原因調査"],
     ] as const) {
-      await add.click();
-      const rule = panel.getByRole("group", {
-        name: `ルール ${index}`,
-        exact: true,
-      });
-      await rule.getByLabel("使う条件", { exact: true }).fill(condition);
-      await rule.getByLabel("使用モデル", { exact: true }).selectOption(model);
+      assert.equal(
+        await rule(index).getByLabel("使う条件", { exact: true }).inputValue(),
+        condition,
+      );
+      assert.equal(
+        await rule(index)
+          .getByLabel("使用モデル", { exact: true })
+          .inputValue(),
+        "",
+      );
     }
-    await panel
-      .getByRole("button", { name: "ルール 3を削除", exact: true })
+    await rule(1)
+      .getByLabel("使用モデル", { exact: true })
+      .selectOption("gpt-4.1-mini");
+    await rule(2)
+      .getByLabel("使用モデル", { exact: true })
+      .selectOption("gpt-4.1-nano");
+    await rule(3)
+      .getByLabel("使用モデル", { exact: true })
+      .selectOption("gpt-4.1");
+    await panel.getByRole("button", { name: "ルールを追加" }).click();
+    assert.equal(
+      await rule(4).getByLabel("使う条件", { exact: true }).inputValue(),
+      "",
+    );
+    await rule(4)
+      .getByRole("button", { name: "ルール 4を削除", exact: true })
       .click();
+    assert.equal(await rule(4).count(), 0);
     await panel
       .getByLabel("Cloudflare アカウント ID", { exact: true })
       .fill("a".repeat(32));
@@ -98,7 +117,11 @@ test("Auto is configured from saved models and remains selected after an answer 
     await panel.getByText("有効", { exact: true }).waitFor();
     assert.deepEqual(
       f.service.management().autoModel?.rules.map((rule) => rule.condition),
-      ["短い翻訳・文章の整形", "コードの実装・テストの修正"],
+      [
+        "短い翻訳・文章の整形",
+        "コードの実装・テストの修正",
+        "設計の比較・難しい原因調査",
+      ],
     );
     assert.equal(
       await panel
@@ -106,11 +129,32 @@ test("Auto is configured from saved models and remains selected after an answer 
         .evaluate((element) => getComputedStyle(element).appearance),
       "none",
     );
-    if (screenshots)
+    if (screenshots) {
+      await page.setViewportSize({ width: 1280, height: 1260 });
       await panel.screenshot({
-        path: join(screenshots, "auto-rules-settings.png"),
+        path: join(screenshots, "auto-samples-settings.png"),
         animations: "disabled",
       });
+    }
+    await page.setViewportSize({ width: 375, height: 920 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    const bounds = await rule(1).boundingBox();
+    const removeBounds = await rule(1)
+      .getByRole("button", { name: "ルール 1を削除" })
+      .boundingBox();
+    const conditionBounds = await rule(1)
+      .getByLabel("使う条件", { exact: true })
+      .boundingBox();
+    assert.ok(bounds && removeBounds && conditionBounds);
+    assert.ok(removeBounds.y + removeBounds.height <= conditionBounds.y);
+    assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 375);
+    if (screenshots)
+      await rule(1).screenshot({
+        path: join(screenshots, "auto-samples-mobile.png"),
+        animations: "disabled",
+      });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.emulateMedia({ colorScheme: "light" });
     await returnToSession(page);
     await picker.filter({ hasNotText: "Auto" }).click();
     await page.getByRole("button", { name: "Auto", exact: true }).click();
@@ -142,7 +186,7 @@ test("Auto is configured from saved models and remains selected after an answer 
     );
     if (screenshots)
       await page.screenshot({
-        path: join(screenshots, "auto-rules-mobile.png"),
+        path: join(screenshots, "auto-samples-conversation.png"),
         animations: "disabled",
       });
   } finally {

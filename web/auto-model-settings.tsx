@@ -6,6 +6,12 @@ import type { SettingsInput } from "../src/settings.js";
 
 type AutoModel = NonNullable<SettingsInput["autoModel"]>;
 
+const sampleConditions = [
+  "短い翻訳・文章の整形",
+  "コードの実装・テストの修正",
+  "設計の比較・難しい原因調査",
+];
+
 export function AutoModelSettings({
   value,
   saved,
@@ -71,7 +77,13 @@ export function AutoModelSettings({
                       ...value,
                       connectionId,
                       fallback: "",
-                      rules: [],
+                      rules: value
+                        ? value.rules.map((rule) => ({ ...rule, model: "" }))
+                        : sampleConditions.map((condition) => ({
+                            id: crypto.randomUUID(),
+                            condition,
+                            model: "",
+                          })),
                     }
                   : null,
               );
@@ -141,9 +153,27 @@ export function AutoModelSettings({
                       aria-label={label}
                       className="settings-form-grid border rounded p-3"
                     >
+                      <div className="settings-span-all d-flex align-items-center justify-content-between">
+                        <span className="small fw-semibold">{label}</span>
+                        <button
+                          className="btn-text theme-danger"
+                          type="button"
+                          aria-label={`${label}を削除`}
+                          onClick={() =>
+                            update({
+                              rules: value.rules.filter(
+                                (item) => item.id !== rule.id,
+                              ),
+                            })
+                          }
+                        >
+                          削除
+                        </button>
+                      </div>
                       <label className="form-label d-block m-0">
                         使う条件
                         <textarea
+                          aria-label="使う条件"
                           className="form-control mt-1"
                           rows={2}
                           maxLength={autoRoutingLimits.condition}
@@ -163,22 +193,6 @@ export function AutoModelSettings({
                           onChange={(model) => patchRule({ model })}
                         />
                       </label>
-                      <div className="settings-span-all d-flex justify-content-end">
-                        <button
-                          className="btn-text theme-danger"
-                          type="button"
-                          aria-label={`${label}を削除`}
-                          onClick={() =>
-                            update({
-                              rules: value.rules.filter(
-                                (item) => item.id !== rule.id,
-                              ),
-                            })
-                          }
-                        >
-                          削除
-                        </button>
-                      </div>
                     </div>
                   );
                 })}
@@ -228,10 +242,6 @@ export function AutoModelSettings({
                 }
               />
             </label>
-            <p className="small fg-2 m-0 settings-span-all">
-              Auto の判定では、短い依頼文とルールの条件を Cloudflare Workers AI
-              に送信します。
-            </p>
           </>
         )}
       </div>
