@@ -12,9 +12,10 @@ test("Auto is configured from saved models and remains selected after an answer 
   const connectionId = randomUUID();
   const calls: string[] = [];
   const f = await fixture([answer("猫は英語で cat です。")], {
-    classifyRoute: async (_config, request) => {
+    classifyRoute: async (_config, request, rules) => {
       calls.push(request);
-      return true;
+      return rules.find((rule) => rule.condition === "短い翻訳・文章の整形")
+        ?.id;
     },
   });
   await f.service.saveSettings({
@@ -62,11 +63,25 @@ test("Auto is configured from saved models and remains selected after an answer 
       .getByLabel("モデル接続", { exact: true })
       .selectOption(connectionId);
     await panel
-      .getByLabel("軽量モデル", { exact: true })
-      .selectOption("gpt-4.1-mini");
-    await panel
-      .getByLabel("標準モデル", { exact: true })
+      .getByLabel("既定モデル", { exact: true })
       .selectOption("gpt-4.1");
+    const add = panel.getByRole("button", { name: "ルールを追加" });
+    for (const [index, condition, model] of [
+      [1, "短い翻訳・文章の整形", "gpt-4.1-mini"],
+      [2, "コードの実装・テストの修正", "gpt-4.1-nano"],
+      [3, "削除する条件", "gpt-4.1-mini"],
+    ] as const) {
+      await add.click();
+      const rule = panel.getByRole("group", {
+        name: `ルール ${index}`,
+        exact: true,
+      });
+      await rule.getByLabel("使う条件", { exact: true }).fill(condition);
+      await rule.getByLabel("使用モデル", { exact: true }).selectOption(model);
+    }
+    await panel
+      .getByRole("button", { name: "ルール 3を削除", exact: true })
+      .click();
     await panel
       .getByLabel("Cloudflare アカウント ID", { exact: true })
       .fill("a".repeat(32));
@@ -81,15 +96,19 @@ test("Auto is configured from saved models and remains selected after an answer 
     await page.getByRole("button", { name: "設定を保存", exact: true }).click();
     assert.equal((await saved).status(), 200);
     await panel.getByText("有効", { exact: true }).waitFor();
+    assert.deepEqual(
+      f.service.management().autoModel?.rules.map((rule) => rule.condition),
+      ["短い翻訳・文章の整形", "コードの実装・テストの修正"],
+    );
     assert.equal(
       await panel
-        .getByLabel("軽量モデル", { exact: true })
+        .getByLabel("既定モデル", { exact: true })
         .evaluate((element) => getComputedStyle(element).appearance),
       "none",
     );
     if (screenshots)
       await panel.screenshot({
-        path: join(screenshots, "auto-settings.png"),
+        path: join(screenshots, "auto-rules-settings.png"),
         animations: "disabled",
       });
     await returnToSession(page);
@@ -123,7 +142,7 @@ test("Auto is configured from saved models and remains selected after an answer 
     );
     if (screenshots)
       await page.screenshot({
-        path: join(screenshots, "auto-mobile.png"),
+        path: join(screenshots, "auto-rules-mobile.png"),
         animations: "disabled",
       });
   } finally {

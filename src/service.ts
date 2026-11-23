@@ -1,4 +1,4 @@
-import { autoModelId, preferLightModel } from "./model-routing.js";
+import { autoModelId, matchAutoRule } from "./model-routing.js";
 import { pendingQuestion, questionTool, type Choice } from "./choices.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -101,7 +101,7 @@ export type ServiceOptions = {
   modelOAuth?: OAuthAuth;
   modelTest?: (model: string, key: string) => Promise<void>;
   modelCatalog?: (model: ModelConfig, signal: AbortSignal) => Promise<string[]>;
-  classifyRoute?: typeof preferLightModel;
+  classifyRoute?: typeof matchAutoRule;
 };
 type SendOptions = {
   continuing?: boolean;
@@ -415,7 +415,7 @@ export class AgentService {
         !!snapshot.autoModel &&
         !!models
           .find((model) => model.id === snapshot.autoModel?.connectionId)
-          ?.catalog.includes(snapshot.autoModel.standard),
+          ?.catalog.includes(snapshot.autoModel.fallback),
       recentModels: state?.recentModels ?? [],
     });
   }
@@ -504,44 +504,56 @@ export class AgentService {
       this.options.provider ??
       modelProvider({ ...connection, model: undefined })
     ).getModels();
-    const standard = models.find((m) => m.id === config.standard);
-    if (!standard || !catalog.includes(config.standard))
+    const available = new Map(
+      models
+        .filter((model) => catalog.includes(model.id))
+        .map((model) => [model.id, model]),
+    );
+    const fallback = available.get(config.fallback);
+    if (!fallback)
       throw new AppError(
         409,
-        "Auto の標準モデルを利用できません。設定のモデルを確認してください",
+        "Auto の既定モデルを利用できません。設定のモデルを確認してください",
       );
-    const light = models.find((m) => m.id === config.light);
-    // A routing decision must not remove capabilities available to the standard model.
+    const compatible = config.rules.filter((rule) => {
+      const model = available.get(rule.model);
+      // Preserve support for the existing transcript, including images in prior turns.
+      return (
+        model &&
+        model.api === fallback.api &&
+        model.contextWindow >= fallback.contextWindow &&
+        fallback.input.every((input) => model.input.includes(input))
+      );
+    });
     if (
-      !light ||
-      !catalog.includes(config.light) ||
-      light.api !== standard.api ||
-      light.contextWindow < standard.contextWindow ||
-      standard.input.some((input) => !light.input.includes(input))
+      reusableModel &&
+      compatible.some((rule) => rule.model === reusableModel)
     )
-      return standard.id;
-    if (reusableModel === light.id) return light.id;
+      return reusableModel;
     if (
       !text ||
       !this.healthy() ||
       this.settings.snapshot().revision !== revision
     )
-      return standard.id;
+      return fallback.id;
+    const rules = compatible.filter(
+      (rule) => this.redact(rule.condition) === rule.condition,
+    );
+    if (!rules.length) return fallback.id;
     const signal = AbortSignal.timeout(900);
     try {
-      if (
-        (await (this.options.classifyRoute ?? preferLightModel)(
-          config,
-          text,
-          signal,
-        )) &&
-        !signal.aborted
-      )
-        return light.id;
+      const id = await (this.options.classifyRoute ?? matchAutoRule)(
+        config,
+        text,
+        rules,
+        signal,
+      );
+      if (!signal.aborted)
+        return rules.find((rule) => rule.id === id)?.model ?? fallback.id;
     } catch {
-      // A classifier outage must not prevent an otherwise valid standard response.
+      // A classifier outage must not prevent an otherwise valid default response.
     }
-    return standard.id;
+    return fallback.id;
   }
 
   private selectedModel(config: ModelConfig | undefined, requested?: string) {

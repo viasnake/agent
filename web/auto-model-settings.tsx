@@ -1,3 +1,4 @@
+import { autoRoutingLimits } from "../src/model-routing-policy.js";
 import { useEffect, useState } from "react";
 import { api, type ModelOptions } from "./api.js";
 import { SettingsDisclosure } from "./settings-layout.js";
@@ -69,8 +70,8 @@ export function AutoModelSettings({
                       accountId: "",
                       ...value,
                       connectionId,
-                      light: "",
-                      standard: "",
+                      fallback: "",
+                      rules: [],
                     }
                   : null,
               );
@@ -113,41 +114,93 @@ export function AutoModelSettings({
         ) : null}
         {value && (
           <>
-            {(
-              [
-                ["light", "軽量モデル"],
-                ["standard", "標準モデル"],
-              ] as const
-            ).map(([key, label]) => (
-              <label key={key} className="form-label d-block m-0">
-                {label}
-                <select
-                  className="form-control mt-1"
-                  aria-label={label}
-                  value={value[key]}
-                  onChange={(event) =>
-                    update({ [key]: event.currentTarget.value })
-                  }
-                >
-                  <option value="">選択してください</option>
-                  {!!value[key] &&
-                    !connection?.catalog?.includes(value[key]) && (
-                      <option value={value[key]}>{value[key]}（未確認）</option>
-                    )}
-                  {connection?.catalog?.map((model) => (
-                    <option
-                      key={model}
-                      value={model}
-                      disabled={
-                        model === value[key === "light" ? "standard" : "light"]
-                      }
+            <label className="form-label d-block m-0 settings-span-all">
+              既定モデル
+              <AutoModelSelect
+                label="既定モデル"
+                value={value.fallback}
+                catalog={connection?.catalog}
+                onChange={(fallback) => update({ fallback })}
+              />
+            </label>
+            <fieldset className="settings-form-section settings-span-all">
+              <legend>振り分けルール</legend>
+              <div className="d-flex flex-column gap-4">
+                {value.rules.map((rule, index) => {
+                  const label = `ルール ${index + 1}`;
+                  const patchRule = (patch: Partial<typeof rule>) =>
+                    update({
+                      rules: value.rules.map((item) =>
+                        item.id === rule.id ? { ...item, ...patch } : item,
+                      ),
+                    });
+                  return (
+                    <div
+                      key={rule.id}
+                      role="group"
+                      aria-label={label}
+                      className="settings-form-grid border rounded p-3"
                     >
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ))}
+                      <label className="form-label d-block m-0">
+                        使う条件
+                        <textarea
+                          className="form-control mt-1"
+                          rows={2}
+                          maxLength={autoRoutingLimits.condition}
+                          placeholder="例：短い翻訳・文章の整形"
+                          value={rule.condition}
+                          onChange={(event) =>
+                            patchRule({ condition: event.currentTarget.value })
+                          }
+                        />
+                      </label>
+                      <label className="form-label d-block m-0">
+                        使用モデル
+                        <AutoModelSelect
+                          label="使用モデル"
+                          value={rule.model}
+                          catalog={connection?.catalog}
+                          onChange={(model) => patchRule({ model })}
+                        />
+                      </label>
+                      <div className="settings-span-all d-flex justify-content-end">
+                        <button
+                          className="btn-text theme-danger"
+                          type="button"
+                          aria-label={`${label}を削除`}
+                          onClick={() =>
+                            update({
+                              rules: value.rules.filter(
+                                (item) => item.id !== rule.id,
+                              ),
+                            })
+                          }
+                        >
+                          削除
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div>
+                  <button
+                    className="btn-text theme-primary"
+                    type="button"
+                    disabled={value.rules.length >= autoRoutingLimits.rules}
+                    onClick={() =>
+                      update({
+                        rules: [
+                          ...value.rules,
+                          { id: crypto.randomUUID(), condition: "", model: "" },
+                        ],
+                      })
+                    }
+                  >
+                    ルールを追加
+                  </button>
+                </div>
+              </div>
+            </fieldset>
             <label className="form-label d-block m-0">
               Cloudflare アカウント ID
               <input
@@ -176,12 +229,43 @@ export function AutoModelSettings({
               />
             </label>
             <p className="small fg-2 m-0 settings-span-all">
-              Auto の判定に使用できる短い依頼文は Cloudflare Workers AI
-              に送信されます。
+              Auto の判定では、短い依頼文とルールの条件を Cloudflare Workers AI
+              に送信します。
             </p>
           </>
         )}
       </div>
     </SettingsDisclosure>
+  );
+}
+
+function AutoModelSelect({
+  label,
+  value,
+  catalog,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  catalog?: string[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <select
+      className="form-control mt-1"
+      aria-label={label}
+      value={value}
+      onChange={(event) => onChange(event.currentTarget.value)}
+    >
+      <option value="">選択してください</option>
+      {!!value && !catalog?.includes(value) && (
+        <option value={value}>{value}（未確認）</option>
+      )}
+      {catalog?.map((model) => (
+        <option key={model} value={model}>
+          {model}
+        </option>
+      ))}
+    </select>
   );
 }

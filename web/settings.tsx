@@ -40,8 +40,8 @@ function editable(s: PublicSettings): SettingsInput {
     autoModel: s.autoModel
       ? {
           connectionId: s.autoModel.connectionId,
-          light: s.autoModel.light,
-          standard: s.autoModel.standard,
+          fallback: s.autoModel.fallback,
+          rules: s.autoModel.rules,
           accountId: s.autoModel.accountId,
         }
       : undefined,

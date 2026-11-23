@@ -1,3 +1,4 @@
+import { autoRoutingLimits } from "./model-routing-policy.js";
 import { randomUUID } from "node:crypto";
 import {
   open,
@@ -173,8 +174,22 @@ export const mcpInput = z
 const autoModelInput = z
   .object({
     connectionId: identifier,
-    light: z.string().trim().min(1).max(200),
-    standard: z.string().trim().min(1).max(200),
+    fallback: z.string().trim().min(1).max(200),
+    rules: z
+      .array(
+        z
+          .object({
+            id: identifier,
+            condition: z
+              .string()
+              .trim()
+              .min(1)
+              .max(autoRoutingLimits.condition),
+            model: z.string().trim().min(1).max(200),
+          })
+          .strict(),
+      )
+      .max(autoRoutingLimits.rules),
     accountId: z.string().regex(/^[a-f0-9]{32}$/),
     token: z.string().trim().min(1).max(1024).optional(),
   })
@@ -213,12 +228,15 @@ export const settingsInput = z
     if (
       s.autoModel &&
       (!s.models.some((m) => m.id === s.autoModel?.connectionId) ||
-        s.autoModel.light === s.autoModel.standard)
+        new Set(s.autoModel.rules.map((rule) => rule.id)).size !==
+          s.autoModel.rules.length ||
+        new Set(s.autoModel.rules.map((rule) => rule.condition.toLowerCase()))
+          .size !== s.autoModel.rules.length)
     )
       ctx.addIssue({
         code: "custom",
-        path: ["autoModel"],
-        message: "Select two different models from the same connection",
+        path: ["autoModel", "rules"],
+        message: "Invalid connection or duplicate routing rules",
       });
     if (
       new Set(s.models.map((m) => m.id)).size !== s.models.length ||
