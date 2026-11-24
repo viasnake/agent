@@ -1,4 +1,9 @@
-import { ProjectDashboard, ProjectTeamStatus } from "./projects.js";
+import { ProjectTimeline } from "./project-timeline.js";
+import {
+  ProjectDashboard,
+  ProjectTeamStatus,
+  projectStatusLabels,
+} from "./projects.js";
 import { ParallelWork } from "./parallel-work.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
@@ -51,6 +56,8 @@ import { Icon } from "./icons.js";
 
 type ThreadProps = {
   projectDraft: boolean;
+  timelineVisible: boolean;
+  onHistory: () => void;
   draftId: string | null;
   view: View | null;
   entries: Entry[];
@@ -94,6 +101,8 @@ function SendButton({
 }
 function Chat({
   projectDraft,
+  timelineVisible,
+  onHistory,
   draftId,
   view,
   entries,
@@ -163,7 +172,7 @@ function Chat({
     <AssistantRuntimeProvider runtime={runtime}>
       <ConversationId.Provider value={view?.conversation.id ?? null}>
         <ThreadPrimitive.Root
-          className={`chat-thread ${!messages.length && !loading ? "chat-empty" : ""} ${dragging ? "drop-target" : ""}`}
+          className={`chat-thread ${!timelineVisible && !messages.length && !loading ? "chat-empty" : ""} ${dragging ? "drop-target" : ""}`}
           onDragOver={(event) => {
             if (!sending && event.dataTransfer.types.includes("Files")) {
               event.preventDefault();
@@ -185,7 +194,21 @@ function Chat({
             );
           }}
         >
+          {view?.project && view.timeline && (
+            <ProjectTimeline
+              key={view.project.id}
+              session={view.project.id}
+              latest={view.timeline}
+              question={view.question}
+              active={view.conversation.status === "running"}
+              visible={timelineVisible}
+              disabled={sending || waitingForModel}
+              onChoice={onChoice}
+              onHistory={onHistory}
+            />
+          )}
           <ThreadPrimitive.Viewport
+            hidden={timelineVisible}
             ref={viewport}
             className="thread-viewport"
             id="transcript"
@@ -313,14 +336,16 @@ function Chat({
               )}
             </div>
           </ThreadPrimitive.Viewport>
-          <SelectionToolbar disabled={sending} />
+          {!timelineVisible && <SelectionToolbar disabled={sending} />}
           <div className="composer-dock">
-            <ThreadPrimitive.ScrollToBottom
-              className="scroll-bottom btn-outline theme-secondary btn-sm"
-              aria-label="最新のメッセージへ"
-            >
-              <Icon name="down" />
-            </ThreadPrimitive.ScrollToBottom>
+            {!timelineVisible && (
+              <ThreadPrimitive.ScrollToBottom
+                className="scroll-bottom btn-outline theme-secondary btn-sm"
+                aria-label="最新のメッセージへ"
+              >
+                <Icon name="down" />
+              </ThreadPrimitive.ScrollToBottom>
+            )}
             <ComposerPrimitive.Root
               id="message-form"
               className="composer"
@@ -334,7 +359,11 @@ function Chat({
               </label>
               <ComposerPrimitive.Input
                 id="message"
-                placeholder="メッセージを入力…"
+                placeholder={
+                  timelineVisible
+                    ? "この案件に指示や補足を送る…"
+                    : "メッセージを入力…"
+                }
                 className="composer-input"
                 rows={2}
                 maxRows={8}
@@ -522,9 +551,18 @@ function App() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<unknown>(null);
   const [files, setFiles] = useState<Files>({ files: [] });
-  const [tab, setTab] = useState<"chat" | "changes" | "files" | "usage">(
-    "chat",
-  );
+  const [chosenTab, setTab] = useState<
+    "default" | "timeline" | "chat" | "changes" | "files" | "usage"
+  >("default");
+  const tab =
+    chosenTab === "default"
+      ? view?.project
+        ? "timeline"
+        : "chat"
+      : chosenTab === "timeline" && !view?.project
+        ? "chat"
+        : chosenTab;
+  const timelineVisible = tab === "timeline";
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
   const filesVersion = useRef(0);
@@ -614,7 +652,7 @@ function App() {
     setFiles({ files: [] });
     setFilesLoading(false);
     setFilesError("");
-    setTab("chat");
+    setTab("default");
     setAttachments(
       attachmentDrafts.current.get(id ?? (project ? "new-project" : "new")) ??
         [],
@@ -1293,7 +1331,10 @@ function App() {
       <div className="workspace-stack">
         {dashboard && !settingsOpen && (
           <ProjectDashboard
-            onOpen={(id) => select(id)}
+            onOpen={(id) => {
+              select(id);
+              setTab("timeline");
+            }}
             onNew={() => select(null, true)}
             onMenu={() => setSidebar(true)}
           />
@@ -1349,7 +1390,9 @@ function App() {
                   id="state"
                   className={`badge badge-subtle ${currentStatus === "running" ? "theme-primary" : "theme-secondary"}`}
                 >
-                  {statuses[currentStatus!] ?? currentStatus}
+                  {view.project
+                    ? projectStatusLabels[view.project.status]
+                    : (statuses[currentStatus!] ?? currentStatus)}
                 </span>
               )}
               <div id="actions" className="ms-auto">
@@ -1383,6 +1426,16 @@ function App() {
               </div>
             </header>
             <TabsList className="session-tabs" aria-label="セッションの内容">
+              {view?.project && (
+                <TabsTrigger
+                  value="timeline"
+                  id="timeline-tab"
+                  aria-controls="timeline-panel"
+                >
+                  <Icon name="timeline" />
+                  タイムライン
+                </TabsTrigger>
+              )}
               <TabsTrigger
                 value="chat"
                 id="chat-tab"
@@ -1529,12 +1582,12 @@ function App() {
                 </div>
               </TabsContent>
               <TabsContent
-                value="chat"
+                value={timelineVisible ? "timeline" : "chat"}
                 forceMount
-                id="chat-panel"
-                aria-labelledby="chat-tab"
-                aria-hidden={tab !== "chat"}
-                inert={tab !== "chat"}
+                id={timelineVisible ? "timeline-panel" : "chat-panel"}
+                aria-labelledby={timelineVisible ? "timeline-tab" : "chat-tab"}
+                aria-hidden={tab !== "chat" && !timelineVisible}
+                inert={tab !== "chat" && !timelineVisible}
                 className="session-panel"
               >
                 {searchOpen && selected && (
@@ -1585,6 +1638,8 @@ function App() {
                     <Chat
                       draftId={selected ?? (newProject ? "new-project" : null)}
                       projectDraft={newProject}
+                      timelineVisible={timelineVisible}
+                      onHistory={() => setTab("chat")}
                       key={threadKey}
                       view={view}
                       entries={entries}

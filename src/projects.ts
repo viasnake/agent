@@ -46,6 +46,12 @@ export const adoptInput = z
 export const memberAction = z.discriminatedUnion("action", [
   z
     .object({
+      action: z.literal("progress"),
+      summary: z.string().trim().min(1).max(1500),
+    })
+    .strict(),
+  z
+    .object({
       action: z.literal("list"),
       directory: edit.shape.path.optional(),
     })
@@ -85,6 +91,7 @@ export type Member = {
 };
 export type Project = {
   revision: number;
+  lastPost?: { id: number; at: number };
   brief: string;
   instruction: string;
   summary: string;

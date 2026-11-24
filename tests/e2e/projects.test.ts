@@ -122,6 +122,10 @@ test("one directive starts a project; the portfolio shows independent teams and 
       .getByRole("button", { name: "全ユーザー", exact: true })
       .waitFor();
     const dash = page.locator(".project-dashboard");
+    await dash.getByRole("button", { name: "報告フィード" }).click();
+    await dash.locator(".recent-posts .post-question").waitFor();
+    await dash.locator(".recent-posts .post-start").first().waitFor();
+    await dash.getByRole("button", { name: "案件一覧", exact: true }).click();
     for (const width of [1320, 390]) {
       await page.setViewportSize({ width, height: 900 });
       assert.ok(
@@ -157,11 +161,181 @@ test("one directive starts a project; the portfolio shows independent teams and 
       .locator("#title")
       .getByText("次回リリースの告知を準備", { exact: true })
       .waitFor();
+    const stream = page.getByLabel("案件のタイムライン");
+    await stream
+      .getByText("既存ユーザー向けの案内が完成しました。", { exact: true })
+      .waitFor();
+    await stream.getByText("選択：既存ユーザーのみ", { exact: true }).waitFor();
+    assert.equal(
+      await stream.locator(".post-question .post-choices button").count(),
+      0,
+    );
+    await page.getByRole("tab", { name: "会話", exact: true }).click();
     await page.getByText("担当と進捗", { exact: false }).last().click();
     await page
       .getByText("告知本文の初稿をまとめました。", { exact: true })
       .last()
       .waitFor();
+  } finally {
+    release();
+    await browser.close();
+    await app.close();
+    await f.service.close();
+  }
+});
+
+test("project timeline retains the reader's place, accepts a decision inline and replays the same posts", async () => {
+  const f = await fixture();
+  const { id } = await f.service.create(
+    randomUUID(),
+    "請求書の二重発行を調査",
+    undefined,
+    undefined,
+    true,
+  );
+  let release!: () => void,
+    started = 0;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const specialist: FauxResponseFactory = async (c) => {
+    const { role, history } = JSON.parse(String(c.messages.at(-1)!.content));
+    started++;
+    await gate;
+    if (role === "実装担当" && !history.length)
+      return fauxAssistantMessage(
+        JSON.stringify({
+          action: "progress",
+          summary: "再送時に同じ請求番号が二度保存される条件を特定しました。",
+        }),
+      );
+    return fauxAssistantMessage(
+      JSON.stringify({
+        action: "report",
+        summary:
+          role === "実装担当"
+            ? "請求番号を使い、再送しても一件だけ保存する修正案をまとめました。"
+            : "連続送信と再試行を再現手順にまとめました。",
+      }),
+    );
+  };
+  f.faux.setResponses([
+    ...Array.from({ length: 26 }, (_, i) =>
+      call("project_report", {
+        revision: 1,
+        stage: "working",
+        summary: `調査対象の帳票を照合しました（${i + 1} 件）。`,
+      }),
+    ),
+    call("project_team", {
+      revision: 1,
+      assignments: [
+        { role: "実装担当", task: "再送時の保存処理を調査します。" },
+        { role: "検証担当", task: "二重発行の再現手順を確認します。" },
+      ],
+    }),
+    specialist,
+    specialist,
+    specialist,
+    call("project_report", {
+      revision: 1,
+      stage: "working",
+      summary:
+        "修正案と再現手順が揃いました。既存データの扱いだけ決定が必要です。",
+    }),
+    call("request_user_input", {
+      question: "既に発行した重複分はどう扱いますか？",
+      options: ["確認用に一覧を作る", "新規分のみ対応する"],
+    }),
+  ]);
+  const origin = "http://127.0.0.1:3886";
+  f.config.server.origins = [origin];
+  const app = await createServer(f.service, resolve("dist/web") + "/");
+  await app.listen({ host: "127.0.0.1", port: 3886 });
+  const browser = await chromium.launch({ args: ["--no-sandbox"] });
+  try {
+    await f.service.send(
+      id,
+      randomUUID(),
+      "請求書が二重に発行される原因を調べ、修正案と再現手順を報告してください。",
+    );
+    await until(async () => started === 2);
+    const page = await browser.newPage({
+      viewport: { width: 1320, height: 900 },
+      colorScheme: "light",
+    });
+    await page.goto(origin);
+    await page.locator(`[data-session-id="${id}"] .conversation-item`).click();
+    const stream = page.getByLabel("案件のタイムライン");
+    await stream.locator(".post-start").first().waitFor();
+    assert.equal(
+      await page
+        .getByRole("tab", { name: "タイムライン" })
+        .getAttribute("aria-selected"),
+      "true",
+    );
+    await stream.evaluate((el) => (el.scrollTop = 0));
+    await stream.getByRole("button", { name: "以前の投稿を読む" }).click();
+    await stream.locator(".post-directive").waitFor({ state: "attached" });
+    const before = await stream.evaluate((el) => el.scrollTop);
+    assert.ok(before > 0);
+    await page.locator("#message").fill("請求番号の範囲も確認してください");
+    release();
+    const jump = page.getByRole("button", { name: "新しい報告へ" });
+    await jump.waitFor();
+    await until(
+      async () => (await f.service.projects())[0]?.status === "decision",
+    );
+    assert.ok(
+      Math.abs((await stream.evaluate((el) => el.scrollTop)) - before) < 5,
+    );
+    await jump.click();
+    const decide = stream.getByRole("button", {
+      name: "確認用に一覧を作る",
+      exact: true,
+    });
+    await decide.waitFor();
+    await page
+      .locator("#state")
+      .getByText("判断待ち", { exact: true })
+      .waitFor();
+    for (const width of [390, 1320]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert.ok(
+        await stream.evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
+      );
+    }
+    await page.getByRole("tab", { name: "会話", exact: true }).click();
+    await page.getByRole("tab", { name: "タイムライン" }).click();
+    assert.equal(
+      await page.locator("#message").inputValue(),
+      "請求番号の範囲も確認してください",
+    );
+    f.faux.setResponses([
+      call("project_report", {
+        revision: 1,
+        stage: "delivered",
+        summary: "確認対象の一覧と、再送時の修正案をまとめました。",
+        evidence: "依頼、担当の報告、公開範囲の回答を照合",
+      }),
+      answer('{"verdict":"accept","reason":"元の依頼と修正方針が一致"}'),
+      answer("報告を提出しました"),
+    ]);
+    await decide.click();
+    await stream.locator(".post-delivery").waitFor();
+    assert.equal(await stream.locator(".post-decision").count(), 1);
+    await page.reload();
+    await page.locator(`[data-session-id="${id}"] .conversation-item`).click();
+    await stream.locator(".post-delivery").waitFor();
+    await page
+      .locator("#state")
+      .getByText("完了報告", { exact: true })
+      .waitFor();
+    assert.equal(await stream.locator(".post-decision").count(), 1);
+    assert.equal(
+      await stream
+        .getByRole("button", { name: "確認用に一覧を作る", exact: true })
+        .count(),
+      0,
+    );
   } finally {
     release();
     await browser.close();

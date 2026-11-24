@@ -1,9 +1,11 @@
+import { RecentPosts } from "./project-timeline.js";
+import type { PortfolioPost } from "../src/project-timeline.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProjectRow } from "../src/projects.js";
 import { api, forget, requestId } from "./api.js";
 import { Icon } from "./icons.js";
 
-const labels = {
+export const projectStatusLabels = {
   decision: "判断待ち",
   working: "進行中",
   delivered: "完了報告",
@@ -22,7 +24,7 @@ function StateLabel({ status }: { status: ProjectRow["status"] }) {
   return (
     <span className={"project-state state-" + status}>
       <i />
-      {labels[status]}
+      {projectStatusLabels[status]}
     </span>
   );
 }
@@ -92,6 +94,8 @@ export function ProjectDashboard({
   onNew: () => void;
   onMenu: () => void;
 }) {
+  const [showActivity, setShowActivity] = useState(false),
+    [activity, setActivity] = useState<PortfolioPost[] | null>(null);
   const [rows, setRows] = useState<ProjectRow[] | null>(null),
     [error, setError] = useState(""),
     [answerError, setAnswerError] = useState(""),
@@ -107,7 +111,13 @@ export function ProjectDashboard({
       const result = await api<{ projects: ProjectRow[] }>(
         "/api/project-dashboard",
       );
+      const feed = showActivity
+        ? await api<{ posts: PortfolioPost[] }>(
+            "/api/project-dashboard/activity",
+          )
+        : undefined;
       if (alive.current && version === generation.current) {
+        if (feed) setActivity(feed.posts);
         setRows(result.projects);
         setError("");
       }
@@ -115,7 +125,7 @@ export function ProjectDashboard({
       if (alive.current && version === generation.current)
         setError(e instanceof Error ? e.message : "進捗を取得できませんでした");
     }
-  }, []);
+  }, [showActivity]);
   useEffect(() => {
     alive.current = true;
     let timer: ReturnType<typeof setTimeout>,
@@ -232,93 +242,125 @@ export function ProjectDashboard({
               )}
             </section>
             <section aria-labelledby="portfolio-heading">
-              <h2 id="portfolio-heading">案件一覧</h2>
-              <div
-                className="portfolio-filter"
-                role="group"
-                aria-label="表示する案件"
-              >
-                {(["active", "delivered", "archived"] as const).map(
-                  (value, i) => (
-                    <button
-                      key={value}
-                      aria-pressed={filter === value}
-                      onClick={() => setFilter(value)}
-                    >
-                      {["対応中", "完了報告", "アーカイブ"][i]}{" "}
-                      <span>{groups[value].length}</span>
-                    </button>
-                  ),
-                )}
+              <div className="portfolio-heading">
+                <h2 id="portfolio-heading">
+                  {showActivity ? "最近の報告" : "案件一覧"}
+                </h2>
+                <div
+                  className="portfolio-switch"
+                  role="group"
+                  aria-label="案件の表示"
+                >
+                  <button
+                    aria-pressed={!showActivity}
+                    onClick={() => setShowActivity(false)}
+                  >
+                    案件一覧
+                  </button>
+                  <button
+                    aria-pressed={showActivity}
+                    onClick={() => setShowActivity(true)}
+                  >
+                    報告フィード
+                  </button>
+                </div>
               </div>
-              {visible.length === 0 ? (
-                <p className="project-empty">
-                  {all.length
-                    ? "該当する案件はありません。"
-                    : "「新しい依頼」から目的を伝えると、ここで担当と進捗を追えます。"}
-                </p>
+              {showActivity ? (
+                activity ? (
+                  <RecentPosts posts={activity} onOpen={onOpen} />
+                ) : (
+                  !error && <p role="status">報告を読み込み中…</p>
+                )
               ) : (
-                visible.map((p) => (
-                  <article key={p.id} className="portfolio-item">
-                    <div className="portfolio-top">
-                      <StateLabel status={p.status} />
-                      <time dateTime={new Date(p.updatedAt).toISOString()}>
-                        {new Intl.DateTimeFormat("ja-JP", {
-                          month: "short",
-                          day: "numeric",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        }).format(p.updatedAt)}
-                      </time>
-                    </div>
-                    <h3>
-                      <button
-                        className="project-link"
-                        onClick={() => onOpen(p.id)}
-                      >
-                        {p.title}
-                        <Icon name="right" />
-                      </button>
-                    </h3>
-                    <p className="portfolio-summary">
-                      {p.status === "working" &&
-                      p.assessment?.verdict === "checking"
-                        ? "完了報告の根拠を照合しています。"
-                        : p.status === "working" &&
-                            p.assessment?.verdict === "revise"
-                          ? "責任者が報告を見直しています。" +
-                            p.assessment.reason
-                          : p.summary ||
-                            (p.status === "interrupted"
-                              ? p.detail
-                              : p.instruction !== p.title
-                                ? p.instruction
-                                : "") ||
-                            (p.status === "working"
-                              ? "責任者が依頼を確認しています。"
-                              : p.status === "draft"
-                                ? "最初の指示を待っています。"
-                                : "責任者の進捗報告はまだありません。")}
+                <>
+                  <div
+                    className="portfolio-filter"
+                    role="group"
+                    aria-label="表示する案件"
+                  >
+                    {(["active", "delivered", "archived"] as const).map(
+                      (value, i) => (
+                        <button
+                          key={value}
+                          aria-pressed={filter === value}
+                          onClick={() => setFilter(value)}
+                        >
+                          {["対応中", "完了報告", "アーカイブ"][i]}{" "}
+                          <span>{groups[value].length}</span>
+                        </button>
+                      ),
+                    )}
+                  </div>
+                  {visible.length === 0 ? (
+                    <p className="project-empty">
+                      {all.length
+                        ? "該当する案件はありません。"
+                        : "「新しい依頼」から目的を伝えると、ここで担当と進捗を追えます。"}
                     </p>
-                    {p.members.length > 0 && (
-                      <div className="project-members">
-                        {p.members.map((m) => (
-                          <span key={m.id}>
-                            {m.role}
-                            <small>
-                              {m.status === "running"
-                                ? m.activity
-                                : memberLabels[m.status]}
-                            </small>
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {(p.members.length > 0 || p.evidence || p.assessment) && (
-                      <ProjectTeamStatus project={p} />
-                    )}
-                  </article>
-                ))
+                  ) : (
+                    visible.map((p) => (
+                      <article key={p.id} className="portfolio-item">
+                        <div className="portfolio-top">
+                          <StateLabel status={p.status} />
+                          <time dateTime={new Date(p.updatedAt).toISOString()}>
+                            {new Intl.DateTimeFormat("ja-JP", {
+                              month: "short",
+                              day: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            }).format(p.updatedAt)}
+                          </time>
+                        </div>
+                        <h3>
+                          <button
+                            className="project-link"
+                            onClick={() => onOpen(p.id)}
+                          >
+                            {p.title}
+                            <Icon name="right" />
+                          </button>
+                        </h3>
+                        <p className="portfolio-summary">
+                          {p.status === "working" &&
+                          p.assessment?.verdict === "checking"
+                            ? "完了報告の根拠を照合しています。"
+                            : p.status === "working" &&
+                                p.assessment?.verdict === "revise"
+                              ? "責任者が報告を見直しています。" +
+                                p.assessment.reason
+                              : p.summary ||
+                                (p.status === "interrupted"
+                                  ? p.detail
+                                  : p.instruction !== p.title
+                                    ? p.instruction
+                                    : "") ||
+                                (p.status === "working"
+                                  ? "責任者が依頼を確認しています。"
+                                  : p.status === "draft"
+                                    ? "最初の指示を待っています。"
+                                    : "責任者の進捗報告はまだありません。")}
+                        </p>
+                        {p.members.length > 0 && (
+                          <div className="project-members">
+                            {p.members.map((m) => (
+                              <span key={m.id}>
+                                {m.role}
+                                <small>
+                                  {m.status === "running"
+                                    ? m.activity
+                                    : memberLabels[m.status]}
+                                </small>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {(p.members.length > 0 ||
+                          p.evidence ||
+                          p.assessment) && <ProjectTeamStatus project={p} />}
+                      </article>
+                    ))
+                  )}
+                </>
               )}
             </section>
           </>

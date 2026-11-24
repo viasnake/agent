@@ -1,4 +1,5 @@
 const paths = {
+  timeline: "M5 3v18M9 6h11M9 12h8M9 18h11M3 6h4M3 12h4M3 18h4",
   usage: "M4 3v18h17M8 17v-4M13 17V9M18 17V5",
   sidebar: "M3 4h18v16H3zM9 4v16",
   memory:

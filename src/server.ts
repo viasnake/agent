@@ -493,6 +493,17 @@ export async function createServer(
       ),
     ),
   );
+  app.get("/api/project-dashboard/activity", async () =>
+    safe({ posts: await service.recentProjectPosts() }),
+  );
+  app.get("/api/conversations/:id/timeline", async (request) => {
+    const { before } = z
+      .object({ before: z.coerce.number().int().positive().optional() })
+      .parse(request.query);
+    return safe(
+      await service.timeline(identifier.parse(request.params).id, before),
+    );
+  });
   app.get("/api/project-dashboard", async () =>
     safe({ projects: await service.projects() }),
   );

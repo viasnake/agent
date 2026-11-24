@@ -2179,3 +2179,221 @@ button {
   max-height: 12rem;
   overflow: auto;
 }
+
+.timeline-pane {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.timeline-pane[hidden],
+.thread-viewport[hidden] {
+  display: none;
+}
+.timeline-viewport {
+  width: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+.timeline-stream {
+  width: min(100%, 820px);
+  padding: 12px 32px 16px;
+  margin: auto;
+}
+.post-date {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0 12px;
+  font-size: 0.76rem;
+  font-weight: 650;
+  color: var(--bs-fg-2);
+}
+.post-date::after,
+.post-date::before {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--bs-border-muted);
+}
+.timeline-post {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  min-width: 0;
+}
+.post-avatar {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  height: 32px;
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 8px;
+  font-weight: 700;
+  color: var(--bs-fg-1);
+  background: var(--bs-bg-2);
+}
+.post-avatar.actor-lead,
+.post-avatar.actor-reviewer {
+  background: var(--bs-primary-bg-subtle, var(--bs-bg-2));
+  color: var(--bs-primary-fg);
+}
+.post-avatar.actor-user {
+  border-radius: 50%;
+}
+.post-avatar svg {
+  width: 17px;
+  height: 17px;
+}
+.post-main {
+  min-width: 0;
+  flex: 1;
+}
+.post-main header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.post-main strong {
+  font-size: 0.9rem;
+}
+.post-main time,
+.post-kind {
+  font-size: 0.73rem;
+  color: var(--bs-fg-2);
+}
+.post-main time {
+  font-variant-numeric: tabular-nums;
+}
+.post-main p {
+  margin: 3px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+.post-question .post-kind,
+.post-revision .post-kind,
+.post-failed .post-kind {
+  color: var(--bs-warning-text-emphasis, var(--bs-fg-body));
+  font-weight: 600;
+}
+.post-delivery .post-kind,
+.post-passed .post-kind {
+  color: var(--bs-success-text-emphasis, var(--bs-fg-body));
+  font-weight: 600;
+}
+.post-details {
+  font-size: 0.82rem;
+  color: var(--bs-fg-2);
+  margin: 6px 0 0;
+}
+.post-details summary {
+  cursor: pointer;
+}
+.post-details pre {
+  max-height: 14rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 10px;
+  background: var(--bs-bg-1);
+}
+.post-choices,
+.post-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.post-file svg,
+.post-project svg {
+  width: 14px;
+  height: 14px;
+}
+.post-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--bs-primary-fg);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+.timeline-new {
+  position: absolute;
+  bottom: 8px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.timeline-live,
+.timeline-empty,
+.load-posts {
+  font-size: 0.84rem;
+  color: var(--bs-fg-2);
+  margin: 10px 0;
+}
+.timeline-live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-inline-start: 44px;
+}
+.portfolio-heading,
+.portfolio-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.portfolio-heading {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.portfolio-heading h2 {
+  margin: 0;
+}
+.portfolio-switch {
+  gap: 0;
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.portfolio-switch button {
+  border: 0;
+  background: transparent;
+  color: var(--bs-fg-2);
+  padding: 5px 9px;
+  font-size: 0.8rem;
+}
+.portfolio-switch button[aria-pressed="true"] {
+  background: var(--bs-bg-2);
+  color: var(--bs-fg-body);
+  font-weight: 600;
+}
+@media (max-width: 650px) {
+  .timeline-stream {
+    padding: 8px 14px 12px;
+  }
+  .timeline-post {
+    gap: 8px;
+  }
+  .session-tabs {
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .session-tabs [role="tab"] {
+    flex-shrink: 0;
+  }
+  .post-main header {
+    gap: 6px;
+  }
+}

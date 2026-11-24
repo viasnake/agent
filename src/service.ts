@@ -1,3 +1,8 @@
+import {
+  appendPost,
+  readPosts,
+  type PortfolioPost,
+} from "./project-timeline.js";
 import { ProjectTeam } from "./project-team.js";
 import { projectTools } from "./project-tools.js";
 import {
@@ -323,6 +328,12 @@ export class AgentService {
         if (!conversation.deletedAt && conversation.status !== "idle") {
           if (conversation.managedProject) {
             const p = await tx.doc(ProjectDoc, conversation.piId);
+            if (conversation.status !== "interrupted")
+              await appendPost(tx, conversation.piId, p, {
+                kind: "interrupted",
+                actor: "system",
+                text: "サービスの再起動で作業を中断しました。",
+              });
             for (const m of p.members)
               if (m.status === "running" || m.status === "queued") {
                 m.status = "interrupted";
@@ -2135,6 +2146,12 @@ ${this.config.instructions}${this.redact(catalog)}`;
           if (record.managedProject) {
             const p = await tx.doc(ProjectDoc, record.piId);
             if (options.choice) {
+              await appendPost(tx, record.piId, p, {
+                kind: "decision",
+                actor: "user",
+                text: this.redact(text),
+                questionId: options.choice.entryId,
+              });
               p.instruction = (
                 p.instruction.slice(0, 62000) +
                 "\n" +
@@ -2143,6 +2160,11 @@ ${this.config.instructions}${this.redact(catalog)}`;
             } else if (!resume && !options.continuing) {
               p.revision++;
               const directive = this.redact(text).slice(0, 64000);
+              await appendPost(tx, record.piId, p, {
+                kind: "directive",
+                actor: "user",
+                text: directive,
+              });
               if (!p.brief) p.brief = directive;
               p.instruction = directive;
               p.members = [];
@@ -2151,7 +2173,12 @@ ${this.config.instructions}${this.redact(catalog)}`;
               p.delivered = false;
               delete p.evidence;
               (await tx.doc(ProjectEvidenceDoc, record.piId)).patches = {};
-            }
+            } else
+              await appendPost(tx, record.piId, p, {
+                kind: "resume",
+                actor: "system",
+                text: "依頼の作業を再開しました。",
+              });
             delete p.question;
             p.updatedAt = Date.now();
           }
@@ -2258,11 +2285,24 @@ ${this.config.instructions}${this.redact(catalog)}`;
               }
               conversation.status = "interrupted";
               conversation.detail = "責任者の完了報告を取得できませんでした";
+              await appendPost(tx, conversation.piId, p, {
+                kind: "interrupted",
+                actor: "system",
+                text: conversation.detail,
+              });
               conversation.updatedAt = Date.now();
               return false;
             }
-            if (question) p.question = this.sanitize(question);
-            else delete p.question;
+            if (question) {
+              p.question = this.sanitize(question);
+              await appendPost(tx, conversation.piId, p, {
+                kind: "question",
+                actor: "lead",
+                text: p.question.question,
+                questionId: question.entryId,
+                detail: p.question.options.join(" / "),
+              });
+            } else delete p.question;
             for (const m of p.members)
               if (m.status === "running" || m.status === "queued") {
                 m.status = "interrupted";
@@ -2279,6 +2319,17 @@ ${this.config.instructions}${this.redact(catalog)}`;
                   ? "モデル呼び出しの上限に達しました"
                   : "応答が中断されました"
             : "応答が終了しました";
+          if (conversation.managedProject && live?.runFailure)
+            await appendPost(
+              tx,
+              conversation.piId,
+              await tx.doc(ProjectDoc, conversation.piId),
+              {
+                kind: "interrupted",
+                actor: "system",
+                text: conversation.detail,
+              },
+            );
           conversation.updatedAt = Date.now();
         }, ctx);
         if (continued) {
@@ -2364,6 +2415,12 @@ ${this.config.instructions}${this.redact(catalog)}`;
         )!;
         if (value.managedProject) {
           const project = await tx.doc(ProjectDoc, value.piId);
+          if (conversation.status !== "interrupted")
+            await appendPost(tx, value.piId, project, {
+              kind: "interrupted",
+              actor: "system",
+              text: this.redact(detail),
+            });
           for (const member of project.members)
             if (member.status === "running" || member.status === "queued") {
               member.status = "interrupted";
@@ -2441,6 +2498,51 @@ ${this.config.instructions}${this.redact(catalog)}`;
       if (c.managedProject)
         projects.push(projectRow(c, await this.team.read(c)));
     return projects.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+  async timeline(id: string, before?: number) {
+    const c = await this.conversation(id),
+      p = await this.team.read(c);
+    return readPosts(this.harness, c.piId, p.lastPost?.id ?? 0, before);
+  }
+  async recentProjectPosts() {
+    const owners = (await this.list()).filter(
+      (c) => c.managedProject && !c.archived,
+    );
+    const projects = await Promise.all(
+      owners.map(async (c) => ({
+        c,
+        last: (await this.team.read(c)).lastPost,
+      })),
+    );
+    const limit = 12,
+      newest: PortfolioPost[] = [];
+    for (const { c, last } of projects.sort(
+      (a, b) => (b.last?.at ?? 0) - (a.last?.at ?? 0),
+    )) {
+      if (
+        !last ||
+        (newest.length === limit && last.at < newest[limit - 1]!.post.at)
+      )
+        break;
+      const page = await readPosts(
+        this.harness,
+        c.piId,
+        last.id,
+        undefined,
+        limit,
+      );
+      newest.push(
+        ...page.posts.map((post) => ({ session: c.id, title: c.title, post })),
+      );
+      newest.sort(
+        (a, b) =>
+          b.post.at - a.post.at ||
+          a.session.localeCompare(b.session) ||
+          b.post.id - a.post.id,
+      );
+      newest.splice(limit);
+    }
+    return newest;
   }
   private async withProjectDispatch<T>(
     piId: ConversationId,
@@ -2919,13 +3021,18 @@ ${this.config.instructions}${this.redact(catalog)}`;
     const work =
       (await this.harness.snapshot(WorkDoc, conversation.piId, ctx))?.items ??
       [];
+    const project = conversation.managedProject
+      ? await this.team.read(conversation)
+      : undefined;
     return {
       conversation,
-      ...(conversation.managedProject
+      ...(project
         ? {
-            project: projectRow(
-              conversation,
-              await this.team.read(conversation),
+            project: projectRow(conversation, project),
+            timeline: await readPosts(
+              this.harness,
+              conversation.piId,
+              project.lastPost?.id ?? 0,
             ),
           }
         : {}),

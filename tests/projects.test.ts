@@ -132,6 +132,21 @@ test("the lead delegates competing solutions, specialists investigate and repair
         .map((m) => [m.toolName, m.content.slice(-240)]),
     ),
   );
+  const posts = view.timeline!.posts;
+  assert.deepEqual(
+    posts
+      .filter((row) => row.kind === "start")
+      .map((p) => p.name)
+      .sort(),
+    ["A", "B"],
+  );
+  assert.ok(posts.some((row) => row.kind === "failed" && row.name === "A"));
+  assert.equal(posts.filter((row) => row.kind === "passed").length, 2);
+  assert.equal(
+    posts.find((row) => row.kind === "artifact")?.file,
+    p.members.find((m) => m.file)?.file,
+  );
+  assert.equal(posts.at(-1)?.kind, "delivery");
   assert.deepEqual([...actual].sort(), ["false", "true"]);
   assert.equal(p.members.filter((m) => m.check?.passed).length, 2);
   assert.notEqual(p.members[0]!.check!.tree, p.members[1]!.check!.tree);
@@ -211,6 +226,10 @@ test("project decisions resume with existing specialist reports and dashboard st
     const reopened = await fixture([], { root: f.root });
     service = reopened.service;
     const question = (await service.projects())[0]!.question!;
+    assert.equal(
+      (await service.timeline(id)).posts.at(-1)?.questionId,
+      question.entryId,
+    );
     assert.equal(question.entryId, row!.question!.entryId);
     reopened.faux.setResponses([
       call("project_report", {
@@ -229,6 +248,16 @@ test("project decisions resume with existing specialist reports and dashboard st
       async () => (await service.projects())[0]?.status === "delivered",
     );
     assert.equal((await service.projects())[0]!.members[0]!.status, "reported");
+    const posts = (await service.timeline(id)).posts;
+    assert.ok(
+      posts.some(
+        (p) =>
+          p.kind === "decision" &&
+          p.text.includes("東京") &&
+          p.questionId === question.entryId,
+      ),
+    );
+    assert.equal(posts.at(-1)?.kind, "delivery");
   } finally {
     await service.close();
   }
@@ -361,4 +390,116 @@ test("an unsupported release claim returns to the lead and is corrected before d
   assert.equal(p!.summary, corrected);
   assert.equal(p!.assessment!.verdict, "accept");
   assert.equal(p!.status, "delivered");
+});
+
+test("project posts survive paging, retry, steering and reopening; the portfolio excludes archived threads", async () => {
+  const f = await fixture();
+  let service = f.service;
+  const key = randomUUID(),
+    directive = "公開前の文案を確認";
+  try {
+    const { id } = await service.create(
+      randomUUID(),
+      "案内の準備",
+      undefined,
+      undefined,
+      true,
+    );
+    const normal = await service.create(randomUUID(), "ordinary");
+    f.faux.setResponses([
+      call("project_team", {
+        revision: 1,
+        assignments: [{ role: "編集", task: "案内を作成" }],
+      }),
+      answer(
+        '{"action":"progress","summary":"対象者が二種類いることを確認しました。"}',
+      ),
+      answer('{"action":"report","summary":"草稿を作成"}'),
+      call("request_user_input", {
+        question: "誰に公開しますか？",
+        options: ["既存", "全員"],
+      }),
+    ]);
+    await service.send(id, key, directive);
+    await until(
+      async () => (await service.projects())[0]?.status === "decision",
+    );
+    await service.send(id, key, directive);
+    const owner = await service.conversation(id);
+    for (let n = 0; n < 52; n++)
+      await service.team.progress(owner, {
+        revision: 1,
+        stage: "working",
+        summary: "進捗 " + n,
+      });
+    const before = (await service.timeline(id)).before!;
+    assert.ok(before > 1);
+    const first = await service.timeline(id, 2);
+    assert.deepEqual(
+      first.posts.map((p) => p.text),
+      [directive],
+    );
+    assert.equal((await service.recentProjectPosts()).length, 12);
+    await assert.rejects(service.timeline(normal.id), { statusCode: 404 });
+    const other = await service.create(
+      randomUUID(),
+      "別案件",
+      undefined,
+      undefined,
+      true,
+    );
+    f.faux.setResponses([
+      call("request_user_input", {
+        question: "対象日は？",
+        options: ["今日", "明日"],
+      }),
+    ]);
+    await service.send(other.id, randomUUID(), "対象日を相談");
+    await until(
+      async () =>
+        (await service.timeline(other.id)).posts.at(-1)?.kind === "question",
+    );
+    assert.ok(
+      (await service.recentProjectPosts()).some((p) => p.session === id),
+    );
+    assert.ok(
+      (await service.recentProjectPosts()).some((p) => p.session === other.id),
+    );
+    f.faux.setResponses([
+      call("request_user_input", {
+        question: "地域は？",
+        options: ["東", "西"],
+      }),
+    ]);
+    await service.send(id, randomUUID(), "別の対象に変更");
+    await until(
+      async () =>
+        (await service.timeline(id)).posts.at(-1)?.text === "地域は？",
+    );
+    await service.close();
+    service = (await fixture([], { root: f.root })).service;
+    let page = await service.timeline(id),
+      all = page.posts;
+    while (page.before) {
+      page = await service.timeline(id, page.before);
+      all = [...page.posts, ...all];
+    }
+    assert.deepEqual(
+      all.map((p) => p.id),
+      all.map((_, i) => i + 1),
+    );
+    assert.equal(all.filter((p) => p.kind === "directive").length, 2);
+    assert.equal(
+      all.find((p) => p.actor === "member" && p.kind === "progress")?.text,
+      "対象者が二種類いることを確認しました。",
+    );
+    assert.ok(all.some((p) => p.text === directive && p.revision === 1));
+    assert.equal(all.at(-1)?.revision, 2);
+    await service.updateConversation(other.id, { archived: true });
+    assert.ok(
+      (await service.recentProjectPosts()).every((p) => p.session === id),
+    );
+  } finally {
+    await service.close();
+  }
 });

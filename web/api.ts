@@ -33,6 +33,7 @@ export type Conversation = {
   archived?: boolean;
 };
 export type View = {
+  timeline?: import("../src/project-timeline.js").TimelinePage;
   project?: import("../src/projects.js").ProjectRow;
   work?: import("../src/parallel-work.js").WorkView[];
   conversation: Conversation;
