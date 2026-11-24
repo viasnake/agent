@@ -139,16 +139,26 @@ export function ParallelWork({
   };
   const check = work.candidate?.checks.at(-1);
   return (
-    <section className="conversation-notice d-grid gap-2" aria-label="並列作業">
-      <strong>{work.goal}</strong>
-      <span role="status">{states[work.status]}</span>
-      <ul className="mb-0">
+    <section className="parallel-work" aria-label="並列作業">
+      <header className="parallel-work-heading">
+        <strong>{work.goal}</strong>
+        <span
+          className="parallel-work-status"
+          data-status={work.status}
+          role="status"
+        >
+          {states[work.status]}
+        </span>
+      </header>
+      <ul className="parallel-work-files">
         {work.assignments.map((a) => {
           const t = a.attempts.at(-1);
           return (
             <li key={a.path}>
-              <code>{a.path}</code> ·{" "}
-              {t ? `${states[t.state]}（${t.number}回目）` : "待機中"}
+              <code>{a.path}</code>
+              <span>
+                {t ? `${states[t.state]}（${t.number}回目）` : "待機中"}
+              </span>
             </li>
           );
         })}
@@ -184,7 +194,7 @@ export function ParallelWork({
         <details>
           <summary>担当に修正を依頼</summary>
           <form
-            className="d-grid gap-2"
+            className="parallel-work-repair"
             onSubmit={(e) => {
               e.preventDefault();
               void action("repair");
@@ -225,7 +235,7 @@ export function ParallelWork({
           </form>
         </details>
       )}
-      <div className="d-flex flex-wrap gap-2">
+      <div className="parallel-work-actions">
         {work.status === "passed" && check?.status === "passed" && (
           <a href={url + "/patch/" + work.candidate!.id} download>
             検証済みの差分を保存

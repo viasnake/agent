@@ -1129,6 +1129,82 @@ button {
   color: var(--bs-warning-fg-emphasis);
   overflow-wrap: anywhere;
 }
+.parallel-work {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 12px;
+  background: var(--bs-bg-1);
+  overflow-wrap: anywhere;
+}
+.parallel-work-heading,
+.parallel-work-files li,
+.parallel-work-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+}
+.parallel-work-heading {
+  justify-content: space-between;
+}
+.parallel-work-heading strong {
+  flex: 1 1 16rem;
+}
+.parallel-work-status {
+  padding: 2px 8px;
+  border-radius: 6px;
+  color: var(--bs-fg-2);
+  background: var(--bs-bg-2);
+}
+.parallel-work-status[data-status="passed"] {
+  color: var(--bs-success-fg);
+  background: var(--bs-success-bg-subtle);
+}
+.parallel-work-status[data-status="failed"] {
+  color: var(--bs-danger-fg);
+  background: var(--bs-danger-bg-subtle);
+}
+.parallel-work-files {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  color: var(--bs-fg-2);
+}
+.parallel-work details {
+  min-width: 0;
+}
+.parallel-work details > summary {
+  cursor: pointer;
+}
+.parallel-work details[open] > summary {
+  margin-bottom: 8px;
+}
+.parallel-work pre {
+  max-width: 100%;
+  overflow: auto;
+  margin-block: 6px;
+}
+.parallel-work-repair,
+.parallel-work-repair label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+.parallel-work-repair {
+  gap: 10px;
+}
+.parallel-work-repair button {
+  justify-self: start;
+}
+.parallel-work-actions {
+  align-items: center;
+}
 .chat-empty {
   justify-content: center;
 }

@@ -13,6 +13,8 @@ import { call, answer, until } from "../support.js";
 
 test("pause, resume, review a failed diff, repair one file and export the checked bytes from the work card", async () => {
   const f = await workFixture();
+  // A long diagnostic should scroll inside the log, not widen the chat.
+  f.plan.check = `if ! (${f.plan.check}); then echo '${"diagnostic".repeat(30)}'; exit 1; fi`;
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
   let started = 0;
@@ -52,6 +54,22 @@ test("pause, resume, review a failed diff, repair one file and export the checke
     release();
     await card.getByRole("button", { name: "再開" }).click();
     await card.getByRole("button", { name: "同じ差分を再検証" }).waitFor();
+    await card.getByText("検証内容", { exact: true }).click();
+    const transcript = page.locator("#transcript");
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert.ok(
+        await transcript.evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
+        "Check output overflowed the conversation at " + width,
+      );
+      const title = await card.locator("strong").boundingBox();
+      assert.ok(
+        title && title.width > 200,
+        "Work title was squeezed by check output",
+      );
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await card.getByText("検証内容", { exact: true }).click();
     await card.getByText("差分を確認", { exact: true }).click();
     await card.getByText("+wrong", { exact: true }).waitFor();
     await card.getByText("担当に修正を依頼", { exact: true }).click();
@@ -95,6 +113,8 @@ test("pause, resume, review a failed diff, repair one file and export the checke
     assert.equal(started, 2);
     await page.emulateMedia({ colorScheme: "light" });
     await link.waitFor();
+    await page.getByRole("tab", { name: "ファイル", exact: true }).click();
+    await page.getByRole("link", { name: /changes\.patch/ }).waitFor();
   } finally {
     release();
     await browser.close();

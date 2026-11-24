@@ -1248,7 +1248,10 @@ function App() {
         )}
         <Tabs
           value={tab}
-          onValueChange={(value) => setTab(value as typeof tab)}
+          onValueChange={(value) => {
+            setTab(value as typeof tab);
+            if (value === "files" && selected) void refreshFiles(selected);
+          }}
           asChild
         >
           <main
