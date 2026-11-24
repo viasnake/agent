@@ -2001,3 +2001,181 @@ button {
     white-space: inherit;
   }
 }
+
+.project-dashboard {
+  min-width: 0;
+  overflow: auto;
+  background: var(--bs-bg-body);
+  color: var(--bs-fg-body);
+}
+.projects-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--bs-border-muted);
+  padding: 18px clamp(16px, 4vw, 64px);
+}
+.projects-header h1 {
+  font-size: 1.28rem;
+  margin: 0 auto 0 0;
+  font-weight: 650;
+}
+.projects-header .btn-solid {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.project-body {
+  max-width: 1100px;
+  margin: auto;
+  padding: clamp(20px, 4vw, 52px) clamp(16px, 4vw, 58px) 64px;
+}
+.project-body h2 {
+  font-size: 1.15rem;
+  font-weight: 650;
+  margin: 0 0 16px;
+}
+.decision-desk {
+  background: var(--bs-bg-1);
+  border: 1px solid var(--bs-border-muted);
+  border-inline-start: 3px solid var(--bs-blue-500);
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.decision-desk h2 span,
+.portfolio-filter span {
+  font-variant-numeric: tabular-nums;
+  color: var(--bs-fg-2);
+  font-size: 0.82em;
+  margin-inline-start: 4px;
+}
+.decision-desk > p {
+  color: var(--bs-fg-2);
+  margin: 0;
+}
+.decision-request + .decision-request {
+  margin-top: 16px;
+  border-top: 1px solid var(--bs-border-muted);
+  padding-top: 16px;
+}
+.decision-request p {
+  margin: 7px 0 12px;
+}
+.decision-request > div,
+.project-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.project-link,
+.portfolio-filter button {
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-align: start;
+}
+.project-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.project-link:hover {
+  text-decoration: underline;
+}
+.decision-request .project-link {
+  font-size: 0.84rem;
+  color: var(--bs-fg-2);
+}
+.portfolio-filter {
+  display: flex;
+  gap: 16px;
+  border-bottom: 1px solid var(--bs-border-muted);
+}
+.portfolio-filter button {
+  padding: 8px 0;
+  border-bottom: 2px solid transparent;
+}
+.portfolio-filter button[aria-pressed="true"] {
+  border-color: var(--bs-primary-fg);
+  font-weight: 650;
+}
+.portfolio-item {
+  padding: 21px 0;
+  border-bottom: 1px solid var(--bs-border-muted);
+  overflow-wrap: anywhere;
+}
+.portfolio-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--bs-fg-2);
+  font-size: 0.78rem;
+}
+.project-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.project-state i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bs-fg-2);
+}
+.state-decision i {
+  background: var(--bs-orange-500);
+}
+.state-working i {
+  background: var(--bs-blue-500);
+}
+.state-delivered i {
+  background: var(--bs-green-500);
+}
+.portfolio-item h3 {
+  font-size: 1.12rem;
+  margin: 8px 0 5px;
+}
+.portfolio-summary,
+.project-empty {
+  color: var(--bs-fg-2);
+  margin: 6px 0 12px;
+  white-space: pre-wrap;
+}
+.project-empty {
+  margin-top: 18px;
+}
+.project-members > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--bs-bg-2);
+  font-size: 0.82rem;
+}
+.project-members small,
+.project-team-detail summary span {
+  color: var(--bs-fg-2);
+}
+.project-team-detail {
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+.project-team-detail summary {
+  cursor: pointer;
+}
+.project-team-detail li {
+  margin: 10px 0;
+}
+.project-team-detail pre {
+  max-height: 12rem;
+  overflow: auto;
+}

@@ -1,3 +1,4 @@
+import { ProjectDashboard, ProjectTeamStatus } from "./projects.js";
 import { ParallelWork } from "./parallel-work.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
@@ -49,6 +50,7 @@ import {
 import { Icon } from "./icons.js";
 
 type ThreadProps = {
+  projectDraft: boolean;
   draftId: string | null;
   view: View | null;
   entries: Entry[];
@@ -91,6 +93,7 @@ function SendButton({
   );
 }
 function Chat({
+  projectDraft,
   draftId,
   view,
   entries,
@@ -217,7 +220,16 @@ function Chat({
                   <span className="empty-icon">
                     <Icon name="agent" />
                   </span>
-                  <h2>何を始めますか？</h2>
+                  <h2>
+                    {projectDraft
+                      ? "チームに何を依頼しますか？"
+                      : "何を始めますか？"}
+                  </h2>
+                  {projectDraft && (
+                    <p>
+                      目的と期待する成果を伝えてください。担当の割り振りと進行は責任者に任せられます。
+                    </p>
+                  )}
                 </div>
               )}
               <ThreadPrimitive.Messages>
@@ -273,6 +285,7 @@ function Chat({
                   )}
                 </details>
               )}
+              {view?.project && <ProjectTeamStatus project={view.project} />}
               {view?.work?.map((work) => (
                 <ParallelWork
                   key={work.id}
@@ -479,6 +492,12 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(
     new URLSearchParams(location.search).has("settings"),
   );
+  const [dashboard, setDashboard] = useState(
+    new URLSearchParams(location.search).has("projects"),
+  );
+  const [newProject, setNewProject] = useState(
+    new URLSearchParams(location.search).has("new-project"),
+  );
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -567,15 +586,24 @@ function App() {
       ).values(),
     ]);
   }, []);
-  function select(id: string | null) {
+  function select(id: string | null, project = false) {
+    setDashboard(false);
+    setNewProject(project);
     setSearchOpen(false);
     setSettingsOpen(false);
     setMemoryDraft(null);
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(
+      null,
+      "",
+      location.pathname + (project ? "?new-project" : ""),
+    );
     setSidebar(false);
     // Reselecting the visible conversation must preserve its subscription and draft.
     if (id !== null && selectedRef.current === id) return;
-    attachmentDrafts.current.set(selectedRef.current ?? "new", attachments);
+    attachmentDrafts.current.set(
+      selectedRef.current ?? (newProject ? "new-project" : "new"),
+      attachments,
+    );
     selectionVersion.current++;
     setReload((value) => value + 1);
     selectedRef.current = id;
@@ -587,7 +615,10 @@ function App() {
     setFilesLoading(false);
     setFilesError("");
     setTab("chat");
-    setAttachments(attachmentDrafts.current.get(id ?? "new") ?? []);
+    setAttachments(
+      attachmentDrafts.current.get(id ?? (project ? "new-project" : "new")) ??
+        [],
+    );
     setActiveEntry(null);
     setError("");
     setLoadError("");
@@ -815,6 +846,7 @@ function App() {
         if (draftAuto && !choice)
           throw new Error("Auto を利用できません。モデルを選び直してください");
         const selection = {
+          ...(newProject ? { managedProject: true } : {}),
           ...(choice
             ? { modelId: choice.connectionId, model: choice.model }
             : {}),
@@ -833,8 +865,12 @@ function App() {
         );
         id = created.id;
         setDraftAuto(false);
-        saveDraft(null, "");
-        attachmentDrafts.current.delete("new");
+        saveDraft(newProject ? "new-project" : null, "");
+        if (newProject) {
+          setNewProject(false);
+          history.replaceState(null, "", location.pathname);
+        }
+        attachmentDrafts.current.delete(newProject ? "new-project" : "new");
         // Keep the composer mounted so a rejected/lost response can restore its draft.
         selectedRef.current = id;
         setSelected(id);
@@ -1075,6 +1111,7 @@ function App() {
     setSidebar(false);
   }
   async function openSource(source: MemorySource) {
+    setDashboard(false);
     if (selectedRef.current === source.sessionId && !settingsOpen) {
       if (source.entryId) await jumpTo(source.entryId);
       setTab("chat");
@@ -1155,11 +1192,28 @@ function App() {
             <span className="sidebar-label-text">新しいセッション</span>
           </button>
         </div>
+        <button
+          className="new-conversation btn-text theme-secondary"
+          aria-label="プロジェクト"
+          title="プロジェクト"
+          aria-pressed={dashboard && !settingsOpen}
+          disabled={sending || deleting}
+          onClick={() => {
+            if (settingsOpen && !confirmSettingsExit(settingsDirty)) return;
+            setSettingsOpen(false);
+            setDashboard(true);
+            setSidebar(false);
+            history.replaceState(null, "", location.pathname + "?projects");
+          }}
+        >
+          <Icon name="sidebar" />
+          <span className="sidebar-label-text">プロジェクト</span>
+        </button>
         <SessionList
           sessions={conversations.map((session) =>
             session.id === view?.conversation.id ? view.conversation : session,
           )}
-          selected={selected}
+          selected={dashboard && !settingsOpen ? null : selected}
           disabled={sending || deleting}
           onSelect={(id) => {
             if (!settingsOpen || confirmSettingsExit(settingsDirty)) select(id);
@@ -1237,6 +1291,13 @@ function App() {
         </div>
       </aside>
       <div className="workspace-stack">
+        {dashboard && !settingsOpen && (
+          <ProjectDashboard
+            onOpen={(id) => select(id)}
+            onNew={() => select(null, true)}
+            onMenu={() => setSidebar(true)}
+          />
+        )}
         {settingsOpen && (
           <Settings
             sidebarOpen={sidebar}
@@ -1256,8 +1317,8 @@ function App() {
         >
           <main
             className="workspace"
-            aria-hidden={settingsOpen}
-            inert={settingsOpen}
+            aria-hidden={settingsOpen || dashboard}
+            inert={settingsOpen || dashboard}
           >
             <header className="conversation-header">
               <button
@@ -1270,7 +1331,8 @@ function App() {
                 <Icon name="menu" />
               </button>
               <h1 id="title">
-                {view?.conversation.title ?? "新しいセッション"}
+                {view?.conversation.title ??
+                  (newProject ? "新しいプロジェクト" : "新しいセッション")}
               </h1>
               {view?.conversation.parentId && (
                 <button
@@ -1521,7 +1583,8 @@ function App() {
                     }}
                   >
                     <Chat
-                      draftId={selected}
+                      draftId={selected ?? (newProject ? "new-project" : null)}
+                      projectDraft={newProject}
                       key={threadKey}
                       view={view}
                       entries={entries}

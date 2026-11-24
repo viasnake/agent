@@ -1,3 +1,4 @@
+import { ProjectEvidenceDoc, type MemberUsage } from "./projects.js";
 import { assignmentUsage, WorkDoc, type Work } from "./parallel-work.js";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord/context";
@@ -84,6 +85,7 @@ function addTotals(total: UsageTotals, row: UsageTotals): void {
 export function conversationUsage(
   state: Readonly<UsageState> | undefined,
   work: readonly Work[] = [],
+  team: readonly MemberUsage[] = [],
 ): ConversationUsage {
   const rows = (bucket: UsageState["models"]) =>
     Object.entries(bucket).map(([name, usage]) => ({
@@ -91,7 +93,7 @@ export function conversationUsage(
       ...usageTotals(usage),
     }));
   const models = rows(state?.models ?? {});
-  for (const a of assignmentUsage(work)) {
+  for (const a of [...assignmentUsage(work), ...team]) {
     const row = models.find((m) => m.name === a.model);
     if (row) addTotals(row, usageTotals(a.tokens));
     else models.push({ name: a.model, ...usageTotals(a.tokens) });
@@ -171,9 +173,13 @@ export async function recordedUsage(
     }
   }
   for (const id of conversations) {
-    for (const a of assignmentUsage(
-      (await harness.snapshot(WorkDoc, id, context))?.items ?? [],
-    ))
+    for (const a of [
+      ...assignmentUsage(
+        (await harness.snapshot(WorkDoc, id, context))?.items ?? [],
+      ),
+      ...((await harness.snapshot(ProjectEvidenceDoc, id, context))?.usage ??
+        []),
+    ])
       record(true, a.model, a.time, a.error, a.tokens);
     const pi = await harness.conversation(id, context);
     if (!pi) throw new AppError(503, "保存されたセッションがありません");

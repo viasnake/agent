@@ -17,6 +17,7 @@ const path = z
           ),
       ),
   );
+export { path as workPath };
 export const objectId = z.string().regex(/^[0-9a-f]{40}$/);
 export const maxAssignments = 6;
 const maxSourcePaths = maxAssignments * 3;
@@ -149,6 +150,14 @@ export type WorkView = ReturnType<typeof workView>;
 export const gitWorkInput = z.discriminatedUnion("kind", [
   z
     .object({
+      kind: z.literal("tree"),
+      repo: planInput.shape.repo,
+      base: objectId,
+      directory: path.optional(),
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("sources"),
       repo: planInput.shape.repo,
       base: objectId,
@@ -160,7 +169,7 @@ export const gitWorkInput = z.discriminatedUnion("kind", [
       kind: z.literal("candidate"),
       repo: planInput.shape.repo,
       base: objectId,
-      edits: z.array(edit).min(2).max(maxAssignments),
+      edits: z.array(edit).min(1).max(maxAssignments),
     })
     .strict(),
   z
@@ -176,6 +185,11 @@ export const gitWorkInput = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 export const gitWorkResult = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("tree"),
+    paths: z.array(z.string().max(230)).max(200),
+    truncated: z.boolean(),
+  }),
   z.object({
     kind: z.literal("sources"),
     files: z.array(fileText.nullable()).min(1).max(maxSourcePaths),

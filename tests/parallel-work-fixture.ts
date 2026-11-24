@@ -4,9 +4,15 @@ import { join } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-export async function workFixture() {
+export async function workFixture(managedProject = false) {
   const f = await fixture();
-  const { id } = await f.service.create(randomUUID(), "parallel");
+  const { id } = await f.service.create(
+    randomUUID(),
+    "parallel",
+    undefined,
+    undefined,
+    managedProject,
+  );
   const repo = join(f.root, "work/conversations", id, "repo");
   await mkdir(repo, { recursive: true });
   const git = (...args: string[]) =>

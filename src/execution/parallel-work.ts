@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import {
+  workPath,
   fileText,
   gitWorkInput,
   type gitWorkResult,
@@ -87,6 +88,23 @@ export async function gitWork(
         throw new Error("Assignment requires a regular file");
       return { mode: m[1]!, oid: m[2]! };
     };
+    if (request.kind === "tree") {
+      const treeish = request.directory
+        ? request.base + ":" + request.directory
+        : request.base;
+      const names = (await git(["ls-tree", "--name-only", "-z", treeish]))
+        .toString("utf8")
+        .split("\0")
+        .filter(Boolean);
+      const paths = names
+        .map((n) => (request.directory ? request.directory + "/" + n : n))
+        .filter((n) => workPath.safeParse(n).success);
+      return {
+        kind: "tree",
+        paths: paths.slice(0, 200),
+        truncated: paths.length > 200,
+      };
+    }
     if (request.kind === "sources") {
       const files = [];
       for (const path of request.paths) {

@@ -493,6 +493,9 @@ export async function createServer(
       ),
     ),
   );
+  app.get("/api/projects", async () =>
+    safe({ projects: await service.projects() }),
+  );
   app.get("/api/conversations", async () =>
     safe({ conversations: (await service.list()).reverse() }),
   );
@@ -501,6 +504,7 @@ export async function createServer(
       .object({
         requestId,
         title: z.string().min(1).max(200),
+        managedProject: z.boolean().optional(),
         modelId: modelConnectionId.optional(),
         model: z.string().min(1).max(200).optional(),
       })
@@ -514,6 +518,7 @@ export async function createServer(
           body.title,
           body.modelId,
           body.model,
+          body.managedProject,
         ),
       );
   });
