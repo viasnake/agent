@@ -68,14 +68,16 @@ export function ProjectAnswer({
 export function ProjectDeliverable({
   session,
   text,
+  detail,
   postId,
 }: {
   session: string;
   text?: string;
+  detail?: string;
   postId?: number;
 }) {
   const [open, setOpen] = useState(false),
-    [loaded, setLoaded] = useState(""),
+    [loaded, setLoaded] = useState<TimelinePage["posts"][number]>(),
     [error, setError] = useState("");
   useEffect(() => {
     if (!open || text || loaded || !postId) return;
@@ -95,7 +97,7 @@ export function ProjectDeliverable({
           !post.deliverable
         )
           throw new Error("納品本文を取得できませんでした");
-        if (!abort.signal.aborted) setLoaded(post.deliverable);
+        if (!abort.signal.aborted) setLoaded(post);
       })
       .catch((e) => {
         if (!abort.signal.aborted)
@@ -105,6 +107,8 @@ export function ProjectDeliverable({
       });
     return () => abort.abort();
   }, [open, text, loaded, session, postId]);
+  const body = text ?? loaded?.deliverable,
+    evidence = detail ?? loaded?.detail;
   return (
     <details
       className="project-deliverable"
@@ -112,10 +116,18 @@ export function ProjectDeliverable({
     >
       <summary>納品本文を読む</summary>
       {open &&
-        (text || loaded ? (
-          <ConversationId.Provider value={session}>
-            <MarkdownText text={text || loaded} finalAnswer />
-          </ConversationId.Provider>
+        (body ? (
+          <div className="delivered-sheet">
+            <ConversationId.Provider value={session}>
+              <MarkdownText text={body} finalAnswer />
+            </ConversationId.Provider>
+            {evidence && (
+              <section className="delivered-proof">
+                <h4>根拠と照合記録</h4>
+                <p>{evidence}</p>
+              </section>
+            )}
+          </div>
         ) : (
           <p role={error ? "alert" : "status"}>
             {error || "本文を読み込み中…"}

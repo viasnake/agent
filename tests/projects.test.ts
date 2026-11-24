@@ -377,6 +377,7 @@ test("an unsupported release claim returns to the lead and is corrected before d
         { stopReason: "toolUse" },
       );
     },
+    answer('{"verdict":"accept"'),
     accepted,
     answer("Done"),
   ]);

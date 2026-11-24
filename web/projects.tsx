@@ -167,7 +167,8 @@ function ProjectCard({
             : "採用したパッチを保存"}
         </a>
       ))}
-      {(p.members.length > 0 || p.evidence || p.assessment) && (
+      {(p.members.length > 0 ||
+        (!p.deliveryPost && (p.evidence || p.assessment))) && (
         <ProjectTeamStatus project={p} />
       )}
     </article>

@@ -160,6 +160,10 @@ test("one directive starts a project; the portfolio shows independent teams and 
       .waitFor();
     await dash.getByText("納品本文を読む", { exact: true }).click();
     await dash.getByRole("heading", { name: "お問い合わせの際に" }).waitFor();
+    assert.match(
+      await dash.locator(".delivered-proof").innerText(),
+      /依頼 · 請求番号と発行日を添えて/,
+    );
     await dash.getByRole("button", { name: "報告フィード" }).click();
     await dash.locator(".recent-posts .post-question").waitFor();
     await dash.locator(".recent-posts .post-start").first().waitFor();

@@ -98,9 +98,13 @@ function Post({
         </header>
         <p>{post.text}</p>
         {post.deliverable && (
-          <ProjectDeliverable session={session} text={post.deliverable} />
+          <ProjectDeliverable
+            session={session}
+            text={post.deliverable}
+            detail={post.detail}
+          />
         )}
-        {post.detail && (
+        {post.detail && !post.deliverable && (
           <details className="post-details">
             <summary>
               {post.kind === "delivery"
