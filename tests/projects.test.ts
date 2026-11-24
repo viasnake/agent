@@ -113,6 +113,7 @@ test("the lead delegates competing solutions, specialists investigate and repair
       summary: "値を修正しました",
       evidence: "採用した変更が grep -Fx new app.txt に合格",
     }),
+    answer('{"verdict":"accept","reason":"記録と一致"}'),
     answer("完了"),
   ]);
   await f.service.send(f.id, randomUUID(), "Find and fix the incorrect value");
@@ -141,13 +142,13 @@ test("the lead delegates competing solutions, specialists investigate and repair
   );
   assert.match(patch, /\+A\n/);
   assert.doesNotMatch(patch, /\+B\n/);
-  assert.equal((await f.service.conversation(f.id)).requests, 15);
+  assert.equal((await f.service.conversation(f.id)).requests, 16);
   assert.equal(
     (await f.service.usageStatistics({ id: f.id }, ctx)).models.reduce(
       (n, m) => n + m.calls,
       0,
     ),
-    15,
+    16,
   );
   const old = p.members[0]!;
   f.faux.setResponses([
@@ -158,6 +159,7 @@ test("the lead delegates competing solutions, specialists investigate and repair
       summary: "新仕様を確認",
       evidence: "新しい指示の内容を照合",
     }),
+    answer('{"verdict":"accept","reason":"記録と一致"}'),
     answer("確認済み"),
   ]);
   await f.service.send(f.id, randomUUID(), "仕様変更です");
@@ -217,6 +219,7 @@ test("project decisions resume with existing specialist reports and dashboard st
         summary: "東京を対象に移行計画をまとめました",
         evidence: "担当の調査と地域の回答を反映",
       }),
+      answer('{"verdict":"accept","reason":"記録と一致"}'),
       answer("納品しました"),
     ]);
     await service.send(id, randomUUID(), "", false, [], {
@@ -262,6 +265,7 @@ test("steering a running team dismisses obsolete work and finishes the new direc
       summary: "新しい指示を反映",
       evidence: "対象を新しい仕様に更新",
     }),
+    answer('{"verdict":"accept","reason":"記録と一致"}'),
     answer("更新済み"),
   ]);
   const { id } = await f.service.create(
@@ -288,4 +292,73 @@ test("steering a running team dismisses obsolete work and finishes the new direc
     .filter((m) => m.content.startsWith("Agent 自動進行"));
   assert.equal(notes.length, 1);
   assert.equal(notes[0]!.visibleInTranscript, false);
+});
+
+test("an unsupported release claim returns to the lead and is corrected before delivery", async (t) => {
+  const f = await fixture();
+  t.after(() => f.service.close());
+  const { id } = await f.service.create(
+    randomUUID(),
+    "release handoff",
+    undefined,
+    undefined,
+    true,
+  );
+  const report = (summary: string) =>
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary,
+      evidence: "Release notes from the directive.",
+    });
+  const corrected = "Alpha can ship; Beta is on hold until rollback passes.";
+  const accepted: FauxResponseFactory = async (context) => {
+    const args = JSON.parse(String(context.messages.at(-1)!.content));
+    assert.equal(args.proposal.summary, corrected);
+    const [pending] = await f.service.projects();
+    assert.equal(pending!.status, "working");
+    assert.equal(pending!.assessment!.verdict, "checking");
+    return fauxAssistantMessage(
+      '{"verdict":"accept","reason":"両方の判定が元の記録と一致"}',
+    );
+  };
+  f.faux.setResponses([
+    report("Beta passed tests and both components can ship."),
+    answer(
+      '{"verdict":"revise","reason":"Beta のテスト合格の記録がなく、ロールバック失敗のため保留です"}',
+    ),
+    async (context) => {
+      const result = context.messages.findLast((m) => m.role === "toolResult");
+      assert.ok(
+        result?.role === "toolResult" && result.content[0]?.type === "text",
+      );
+      assert.match(result.content[0].text, /revision_requested/);
+      const [row] = await f.service.projects();
+      assert.equal(row!.assessment!.verdict, "revise");
+      assert.notEqual(row!.status, "delivered");
+      return fauxAssistantMessage(
+        fauxToolCall("project_report", {
+          revision: 1,
+          stage: "delivered",
+          summary: corrected,
+          evidence: "Alpha passed 12 checks; Beta rollback failed.",
+        }),
+        { stopReason: "toolUse" },
+      );
+    },
+    accepted,
+    answer("Done"),
+  ]);
+  await f.service.send(
+    id,
+    randomUUID(),
+    "Alpha passed 12 checks. Beta rollback failed. Publish a release decision for each component.",
+  );
+  await until(
+    async () => (await f.service.conversation(id)).status !== "running",
+  );
+  const [p] = await f.service.projects();
+  assert.equal(p!.summary, corrected);
+  assert.equal(p!.assessment!.verdict, "accept");
+  assert.equal(p!.status, "delivered");
 });

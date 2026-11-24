@@ -83,6 +83,7 @@ test("one directive starts a project; the portfolio shows independent teams and 
       summary: "調査結果と再現手順をまとめました。",
       evidence: "両担当の調査報告を照合",
     }),
+    answer('{"verdict":"accept","reason":"記録と一致"}'),
     answer("調査を完了しました。"),
   ]);
   const origin = "http://127.0.0.1:3884";
@@ -139,6 +140,7 @@ test("one directive starts a project; the portfolio shows independent teams and 
         summary: "既存ユーザー向けの案内が完成しました。",
         evidence: "初稿と校閲結果に公開範囲を反映",
       }),
+      answer('{"verdict":"accept","reason":"記録と一致"}'),
       answer("案内の準備ができました。"),
     ]);
     await page

@@ -62,10 +62,9 @@ export function projectTools(service: AgentService) {
       ),
       tool(
         "project_report",
-        "Post a concise progress update or deliver the requested outcome with evidence. The dashboard displays this to the manager. For delivered supply a concrete result and what you verified; export the selected patch if relevant.",
+        "Post a concise progress update or deliver the requested outcome with evidence. The dashboard displays this to the manager. For delivered supply a concrete result and what you verified; export the selected patch if relevant. A reviewer checks the proposed delivery before publishing. Correct revision_requested feedback and resubmit.",
         projectReportInput,
-        async (id, input) =>
-          service.team.report(await service.projectOwner(id), input),
+        (id, input, signal) => service.reportProject(id, input, signal),
       ),
       tool(
         "project_review",

@@ -36,6 +36,17 @@ export function ProjectTeamStatus({ project: p }: { project: ProjectRow }) {
           {p.members.length} 件報告済み
         </span>
       </summary>
+      {p.assessment && (
+        <p>
+          <strong>完了報告の照合 </strong>
+          {p.assessment.verdict === "checking"
+            ? "確認中"
+            : p.assessment.verdict === "revise"
+              ? "責任者へ差し戻し"
+              : "確認済み"}
+          {p.assessment.reason && " · " + p.assessment.reason}
+        </p>
+      )}
       {p.summary && <p>{p.summary}</p>}
       {p.evidence && (
         <p>
@@ -53,7 +64,10 @@ export function ProjectTeamStatus({ project: p }: { project: ProjectRow }) {
             {m.check && (
               <details>
                 <summary>テスト{m.check.passed ? "成功" : "失敗"}</summary>
-                <pre>{m.check.output || "出力なし"}</pre>
+                <pre>
+                  {m.check.command && "$ " + m.check.command + "\n"}
+                  {m.check.output || "出力なし"}
+                </pre>
               </details>
             )}
             {m.file && (
@@ -265,17 +279,24 @@ export function ProjectDashboard({
                       </button>
                     </h3>
                     <p className="portfolio-summary">
-                      {p.summary ||
-                        (p.status === "interrupted"
-                          ? p.detail
-                          : p.instruction !== p.title
-                            ? p.instruction
-                            : "") ||
-                        (p.status === "working"
-                          ? "責任者が依頼を確認しています。"
-                          : p.status === "draft"
-                            ? "最初の指示を待っています。"
-                            : "責任者の進捗報告はまだありません。")}
+                      {p.status === "working" &&
+                      p.assessment?.verdict === "checking"
+                        ? "完了報告の根拠を照合しています。"
+                        : p.status === "working" &&
+                            p.assessment?.verdict === "revise"
+                          ? "責任者が報告を見直しています。" +
+                            p.assessment.reason
+                          : p.summary ||
+                            (p.status === "interrupted"
+                              ? p.detail
+                              : p.instruction !== p.title
+                                ? p.instruction
+                                : "") ||
+                            (p.status === "working"
+                              ? "責任者が依頼を確認しています。"
+                              : p.status === "draft"
+                                ? "最初の指示を待っています。"
+                                : "責任者の進捗報告はまだありません。")}
                     </p>
                     {p.members.length > 0 && (
                       <div className="project-members">
@@ -291,7 +312,7 @@ export function ProjectDashboard({
                         ))}
                       </div>
                     )}
-                    {(p.members.length > 0 || p.evidence) && (
+                    {(p.members.length > 0 || p.evidence || p.assessment) && (
                       <ProjectTeamStatus project={p} />
                     )}
                   </article>

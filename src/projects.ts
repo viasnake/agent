@@ -80,7 +80,7 @@ export type Member = {
   status: "queued" | "running" | "reported" | "failed" | "interrupted";
   activity: string;
   report?: string;
-  check?: { tree: string; passed: boolean; output: string };
+  check?: { tree: string; passed: boolean; output: string; command?: string };
   file?: string;
 };
 export type Project = {
@@ -93,6 +93,7 @@ export type Project = {
   updatedAt: number;
   members: Member[];
   question?: PendingQuestion;
+  assessment?: { verdict: "checking" | "revise" | "accept"; reason: string };
 };
 export const ProjectDoc = defineDoc<Project>({
   kind: "agent.project-thread",
@@ -163,6 +164,10 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
     evidence: p.evidence,
     updatedAt: Math.max(c.updatedAt, p.updatedAt),
     question: p.question,
+    assessment:
+      c.status === "interrupted" && p.assessment?.verdict === "checking"
+        ? { verdict: "revise" as const, reason: "照合中に応答が中断しました" }
+        : p.assessment,
     members: p.members.map((m) => ({ ...m })),
   } as const;
 }
