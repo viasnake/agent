@@ -493,7 +493,7 @@ export async function createServer(
       ),
     ),
   );
-  app.get("/api/projects", async () =>
+  app.get("/api/project-dashboard", async () =>
     safe({ projects: await service.projects() }),
   );
   app.get("/api/conversations", async () =>

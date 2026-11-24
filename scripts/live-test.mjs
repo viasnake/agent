@@ -63,7 +63,9 @@ while (Date.now() < deadline) {
   if (conversation.status === "interrupted")
     blocked(`Conversation ${id} was interrupted; inspect its history`);
   if (conversation.status === "idle" && project) {
-    const portfolio = await fetch(origin + "/api/projects", { headers });
+    const portfolio = await fetch(origin + "/api/project-dashboard", {
+      headers,
+    });
     if (!portfolio.ok) throw new Error("Project portfolio unavailable");
     const dashboard = (await portfolio.json()).projects.find(
       (row) => row.id === id,

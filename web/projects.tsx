@@ -104,7 +104,9 @@ export function ProjectDashboard({
   const refresh = useCallback(async () => {
     const version = ++generation.current;
     try {
-      const result = await api<{ projects: ProjectRow[] }>("/api/projects");
+      const result = await api<{ projects: ProjectRow[] }>(
+        "/api/project-dashboard",
+      );
       if (alive.current && version === generation.current) {
         setRows(result.projects);
         setError("");
