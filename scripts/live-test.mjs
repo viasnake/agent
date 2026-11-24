@@ -9,7 +9,13 @@ if (process.env.AGENT_LIVE_TEST !== "1" || !process.env.AGENT_LIVE_PROMPT_FILE)
     "Explicit paid-model authorization and a reviewed prompt file are required",
   );
 const parallel = process.argv.includes("--parallel-work");
-if (process.argv.slice(2).some((arg) => arg !== "--parallel-work"))
+const project = process.argv.includes("--project");
+if (
+  (parallel && project) ||
+  process.argv
+    .slice(2)
+    .some((arg) => !["--parallel-work", "--project"].includes(arg))
+)
   throw new Error("Unknown live test option");
 const origin = process.env.AGENT_LIVE_ORIGIN ?? "http://127.0.0.1:8080";
 if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin))
@@ -32,6 +38,7 @@ const created = await fetch(`${origin}/api/conversations`, {
   body: JSON.stringify({
     requestId: randomUUID(),
     title: "実モデルの動作確認",
+    ...(project ? { managedProject: true } : {}),
   }),
 });
 if (!created.ok) throw new Error("Conversation creation failed");
@@ -52,9 +59,58 @@ while (Date.now() < deadline) {
     signal: AbortSignal.timeout(30000),
   });
   if (!response.ok) throw new Error("Conversation unavailable");
-  const { conversation, work } = await response.json();
+  const { conversation, work, project: thread } = await response.json();
   if (conversation.status === "interrupted")
     blocked(`Conversation ${id} was interrupted; inspect its history`);
+  if (conversation.status === "idle" && project) {
+    const portfolio = await fetch(origin + "/api/projects", { headers });
+    if (!portfolio.ok) throw new Error("Project portfolio unavailable");
+    const dashboard = (await portfolio.json()).projects.find(
+      (row) => row.id === id,
+    );
+    if (dashboard?.status === "decision")
+      blocked("Project is waiting for your decision: " + id);
+    if (
+      !thread ||
+      dashboard?.status !== "delivered" ||
+      thread.status !== "delivered" ||
+      dashboard.assessment?.verdict !== "accept" ||
+      thread.assessment?.verdict !== "accept"
+    )
+      throw new Error("The project has no reviewed delivery: " + id);
+    const members = thread.members.filter((m) => m.status === "reported");
+    if (members.length < 2)
+      throw new Error(
+        "The directive did not result in two specialist reports: " + id,
+      );
+    for (const member of members.filter((m) => m.file)) {
+      const file = await fetch(
+        origin +
+          "/api/conversations/" +
+          id +
+          "/download?path=" +
+          encodeURIComponent(member.file),
+        { headers },
+      );
+      if (
+        !member.check?.passed ||
+        !file.ok ||
+        !(await file.arrayBuffer()).byteLength
+      )
+        throw new Error("Missing checked deliverable: " + id);
+    }
+    console.log(
+      JSON.stringify({
+        result: "pass",
+        conversationId: id,
+        revision: thread.revision,
+        roles: members.map((m) => m.role),
+        assessment: thread.assessment.verdict,
+        checkedPatches: members.filter((m) => m.file).length,
+      }),
+    );
+    process.exit(0);
+  }
   if (conversation.status === "idle" && parallel) {
     const item = work?.at(-1);
     if (!item)
