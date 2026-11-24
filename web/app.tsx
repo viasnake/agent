@@ -1,3 +1,4 @@
+import { ParallelWork } from "./parallel-work.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
 import { NotificationProvider, useNotify } from "./notifications.js";
@@ -272,6 +273,13 @@ function Chat({
                   )}
                 </details>
               )}
+              {view?.work?.map((work) => (
+                <ParallelWork
+                  key={work.id}
+                  session={view.conversation.id}
+                  work={work}
+                />
+              ))}
               {view?.conversation.skillNotice && (
                 <div className="conversation-notice" role="status">
                   {view.conversation.skillNotice}

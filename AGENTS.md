@@ -23,8 +23,13 @@ changes require an explicitly stopped service.
 
 Do not add a host daemon, VM manager, automatic host startup, Proxmox,
 Firecracker, distributed workers, workflow engine or plugin management system.
-Do not add job classifications, service-specific connectors or ledgers, fixed
-output formats, artifact registration/versioning, or validation/completion gates.
+Ordinary sessions have no job classifications, fixed output formats, artifact
+registration or completion gates. For a two-file parallel Git change, the
+session-scoped work supervisor owns two bounded model assignments, their attempts
+and the immutable patch checked against the pinned base. Use the work UID for
+Git and tests. Deliver only stored bytes whose candidate passed. Keep response
+stop separate from work pause/cancel. Reopen requires explicit continuation.
+Do not add service-specific connectors or a general workflow engine.
 A response ending is not proof that its contents are correct. Use ordinary
 CLI/API/scripts and configured MCP tools for new kinds of work.
 

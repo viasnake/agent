@@ -1,5 +1,7 @@
 import { workEnvironment } from "../work-credentials.js";
 import { Worktrees } from "./worktrees.js";
+import { gitWork } from "./parallel-work.js";
+import { gitWorkInput } from "../parallel-work.js";
 import { gitReview } from "./git-review.js";
 import { gitReviewRequest } from "../git-review.js";
 import { constants } from "node:fs";
@@ -588,6 +590,15 @@ export class Worker {
           signal,
           z.object({ input: gitIdentityInput.optional() }).strict().parse(args)
             .input,
+        ),
+      };
+    if (op === "parallel_work")
+      return {
+        parallelWork: await gitWork(
+          this.workspace(id),
+          this.env(),
+          gitWorkInput.parse(args),
+          signal,
         ),
       };
     if (op === "git_review")

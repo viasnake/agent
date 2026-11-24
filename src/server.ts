@@ -658,6 +658,36 @@ export async function createServer(
     z.object({}).strict().parse(request.body);
     return service.stop(id);
   });
+  const workRoute = z.object({ id: z.uuid(), workId: z.uuid() });
+  app.post("/api/conversations/:id/work/:workId/control", async (request) => {
+    const { id, workId } = workRoute.parse(request.params);
+    const { action } = z
+      .object({ action: z.enum(["pause", "resume", "cancel"]) })
+      .strict()
+      .parse(request.body);
+    return service.controlWork(id, workId, action);
+  });
+  app.get(
+    "/api/conversations/:id/work/:workId/patch/:candidate",
+    async (request, reply) => {
+      const { id, workId, candidate } = workRoute
+        .extend({ candidate: z.string().regex(/^[a-f0-9]{64}$/) })
+        .parse(request.params);
+      const bytes = await service.work.download(
+        await service.conversation(id),
+        workId,
+        candidate,
+      );
+      return reply
+        .header("Content-Type", "application/octet-stream")
+        .header(
+          "Content-Disposition",
+          `attachment; filename="change-${candidate.slice(0, 12)}.patch"`,
+        )
+        .header("Content-Security-Policy", "sandbox; default-src 'none'")
+        .send(bytes);
+    },
+  );
   app.get("/api/conversations/:id/files", async (request) => {
     const { id } = identifier.parse(request.params);
     return service.files(id);

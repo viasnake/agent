@@ -33,6 +33,7 @@ export type Conversation = {
   archived?: boolean;
 };
 export type View = {
+  work?: import("../src/parallel-work.js").WorkView[];
   conversation: Conversation;
   transcript: Entry[];
   usage: ConversationUsage;
