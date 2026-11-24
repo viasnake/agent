@@ -49,6 +49,37 @@ test("one directive starts a project; the portfolio shows independent teams and 
   await until(
     async () => (await f.service.projects())[0]?.status === "decision",
   );
+  const complete = await f.service.create(
+    randomUUID(),
+    "障害後の問い合わせ案内",
+    undefined,
+    undefined,
+    true,
+  );
+  f.faux.setResponses([
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary: "問い合わせ窓口と必要な情報を一枚にまとめました。",
+      deliverable:
+        "### お問い合わせの際に\n請求番号と発行日を添えて、サポート窓口までお知らせください。",
+      evidence: "案内に必要な二項目を依頼文と照合",
+    }),
+    answer(
+      '{"verdict":"accept","reason":"請求番号と発行日の記載を確認","quotes":["請求番号と発行日を添えて"]}',
+    ),
+    answer("納品しました"),
+  ]);
+  await f.service.send(
+    complete.id,
+    randomUUID(),
+    "請求番号と発行日を添えて問い合わせるよう案内文を書いて",
+  );
+  await until(async () =>
+    (await f.service.projects()).some(
+      (p) => p.id === complete.id && p.status === "delivered",
+    ),
+  );
   let release!: () => void,
     started = 0;
   const gate = new Promise<void>((r) => (release = r));
@@ -67,6 +98,7 @@ test("one directive starts a project; the portfolio shows independent teams and 
       revision: 1,
       stage: "working",
       summary: "原因調査と回帰テストの設計を並行して進めています。",
+      nextStep: "一覧が更新されるタイミングを再現テストで確かめます。",
     }),
     call("project_team", {
       revision: 1,
@@ -97,9 +129,7 @@ test("one directive starts a project; the portfolio shows independent teams and 
       colorScheme: "light",
     });
     await page.goto(origin);
-    await page
-      .getByRole("button", { name: "プロジェクト", exact: true })
-      .click();
+    await page.getByRole("button", { name: "仕事のホーム" }).waitFor();
     await page.getByRole("button", { name: "新しい依頼" }).click();
     await page
       .getByRole("heading", { name: "チームに何を依頼しますか？" })
@@ -122,10 +152,20 @@ test("one directive starts a project; the portfolio shows independent teams and 
       .getByRole("button", { name: "全ユーザー", exact: true })
       .waitFor();
     const dash = page.locator(".project-dashboard");
+    await dash
+      .getByText("一覧が更新されるタイミングを再現テストで確かめます。", {
+        exact: false,
+      })
+      .first()
+      .waitFor();
+    await dash.getByText("納品本文を読む", { exact: true }).click();
+    await dash.getByRole("heading", { name: "お問い合わせの際に" }).waitFor();
     await dash.getByRole("button", { name: "報告フィード" }).click();
     await dash.locator(".recent-posts .post-question").waitFor();
     await dash.locator(".recent-posts .post-start").first().waitFor();
-    await dash.getByRole("button", { name: "案件一覧", exact: true }).click();
+    await dash
+      .getByRole("button", { name: "仕事のホーム", exact: true })
+      .click();
     for (const width of [1320, 390]) {
       await page.setViewportSize({ width, height: 900 });
       assert.ok(
@@ -134,8 +174,10 @@ test("one directive starts a project; the portfolio shows independent teams and 
     }
     await page.setViewportSize({ width: 1320, height: 900 });
     release();
-    await until(async () =>
-      (await f.service.projects()).some((p) => p.status === "delivered"),
+    await until(
+      async () =>
+        (await f.service.projects()).filter((p) => p.status === "delivered")
+          .length === 2,
     );
     f.faux.setResponses([
       call("project_report", {
@@ -147,13 +189,16 @@ test("one directive starts a project; the portfolio shows independent teams and 
       answer('{"verdict":"accept","reason":"記録と一致"}'),
       answer("案内の準備ができました。"),
     ]);
-    await page
-      .getByRole("button", { name: "既存ユーザーのみ", exact: true })
-      .click();
+    await dash.getByRole("button", { name: "自分の言葉で回答" }).click();
+    await dash
+      .getByRole("textbox", { name: "判断依頼への回答" })
+      .fill("既存ユーザーのうち試用中の方に先行案内してください");
+    await dash.getByRole("button", { name: "回答して再開" }).click();
     await until(async () =>
       (await f.service.projects()).every((p) => p.status === "delivered"),
     );
-    await page.getByRole("button", { name: /完了報告 2/ }).click();
+    await dash.getByRole("button", { name: "案件一覧" }).click();
+    await page.getByRole("button", { name: /完了報告 3/ }).click();
     await dash
       .getByRole("button", { name: "次回リリースの告知を準備", exact: true })
       .click();
@@ -165,7 +210,14 @@ test("one directive starts a project; the portfolio shows independent teams and 
     await stream
       .getByText("既存ユーザー向けの案内が完成しました。", { exact: true })
       .waitFor();
-    await stream.getByText("選択：既存ユーザーのみ", { exact: true }).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("project"), first.id);
+    await page.reload();
+    await stream
+      .getByText("回答：既存ユーザーのうち試用中の方に先行案内してください", {
+        exact: true,
+      })
+      .waitFor();
+    assert.equal((await f.service.view(first.id)).project?.revision, 1);
     assert.equal(
       await stream.locator(".post-question .post-choices button").count(),
       0,

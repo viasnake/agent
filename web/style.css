@@ -2036,24 +2036,11 @@ button {
   font-weight: 650;
   margin: 0 0 16px;
 }
-.decision-desk {
-  background: var(--bs-bg-1);
-  border: 1px solid var(--bs-border-muted);
-  border-inline-start: 3px solid var(--bs-blue-500);
-  border-radius: 10px;
-  padding: 20px 24px;
-  margin-bottom: 32px;
-}
-.decision-desk h2 span,
 .portfolio-filter span {
   font-variant-numeric: tabular-nums;
   color: var(--bs-fg-2);
   font-size: 0.82em;
   margin-inline-start: 4px;
-}
-.decision-desk > p {
-  color: var(--bs-fg-2);
-  margin: 0;
 }
 .decision-request + .decision-request {
   margin-top: 16px;
@@ -2062,12 +2049,6 @@ button {
 }
 .decision-request p {
   margin: 7px 0 12px;
-}
-.decision-request > div,
-.project-members {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 .project-link,
 .portfolio-filter button {
@@ -2104,11 +2085,6 @@ button {
   border-color: var(--bs-primary-fg);
   font-weight: 650;
 }
-.portfolio-item {
-  padding: 21px 0;
-  border-bottom: 1px solid var(--bs-border-muted);
-  overflow-wrap: anywhere;
-}
 .portfolio-top {
   display: flex;
   align-items: center;
@@ -2138,10 +2114,6 @@ button {
 .state-delivered i {
   background: var(--bs-green-500);
 }
-.portfolio-item h3 {
-  font-size: 1.12rem;
-  margin: 8px 0 5px;
-}
 .portfolio-summary,
 .project-empty {
   color: var(--bs-fg-2);
@@ -2151,16 +2123,6 @@ button {
 .project-empty {
   margin-top: 18px;
 }
-.project-members > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 5px;
-  background: var(--bs-bg-2);
-  font-size: 0.82rem;
-}
-.project-members small,
 .project-team-detail summary span {
   color: var(--bs-fg-2);
 }
@@ -2347,38 +2309,6 @@ button {
   gap: 8px;
   padding-inline-start: 44px;
 }
-.portfolio-heading,
-.portfolio-switch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.portfolio-heading {
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-.portfolio-heading h2 {
-  margin: 0;
-}
-.portfolio-switch {
-  gap: 0;
-  border: 1px solid var(--bs-border-muted);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.portfolio-switch button {
-  border: 0;
-  background: transparent;
-  color: var(--bs-fg-2);
-  padding: 5px 9px;
-  font-size: 0.8rem;
-}
-.portfolio-switch button[aria-pressed="true"] {
-  background: var(--bs-bg-2);
-  color: var(--bs-fg-body);
-  font-weight: 600;
-}
 @media (max-width: 650px) {
   .timeline-stream {
     padding: 8px 14px 12px;
@@ -2396,4 +2326,188 @@ button {
   .post-main header {
     gap: 6px;
   }
+}
+
+.work-nav {
+  display: flex;
+  gap: clamp(14px, 3vw, 32px);
+  border-bottom: 1px solid var(--bs-border-muted);
+  margin-bottom: 24px;
+}
+.work-nav button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--bs-fg-2);
+  font-weight: 550;
+  padding: 6px 1px 12px;
+}
+.work-nav button[aria-pressed="true"] {
+  color: var(--bs-fg-body);
+  border-color: var(--bs-primary-fg);
+}
+.work-decisions {
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 10px;
+  padding: 18px 22px;
+  margin-bottom: 28px;
+}
+.work-decisions.needs-answer {
+  background: var(--bs-bg-1);
+  border-inline-start: 3px solid var(--bs-orange-500);
+}
+.work-decisions h2,
+.work-column h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 12px;
+  font-size: 1.04rem;
+}
+.work-decisions h2 > span,
+.work-column h2 > span {
+  font-size: 0.82em;
+  color: var(--bs-fg-2);
+  font-variant-numeric: tabular-nums;
+}
+.work-decisions h3 {
+  margin: 5px 0;
+  font-size: 1.05rem;
+}
+.work-decisions .decision-request p {
+  color: var(--bs-fg-2);
+}
+.work-empty {
+  color: var(--bs-fg-2);
+  font-size: 0.9rem;
+  margin: 0;
+}
+.work-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(18px, 3vw, 36px);
+  align-items: start;
+}
+.work-column {
+  min-width: 0;
+}
+.work-column > h2 {
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--bs-border-muted);
+}
+.work-stopped {
+  margin-top: 20px;
+}
+.work-card {
+  padding: 15px 0 18px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--bs-border-muted);
+}
+.work-column > .work-card:first-of-type {
+  padding-top: 4px;
+}
+.work-card h3 {
+  font-weight: 650;
+  font-size: 1.12rem;
+  margin: 6px 0;
+}
+.work-card .portfolio-top {
+  flex-wrap: wrap;
+}
+.work-next {
+  display: flex;
+  flex-direction: column;
+  border-inline-start: 2px solid var(--bs-blue-500);
+  padding-inline-start: 10px;
+  margin: 12px 0;
+  font-size: 0.9rem;
+}
+.work-next strong {
+  font-size: 0.8rem;
+  color: var(--bs-fg-2);
+}
+.work-members {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.work-members > span {
+  font-size: 0.8rem;
+  background: var(--bs-bg-1);
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 5px;
+  padding: 2px 7px;
+}
+.work-members small {
+  color: var(--bs-fg-2);
+  margin-inline-start: 5px;
+}
+.work-file {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  margin: 12px 0;
+  font-size: 0.88rem;
+}
+.project-deliverable {
+  margin: 12px 0;
+}
+.project-deliverable > summary {
+  font-weight: 600;
+  color: var(--bs-primary-fg);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.project-deliverable > .markdown {
+  margin: 10px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 6px;
+  white-space: normal;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+}
+.project-deliverable .markdown p {
+  white-space: normal;
+}
+.project-reply-form {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  margin-top: 10px;
+  width: min(100%, 34rem);
+}
+.project-reply-form textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 5px;
+  background: var(--bs-bg-body);
+  color: inherit;
+}
+@media (max-width: 1000px) {
+  .work-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .work-decisions {
+    padding: 14px;
+  }
+  .work-nav {
+    gap: 16px;
+  }
+}
+.work-source {
+  padding-inline-start: 10px;
+  border-inline-start: 2px solid var(--bs-border-muted);
+  margin: 8px 0;
+}
+.work-source strong {
+  display: block;
+  color: var(--bs-fg-2);
+  font-size: 0.8rem;
 }

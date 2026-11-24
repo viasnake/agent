@@ -213,7 +213,7 @@ const progressMarkdownComponents: Components = {
   ),
 };
 
-function MarkdownText({
+export function MarkdownText({
   text,
   finalAnswer,
 }: Pick<TextMessagePartProps, "text"> & { finalAnswer: boolean }) {

@@ -1,3 +1,4 @@
+import { timelinePageSize } from "./project-timeline.js";
 import { candidateKey, workControlInput } from "./parallel-work.js";
 import { autoModelId } from "./model-routing.js";
 import { choiceInput } from "./choices.js";
@@ -497,11 +498,18 @@ export async function createServer(
     safe({ posts: await service.recentProjectPosts() }),
   );
   app.get("/api/conversations/:id/timeline", async (request) => {
-    const { before } = z
-      .object({ before: z.coerce.number().int().positive().optional() })
+    const { before, limit } = z
+      .object({
+        before: z.coerce.number().int().positive().optional(),
+        limit: z.coerce.number().int().min(1).max(timelinePageSize).optional(),
+      })
       .parse(request.query);
     return safe(
-      await service.timeline(identifier.parse(request.params).id, before),
+      await service.timeline(
+        identifier.parse(request.params).id,
+        before,
+        limit,
+      ),
     );
   });
   app.get("/api/project-dashboard", async () =>

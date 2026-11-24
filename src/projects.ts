@@ -37,6 +37,8 @@ export const projectReportInput = z
     revision,
     stage: z.enum(["working", "delivered"]),
     summary: z.string().trim().min(1).max(1200),
+    nextStep: z.string().trim().min(1).max(500).optional(),
+    deliverable: z.string().trim().min(1).max(12000).optional(),
     evidence: z.string().trim().min(1).max(2000).optional(),
   })
   .strict();
@@ -95,12 +97,18 @@ export type Project = {
   brief: string;
   instruction: string;
   summary: string;
+  nextStep?: string;
+  deliveryPost?: number;
   evidence?: string;
   delivered: boolean;
   updatedAt: number;
   members: Member[];
   question?: PendingQuestion;
-  assessment?: { verdict: "checking" | "revise" | "accept"; reason: string };
+  assessment?: {
+    verdict: "checking" | "revise" | "accept";
+    reason: string;
+    sources?: { label: string; quote: string }[];
+  };
 };
 export const ProjectDoc = defineDoc<Project>({
   kind: "agent.project-thread",
@@ -168,6 +176,8 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
     revision: p.revision,
     instruction: p.instruction.slice(0, 400),
     summary: p.summary,
+    nextStep: p.nextStep,
+    deliveryPost: p.delivered ? p.deliveryPost : undefined,
     evidence: p.evidence,
     updatedAt: Math.max(c.updatedAt, p.updatedAt),
     question: p.question,

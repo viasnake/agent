@@ -337,24 +337,25 @@ test("an unsupported release claim returns to the lead and is corrected before d
     call("project_report", {
       revision: 1,
       stage: "delivered",
-      summary,
+      summary: "Release decision is ready",
+      deliverable: summary,
       evidence: "Release notes from the directive.",
     });
   const corrected = "Alpha can ship; Beta is on hold until rollback passes.";
   const accepted: FauxResponseFactory = async (context) => {
     const args = JSON.parse(String(context.messages.at(-1)!.content));
-    assert.equal(args.proposal.summary, corrected);
+    assert.equal(args.proposal.deliverable, corrected);
     const [pending] = await f.service.projects();
     assert.equal(pending!.status, "working");
     assert.equal(pending!.assessment!.verdict, "checking");
     return fauxAssistantMessage(
-      '{"verdict":"accept","reason":"両方の判定が元の記録と一致"}',
+      '{"verdict":"accept","reason":"両方の判定が元の記録と一致","quotes":["Alpha passed 12 checks.","Beta rollback failed."]}',
     );
   };
   f.faux.setResponses([
     report("Beta passed tests and both components can ship."),
     answer(
-      '{"verdict":"revise","reason":"Beta のテスト合格の記録がなく、ロールバック失敗のため保留です"}',
+      '{"verdict":"accept","reason":"Both can ship","quotes":["Beta passed 12 checks"]}',
     ),
     async (context) => {
       const result = context.messages.findLast((m) => m.role === "toolResult");
@@ -369,7 +370,8 @@ test("an unsupported release claim returns to the lead and is corrected before d
         fauxToolCall("project_report", {
           revision: 1,
           stage: "delivered",
-          summary: corrected,
+          summary: "Release decision is ready",
+          deliverable: corrected,
           evidence: "Alpha passed 12 checks; Beta rollback failed.",
         }),
         { stopReason: "toolUse" },
@@ -387,7 +389,14 @@ test("an unsupported release claim returns to the lead and is corrected before d
     async () => (await f.service.conversation(id)).status !== "running",
   );
   const [p] = await f.service.projects();
-  assert.equal(p!.summary, corrected);
+  assert.ok(p!.deliveryPost);
+  const deliveries = (await f.service.timeline(id)).posts.filter(
+    (p) => p.kind === "delivery",
+  );
+  assert.deepEqual(
+    deliveries.map((p) => p.deliverable),
+    [corrected],
+  );
   assert.equal(p!.assessment!.verdict, "accept");
   assert.equal(p!.status, "delivered");
 });
@@ -502,4 +511,77 @@ test("project posts survive paging, retry, steering and reopening; the portfolio
   } finally {
     await service.close();
   }
+});
+
+test("new specialist evidence continues an unfinished project; repeated status alone stops it", async (t) => {
+  const f = await fixture();
+  t.after(() => f.service.close());
+  const { id } = await f.service.create(
+    randomUUID(),
+    "review memo",
+    undefined,
+    undefined,
+    true,
+  );
+  f.faux.setResponses([
+    answer("I will begin."),
+    call("project_team", {
+      revision: 1,
+      assignments: [{ role: "analyst", task: "Read the supplied totals" }],
+    }),
+    answer(
+      '{"action":"report","summary":"The directive records 12 passing cases."}',
+    ),
+    answer("Analysis is in."),
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary: "Test results",
+      deliverable: "12 cases passed.",
+      evidence: "12 in the directive",
+    }),
+    answer(
+      '{"verdict":"accept","reason":"The count matches the directive.","quotes":["12 cases passed."]}',
+    ),
+    answer("Done"),
+  ]);
+  await f.service.send(id, randomUUID(), "Write a test memo. 12 cases passed.");
+  await until(
+    async () => (await f.service.conversation(id)).status !== "running",
+  );
+  assert.equal(
+    (await f.service.timeline(id)).posts.at(-1)?.deliverable,
+    "12 cases passed.",
+  );
+  const { id: stalled } = await f.service.create(
+    randomUUID(),
+    "no results",
+    undefined,
+    undefined,
+    true,
+  );
+  const milestone = () =>
+    call("project_report", {
+      revision: 1,
+      stage: "working",
+      summary: "Still planning",
+      nextStep: "Look again",
+    });
+  f.faux.setResponses([
+    milestone(),
+    answer("Working"),
+    milestone(),
+    answer("Working"),
+  ]);
+  await f.service.send(stalled, randomUUID(), "Analyse the supplied document");
+  await until(
+    async () => (await f.service.conversation(stalled)).status !== "running",
+  );
+  const stopped = await f.service.conversation(stalled);
+  assert.equal(stopped.status, "interrupted");
+  assert.match(stopped.detail, /新しい作業結果/);
+  assert.equal(
+    (await f.service.timeline(stalled)).posts.at(-1)?.kind,
+    "interrupted",
+  );
 });

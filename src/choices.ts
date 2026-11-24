@@ -9,12 +9,11 @@ export const questionInput = z
   })
   .strict()
   .refine(({ options }) => new Set(options).size === options.length);
-export const choiceInput = z
-  .object({
-    entryId: z.number().int().positive(),
-    option: z.number().int().min(0).max(4),
-  })
-  .strict();
+const entryId = z.number().int().positive();
+export const choiceInput = z.union([
+  z.object({ entryId, option: z.number().int().min(0).max(4) }).strict(),
+  z.object({ entryId, answer: z.string().trim().min(1).max(2000) }).strict(),
+]);
 export type Choice = z.infer<typeof choiceInput>;
 export type PendingQuestion = z.infer<typeof questionInput> & {
   entryId: number;

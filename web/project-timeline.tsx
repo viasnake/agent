@@ -1,3 +1,4 @@
+import { ProjectAnswer, ProjectDeliverable } from "./project-response.js";
 import {
   Fragment,
   useEffect,
@@ -96,6 +97,9 @@ function Post({
           {project}
         </header>
         <p>{post.text}</p>
+        {post.deliverable && (
+          <ProjectDeliverable session={session} text={post.deliverable} />
+        )}
         {post.detail && (
           <details className="post-details">
             <summary>
@@ -175,7 +179,7 @@ export function ProjectTimeline({
   latest: TimelinePage;
   question?: PendingQuestion;
   disabled: boolean;
-  onChoice: (id: number, index: number) => Promise<void>;
+  onChoice: (id: number, index: number | string) => Promise<void>;
   onHistory: () => void;
   visible: boolean;
   active: boolean;
@@ -232,18 +236,12 @@ export function ProjectTimeline({
     }
   }
   const choices = question && (
-    <div className="post-choices" role="group" aria-label={question.question}>
-      {question.options.map((o, i) => (
-        <button
-          key={i}
-          disabled={disabled}
-          className="btn-outline theme-primary btn-sm"
-          onClick={() => void onChoice(question.entryId, i)}
-        >
-          {o}
-        </button>
-      ))}
-    </div>
+    <ProjectAnswer
+      key={question.entryId}
+      question={question}
+      busy={disabled}
+      onAnswer={(value) => void onChoice(question.entryId, value)}
+    />
   );
   return (
     <div className="timeline-pane" hidden={!visible}>

@@ -71,7 +71,7 @@ type ThreadProps = {
   attachments: File[];
   setAttachments: (files: File[]) => void;
   onSend: (message: AppendMessage) => Promise<void>;
-  onChoice: (entryId: number, option: number) => Promise<void>;
+  onChoice: (entryId: number, option: number | string) => Promise<void>;
   onEarlier: () => Promise<void>;
 };
 function SendButton({
@@ -536,7 +536,13 @@ function App() {
   );
   const [ready, setReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(() => {
+    const id = new URLSearchParams(location.search).get("project");
+    return id && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)
+      ? id
+      : null;
+  });
+  const openHomeOnArrival = useRef(!location.search && !readDraft(null));
   const selectedRef = useRef(selected);
   const selectionVersion = useRef(0);
   const [reload, setReload] = useState(0);
@@ -590,7 +596,20 @@ function App() {
     const result = await api<{ conversations: Conversation[] }>(
       "/api/conversations",
     );
-    if (listVersion.current === version) setConversations(result.conversations);
+    if (listVersion.current === version) {
+      setConversations(result.conversations);
+      if (
+        openHomeOnArrival.current &&
+        !selectionVersion.current &&
+        !location.search &&
+        !readDraft(null) &&
+        result.conversations.some((c) => c.managedProject && !c.archived)
+      ) {
+        setDashboard(true);
+        history.replaceState(null, "", location.pathname + "?projects");
+      }
+      openHomeOnArrival.current = false;
+    }
   }, []);
   const refreshFiles = useCallback(
     async (id: string) => {
@@ -626,14 +645,20 @@ function App() {
   }, []);
   function select(id: string | null, project = false) {
     setDashboard(false);
-    setNewProject(project);
+    setNewProject(!id && project);
     setSearchOpen(false);
     setSettingsOpen(false);
     setMemoryDraft(null);
     history.replaceState(
       null,
       "",
-      location.pathname + (project ? "?new-project" : ""),
+      location.pathname +
+        (id &&
+        (project || conversations.some((c) => c.id === id && c.managedProject))
+          ? "?project=" + encodeURIComponent(id)
+          : project
+            ? "?new-project"
+            : ""),
     );
     setSidebar(false);
     // Reselecting the visible conversation must preserve its subscription and draft.
@@ -845,10 +870,13 @@ function App() {
       document.getElementById("message")?.focus({ preventScroll: true });
     setChoiceFocus(null);
   }, [choiceFocus, sending]);
-  async function sendChoice(entryId: number, option: number) {
+  async function sendChoice(entryId: number, option: number | string) {
     const id = selectedRef.current;
     if (!id || sending) return;
-    const choice = { entryId, option };
+    const choice =
+      typeof option === "string"
+        ? { entryId, answer: option }
+        : { entryId, option };
     const key = `choice-${id}-${entryId}`;
     setSending(true);
     setError("");
@@ -906,7 +934,7 @@ function App() {
         saveDraft(newProject ? "new-project" : null, "");
         if (newProject) {
           setNewProject(false);
-          history.replaceState(null, "", location.pathname);
+          history.replaceState(null, "", location.pathname + "?project=" + id);
         }
         attachmentDrafts.current.delete(newProject ? "new-project" : "new");
         // Keep the composer mounted so a rejected/lost response can restore its draft.
@@ -1332,7 +1360,7 @@ function App() {
         {dashboard && !settingsOpen && (
           <ProjectDashboard
             onOpen={(id) => {
-              select(id);
+              select(id, true);
               setTab("timeline");
             }}
             onNew={() => select(null, true)}

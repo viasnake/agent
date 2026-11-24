@@ -30,6 +30,7 @@ export type PostContent = {
   name?: string;
   memberId?: string;
   detail?: string;
+  deliverable?: string;
   file?: string;
   questionId?: number;
 };
@@ -44,7 +45,7 @@ export type PortfolioPost = {
   title: string;
   post: ProjectPost;
 };
-const pageSize = 24;
+export const timelinePageSize = 24;
 const TimelineDoc = defineDocFamily<{ posts: ProjectPost[] }, null>({
   kind: "agent.project-timeline",
   version: 1,
@@ -53,9 +54,9 @@ const TimelineDoc = defineDocFamily<{ posts: ProjectPost[] }, null>({
   history: "latest",
   fork: "initial",
   initial: () => ({ posts: [] }),
-  checkpointWhen: (_v, _ops, info) => info.deltasSinceBase >= pageSize,
+  checkpointWhen: (_v, _ops, info) => info.deltasSinceBase >= timelinePageSize,
 });
-const pageKey = (id: number) => String(Math.floor((id - 1) / pageSize));
+const pageKey = (id: number) => String(Math.floor((id - 1) / timelinePageSize));
 
 // Append on the same transaction as the transition. Each project's sequence spans directive revisions.
 export async function appendPost(
@@ -68,6 +69,10 @@ export async function appendPost(
     at = Math.max(Date.now(), p.lastPost?.at ?? 0);
   const page = await tx.doc(TimelineDoc, piId, pageKey(id), null);
   page.posts.push({ ...content, id, at, revision: p.revision });
+  if (content.kind === "delivery") {
+    if (content.deliverable) p.deliveryPost = id;
+    else delete p.deliveryPost;
+  }
   p.lastPost = { id, at };
 }
 export async function readPosts(
@@ -75,7 +80,7 @@ export async function readPosts(
   piId: ConversationId,
   count: number,
   before = count + 1,
-  limit = pageSize,
+  limit = timelinePageSize,
 ): Promise<TimelinePage> {
   const end = Math.min(count, before - 1);
   if (end < 1) return { posts: [], before: null };
