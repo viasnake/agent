@@ -25,6 +25,7 @@ export const requestSchema = z
       "git_identity",
       "git_review",
       "parallel_work",
+      "export_patch",
     ]),
     args: z.record(z.string(), z.unknown()),
   })

@@ -24,8 +24,8 @@ changes require an explicitly stopped service.
 Do not add a host daemon, VM manager, automatic host startup, Proxmox,
 Firecracker, distributed workers, workflow engine or plugin management system.
 Ordinary sessions have no job classifications, fixed output formats, artifact
-registration or completion gates. For a two-file parallel Git change, the
-session-scoped work supervisor owns two bounded model assignments, their attempts
+registration or completion gates. For a parallel Git change, the session-scoped work supervisor owns 2–6 file
+assignments with up to two concurrent producers, their attempts
 and the immutable patch checked against the pinned base. Use the work UID for
 Git and tests. Deliver only stored bytes whose candidate passed. Keep response
 stop separate from work pause/cancel. Reopen requires explicit continuation.

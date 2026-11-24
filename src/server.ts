@@ -1,3 +1,4 @@
+import { candidateKey, workControlInput } from "./parallel-work.js";
 import { autoModelId } from "./model-routing.js";
 import { choiceInput } from "./choices.js";
 import Fastify from "fastify";
@@ -661,18 +662,37 @@ export async function createServer(
   const workRoute = z.object({ id: z.uuid(), workId: z.uuid() });
   app.post("/api/conversations/:id/work/:workId/control", async (request) => {
     const { id, workId } = workRoute.parse(request.params);
-    const { action } = z
-      .object({ action: z.enum(["pause", "resume", "cancel"]) })
-      .strict()
-      .parse(request.body);
-    return service.controlWork(id, workId, action);
+    const control = workControlInput.parse(request.body);
+    return service.controlWork(
+      id,
+      workId,
+      control.action === "repair" ? control : control.action,
+    );
   });
+  const candidateRoute = workRoute.extend({ candidate: candidateKey });
+  app.get(
+    "/api/conversations/:id/work/:workId/candidates/:candidate",
+    async (request) => {
+      const { id, workId, candidate } = candidateRoute.parse(request.params);
+      return service.work.review(
+        await service.conversation(id),
+        workId,
+        candidate,
+      );
+    },
+  );
+  app.post(
+    "/api/conversations/:id/work/:workId/candidates/:candidate/export",
+    async (request) => {
+      const { id, workId, candidate } = candidateRoute.parse(request.params);
+      z.object({}).strict().parse(request.body);
+      return service.exportWorkPatch(id, workId, candidate);
+    },
+  );
   app.get(
     "/api/conversations/:id/work/:workId/patch/:candidate",
     async (request, reply) => {
-      const { id, workId, candidate } = workRoute
-        .extend({ candidate: z.string().regex(/^[a-f0-9]{64}$/) })
-        .parse(request.params);
+      const { id, workId, candidate } = candidateRoute.parse(request.params);
       const bytes = await service.work.download(
         await service.conversation(id),
         workId,

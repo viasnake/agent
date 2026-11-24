@@ -11,15 +11,20 @@ import { createServer } from "../../src/server.js";
 import { workFixture } from "../parallel-work-fixture.js";
 import { call, answer, until } from "../support.js";
 
-test("pause and resume both assignments in the live work card, then download the checked bytes", async () => {
+test("pause, resume, review a failed diff, repair one file and export the checked bytes from the work card", async () => {
   const f = await workFixture();
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
   let started = 0;
-  const generate: FauxResponseFactory = async () => {
+  const generate: FauxResponseFactory = async (context) => {
+    const { assignment } = JSON.parse(String(context.messages.at(-1)!.content));
     started++;
     await gate;
-    return fauxAssistantMessage('{"content":"new\\n"}');
+    return fauxAssistantMessage(
+      JSON.stringify({
+        content: assignment.path === "app.txt" ? "wrong\n" : "new\n",
+      }),
+    );
   };
   f.faux.setResponses([
     call("parallel_work", f.plan),
@@ -46,8 +51,31 @@ test("pause and resume both assignments in the live work card, then download the
     await card.getByText("一時停止待ち", { exact: true }).waitFor();
     release();
     await card.getByRole("button", { name: "再開" }).click();
+    await card.getByRole("button", { name: "同じ差分を再検証" }).waitFor();
+    await card.getByText("差分を確認", { exact: true }).click();
+    await card.getByText("+wrong", { exact: true }).waitFor();
+    await card.getByText("担当に修正を依頼", { exact: true }).click();
+    await card.getByLabel("修正対象").selectOption("app.txt");
+    await card.getByLabel("修正指示").fill("Use new for the value");
+    f.faux.setResponses([answer('{"content":"new\\n"}')]);
+    await card.getByRole("button", { name: "この担当を再実行" }).click();
     const link = card.getByRole("link", { name: "検証済みの差分を保存" });
     await link.waitFor();
+    await card.getByText("差分を確認", { exact: true }).click();
+    const diff = card
+      .locator("details")
+      .filter({ has: page.getByText("差分を確認", { exact: true }) });
+    await diff
+      .getByText("diff --git a/app.txt b/app.txt", { exact: true })
+      .waitFor();
+    await diff
+      .getByText("diff --git a/README.md b/README.md", { exact: true })
+      .waitFor();
+    assert.equal(await diff.getByText("+new", { exact: true }).count(), 2);
+    assert.match(await card.innerText(), /以前の差分（.*失敗/);
+    await card.getByRole("button", { name: "作業フォルダに保存" }).click();
+    const exported = await card.locator('code[role="status"]').textContent();
+    assert.ok(exported?.startsWith("outputs/parallel-"));
     await card.getByText("検証内容", { exact: true }).click();
     assert.match(await card.innerText(), /grep -Fx new README.md/);
     const [download] = await Promise.all([
@@ -59,6 +87,10 @@ test("pause and resume both assignments in the live work card, then download the
     assert.match(
       await readFile(path, "utf8"),
       /diff --git a\/app.txt b\/app.txt/,
+    );
+    assert.deepEqual(
+      await readFile(join(f.repo, "..", exported!)),
+      await readFile(path),
     );
     assert.equal(started, 2);
     await page.emulateMedia({ colorScheme: "light" });

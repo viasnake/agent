@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 function blocked(reason) {
   console.log(JSON.stringify({ result: "blocked", reason }));
   process.exit(77);
@@ -8,6 +8,9 @@ if (process.env.AGENT_LIVE_TEST !== "1" || !process.env.AGENT_LIVE_PROMPT_FILE)
   blocked(
     "Explicit paid-model authorization and a reviewed prompt file are required",
   );
+const parallel = process.argv.includes("--parallel-work");
+if (process.argv.slice(2).some((arg) => arg !== "--parallel-work"))
+  throw new Error("Unknown live test option");
 const origin = process.env.AGENT_LIVE_ORIGIN ?? "http://127.0.0.1:8080";
 if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin))
   throw new Error("Use the configured local application endpoint");
@@ -49,10 +52,58 @@ while (Date.now() < deadline) {
     signal: AbortSignal.timeout(30000),
   });
   if (!response.ok) throw new Error("Conversation unavailable");
-  const { conversation } = await response.json();
+  const { conversation, work } = await response.json();
   if (conversation.status === "interrupted")
     blocked(`Conversation ${id} was interrupted; inspect its history`);
-  if (conversation.status === "idle") {
+  if (conversation.status === "idle" && parallel) {
+    const item = work?.at(-1);
+    if (!item)
+      throw new Error("The reviewed prompt did not produce parallel work");
+    if (item.status === "failed" || item.status === "cancelled")
+      throw new Error(
+        `Work ${item.id} ended with ${item.status}: ${item.detail}`,
+      );
+    if (item.status === "paused")
+      blocked(`Work ${item.id} is paused; inspect its history`);
+    if (item.status === "passed") {
+      const candidate = item.candidate;
+      if (!candidate || candidate.checks.at(-1)?.status !== "passed")
+        throw new Error("Missing successful candidate check");
+      const route = `${origin}/api/conversations/${id}/work/${item.id}`;
+      const stored = await fetch(`${route}/patch/${candidate.id}`, { headers });
+      const exported = await fetch(
+        `${route}/candidates/${candidate.id}/export`,
+        { method: "POST", headers, body: "{}" },
+      );
+      if (!stored.ok || !exported.ok)
+        throw new Error("Verified patch delivery failed");
+      const bytes = Buffer.from(await stored.arrayBuffer());
+      const { path, sha256 } = await exported.json();
+      const download = await fetch(
+        `${origin}/api/conversations/${id}/download?path=${encodeURIComponent(path)}`,
+        { headers },
+      );
+      if (
+        !download.ok ||
+        bytes.length === 0 ||
+        createHash("sha256").update(bytes).digest("hex") !== sha256 ||
+        !bytes.equals(Buffer.from(await download.arrayBuffer()))
+      )
+        throw new Error("Workspace patch differs from checked bytes");
+      console.log(
+        JSON.stringify({
+          result: "pass",
+          conversationId: id,
+          base: item.base,
+          tree: candidate.tree,
+          check: item.check,
+          paths: item.assignments.map((a) => a.path),
+          sha256,
+        }),
+      );
+      process.exit(0);
+    }
+  } else if (conversation.status === "idle") {
     const response = await fetch(`${origin}/api/conversations/${id}/files`, {
       headers,
     });

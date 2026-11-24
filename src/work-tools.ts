@@ -2,10 +2,14 @@ import { awaitWithContext } from "@earendil-works/chord/context";
 import { z } from "zod";
 import { defineExtension } from "@earendil-works/pi-durable";
 import type { AgentService } from "./service.js";
-import { planInput } from "./parallel-work.js";
+import { candidateKey, planInput } from "./parallel-work.js";
 import { retryInput } from "./work-anchor.js";
 
 const statusInput = z.object({ id: z.uuid().optional() }).strict();
+
+const exportInput = z
+  .object({ id: z.uuid(), candidate: candidateKey })
+  .strict();
 
 export function workTools(service: AgentService) {
   return defineExtension({
@@ -14,7 +18,7 @@ export function workTools(service: AgentService) {
       {
         name: "parallel_work",
         description:
-          "For an authorized change to two independent text files in one session-local Git clone, split the goal into two precise assignments and supply the full base commit and a meaningful local acceptance test command. Each producer sees its file and your instructions only. Include relevant interfaces and constraints. Both producers use the selected model concurrently. Integrate and test the exact patch in a fresh checkout. Wait for results; inspect failures and repair only the affected assignment. Do not run external updates in the check.",
+          "For an authorized change to 2–6 independent UTF-8 files in one session-local Git clone, split the goal into one precise assignment per file and supply the full base commit and a meaningful local acceptance test command. Each producer sees the pinned file, your instructions and up to two named read-only reference files from the same base. Specify relevant interfaces and constraints. Up to two producers use the selected model concurrently. Integrate and test the exact patch in a fresh checkout. Wait for results; inspect failures and repair only the affected assignment. Do not run external updates in the check.",
         parameters: z.toJSONSchema(planInput),
         replay: "unsafe",
         execute: async (value, api, ctx) => {
@@ -51,6 +55,22 @@ export function workTools(service: AgentService) {
               },
             ],
           };
+        },
+      },
+      {
+        name: "parallel_work_export",
+        description:
+          "Materialize the exact passed candidate patch in the current session outputs. Returns a workspace-relative path and SHA-256. Use with ordinary Git when integration, commit or PR delivery was requested. Inspect the checkout and respect existing edits and publication permissions.",
+        parameters: z.toJSONSchema(exportInput),
+        replay: "unsafe",
+        execute: async (value, api, context) => {
+          const { id, candidate } = exportInput.parse(value);
+          const owner = await service.toolConversation(api.conversationId);
+          const result = await awaitWithContext(
+            service.exportWorkPatch(owner, id, candidate, context.abortSignal),
+            context,
+          );
+          return { output: [{ type: "text", text: JSON.stringify(result) }] };
         },
       },
       {

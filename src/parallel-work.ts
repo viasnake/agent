@@ -18,10 +18,13 @@ const path = z
       ),
   );
 export const objectId = z.string().regex(/^[0-9a-f]{40}$/);
+export const maxAssignments = 6;
+const maxSourcePaths = maxAssignments * 3;
 export const assignmentInput = z
   .object({
     path,
     instruction: z.string().trim().min(1).max(4000),
+    references: z.array(path).max(2).optional(),
   })
   .strict();
 export const planInput = z
@@ -29,15 +32,15 @@ export const planInput = z
     repo: z.union([path, z.literal(".")]),
     base: objectId,
     goal: z.string().trim().min(1).max(2000),
-    assignments: z.array(assignmentInput).length(2),
+    assignments: z.array(assignmentInput).min(2).max(maxAssignments),
     check: z.string().trim().min(1).max(2000),
   })
   .strict()
   .refine(({ assignments }) => {
-    if (assignments.length !== 2) return false;
-    const first = assignments[0]!.path + "/";
-    const second = assignments[1]!.path + "/";
-    return !first.startsWith(second) && !second.startsWith(first);
+    const paths = assignments.map((a) => a.path + "/");
+    return paths.every((path, i) =>
+      paths.every((other, j) => i === j || !other.startsWith(path)),
+    );
   }, "Assignments must own distinct files");
 export const fileText = z
   .string()
@@ -92,6 +95,7 @@ export type Work = {
   assignments: { attempts: Attempt[] }[];
   candidates: Candidate[];
   selected?: string;
+  revision?: number;
   calls: number;
   maxCalls: number;
   remainingMs: number;
@@ -112,6 +116,14 @@ export function workView(work: Work) {
   return {
     id: work.id,
     goal: work.plan.goal,
+    revision: work.revision ?? 0,
+    repo: work.plan.repo,
+    candidates: work.candidates.map((c) => ({
+      id: c.id,
+      tree: c.tree,
+      status: c.checks.at(-1)?.status,
+      attempts: c.attempts,
+    })),
     base: work.plan.base,
     status: work.status,
     detail: work.detail,
@@ -140,7 +152,7 @@ export const gitWorkInput = z.discriminatedUnion("kind", [
       kind: z.literal("sources"),
       repo: planInput.shape.repo,
       base: objectId,
-      paths: z.array(path).length(2),
+      paths: z.array(path).min(1).max(maxSourcePaths),
     })
     .strict(),
   z
@@ -148,7 +160,7 @@ export const gitWorkInput = z.discriminatedUnion("kind", [
       kind: z.literal("candidate"),
       repo: planInput.shape.repo,
       base: objectId,
-      edits: z.array(edit).length(2),
+      edits: z.array(edit).min(2).max(maxAssignments),
     })
     .strict(),
   z
@@ -166,7 +178,7 @@ export const gitWorkInput = z.discriminatedUnion("kind", [
 export const gitWorkResult = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("sources"),
-    files: z.array(fileText.nullable()).length(2),
+    files: z.array(fileText.nullable()).min(1).max(maxSourcePaths),
   }),
   z.object({
     kind: z.literal("candidate"),
@@ -187,3 +199,16 @@ export function assignmentUsage(items: readonly Work[]) {
     ),
   );
 }
+
+export const candidateKey = z.string().regex(/^[a-f0-9]{64}$/);
+export const workControlInput = z.discriminatedUnion("action", [
+  z.object({ action: z.enum(["pause", "resume", "cancel"]) }).strict(),
+  z
+    .object({
+      action: z.literal("repair"),
+      revision: z.number().int().nonnegative(),
+      path: assignmentInput.shape.path,
+      guidance: z.string().trim().min(1).max(2000),
+    })
+    .strict(),
+]);

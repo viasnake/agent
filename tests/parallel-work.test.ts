@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import {
@@ -9,7 +9,7 @@ import {
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
 import { fixture, call, answer, until } from "./support.js";
-import { WorkDoc } from "../src/parallel-work.js";
+import { WorkDoc, planInput } from "../src/parallel-work.js";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { workFixture } from "./parallel-work-fixture.js";
 test("normal Pi request overlaps both producers, checks a frozen patch, repairs one assignment and delivers the same bytes after reopen", async () => {
@@ -46,6 +46,20 @@ test("normal Pi request overlaps both producers, checks a frozen patch, repairs 
     const owner = await f.service.conversation(f.id);
     await assert.rejects(
       f.service.work.download(owner, first.id, first.candidate!.id),
+    );
+    const refused = first.candidate!.id;
+    assert.match(
+      (await f.service.work.review(owner, first.id, refused)).patch,
+      /\+wrong/,
+    );
+    await assert.rejects(f.service.exportWorkPatch(f.id, first.id, refused));
+    await assert.rejects(
+      f.service.controlWork(f.id, first.id, {
+        action: "repair",
+        revision: first.revision - 1,
+        path: "app.txt",
+        guidance: "stale",
+      }),
     );
     await writeFile(join(f.repo, "README.md"), "uncommitted user text\n");
     f.faux.setResponses([
@@ -85,6 +99,52 @@ test("normal Pi request overlaps both producers, checks a frozen patch, repairs 
       await readFile(join(f.repo, "README.md"), "utf8"),
       "uncommitted user text\n",
     );
+    assert.deepEqual(
+      second.candidates.map((c) => c.status),
+      ["failed", "passed"],
+    );
+    const other = await f.service.create(randomUUID(), "Independent session");
+    const accepted = second.candidate!.id;
+    await assert.rejects(
+      f.service.exportWorkPatch(other.id, second.id, accepted),
+    );
+    const exported = await f.service.exportWorkPatch(f.id, second.id, accepted);
+    assert.equal(
+      exported.sha256,
+      createHash("sha256").update(bytes).digest("hex"),
+    );
+    const output = join(f.repo, "..", exported.path);
+    assert.deepEqual(await readFile(output), bytes);
+    f.faux.setResponses([
+      call("parallel_work_export", { id: second.id, candidate: accepted }),
+      call("bash", {
+        command: `git clone -q repo integration && git -C integration switch -qc feature && git -C integration apply --index ../${exported.path} && git -C integration -c user.name=Test -c user.email=test@localhost commit -qm "Use new value"`,
+      }),
+      answer("Integrated"),
+    ]);
+    await f.service.send(
+      f.id,
+      randomUUID(),
+      "Apply the passed patch to a feature branch and commit it.",
+    );
+    await until(
+      async () => (await f.service.conversation(f.id)).status === "idle",
+    );
+    assert.equal(
+      execFileSync(
+        "git",
+        ["-C", join(f.repo, "..", "integration"), "rev-parse", "HEAD^{tree}"],
+        { encoding: "utf8" },
+      ).trim(),
+      second.candidate!.tree,
+    );
+    assert.deepEqual(
+      await f.service.exportWorkPatch(f.id, second.id, accepted),
+      exported,
+    );
+    await writeFile(output, "user-edited export");
+    await assert.rejects(f.service.exportWorkPatch(f.id, second.id, accepted));
+    assert.equal(await readFile(output, "utf8"), "user-edited export");
     const copy = join(f.root, "apply");
     execFileSync("git", ["clone", "-q", f.repo, copy]);
     execFileSync("git", ["apply", "--index", "-"], { cwd: copy, input: bytes });
@@ -294,6 +354,82 @@ test("a failed producer retries independently and charges each dispatch to the c
       [2, 1],
     );
   } finally {
+    await f.service.close();
+  }
+});
+
+test("three independently owned files share two model slots and read only the selected pinned references", async () => {
+  const f = await workFixture();
+  const plan = planInput.parse({
+    ...f.plan,
+    assignments: [
+      { ...f.plan.assignments[0], references: ["README.md"] },
+      f.plan.assignments[1],
+      { path: "tests/value.txt", instruction: "Record the expected value" },
+    ],
+    check: f.plan.check + " && grep -Fx new tests/value.txt",
+  });
+  assert.equal(
+    planInput.safeParse({
+      ...plan,
+      assignments: [
+        ...plan.assignments,
+        { path: "tests", instruction: "overlaps" },
+      ],
+    }).success,
+    false,
+  );
+  let count = 0,
+    active = 0,
+    peak = 0,
+    release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const inputs = new Map<string, unknown>();
+  const draft: FauxResponseFactory = async (context) => {
+    const req = JSON.parse(String(context.messages.at(-1)!.content));
+    inputs.set(req.assignment.path, req.references);
+    count++;
+    active++;
+    peak = Math.max(active, peak);
+    await gate;
+    active--;
+    return fauxAssistantMessage('```json\n{"content":"new\\n"}\n```');
+  };
+  try {
+    await writeFile(join(f.repo, "README.md"), "local edit");
+    f.faux.setResponses([
+      call("parallel_work", plan),
+      draft,
+      draft,
+      answer("Paused"),
+    ]);
+    await f.service.send(f.id, randomUUID(), "Code, docs and tests");
+    await until(async () => count === 2);
+    const owner = await f.service.conversation(f.id),
+      id = (await f.view())!.id;
+    await f.service.controlWork(f.id, id, "pause");
+    release();
+    assert.equal((await f.service.work.wait(owner, id)).status, "paused");
+    assert.equal(count, 2);
+    await until(
+      async () => (await f.service.conversation(f.id)).status === "idle",
+    );
+    f.faux.setResponses([draft]);
+    await f.service.controlWork(f.id, id, "resume");
+    const done = await f.service.work.wait(owner, id);
+    assert.equal(done.status, "passed", JSON.stringify(done));
+    assert.deepEqual(
+      done.assignments.map((a) => a.attempts.length),
+      [1, 1, 1],
+    );
+    assert.equal(peak, 2);
+    assert.deepEqual(inputs.get("app.txt"), [
+      { path: "README.md", content: "old docs\n" },
+    ]);
+    assert.equal(inputs.get("tests/value.txt"), undefined);
+    assert.equal(count, 3);
+  } finally {
+    release();
     await f.service.close();
   }
 });

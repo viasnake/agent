@@ -91,7 +91,9 @@ export class WorkAnchor {
         (work) => work.id === id,
       );
       if (!work) throw new AppError(404, "作業がありません");
-      return fn(work);
+      const result = fn(work);
+      work.revision = (work.revision ?? 0) + 1;
+      return result;
     }, ctx);
     this.options.notify();
     return result;
@@ -123,7 +125,11 @@ export class WorkAnchor {
       plan.repo,
       plan.goal,
       plan.check,
-      ...plan.assignments.flatMap((a) => [a.instruction, a.path]),
+      ...plan.assignments.flatMap((a) => [
+        a.instruction,
+        a.path,
+        ...(a.references ?? []),
+      ]),
     ])
       this.exposable(value);
     const id = randomUUID();
@@ -134,7 +140,7 @@ export class WorkAnchor {
         doc.items.some((work) => !["passed", "cancelled"].includes(work.status))
       )
         throw new AppError(409, "前の並列作業を完了または取り消してください");
-      if (doc.items.length >= 12 || remainingCalls < 2)
+      if (doc.items.length >= 12 || remainingCalls < plan.assignments.length)
         throw new AppError(409, "並列作業の上限に達しました");
       doc.items.push({
         id,
@@ -143,7 +149,7 @@ export class WorkAnchor {
         ...(connection ? { connection } : {}),
         status: "running",
         detail: "",
-        assignments: [{ attempts: [] }, { attempts: [] }],
+        assignments: plan.assignments.map(() => ({ attempts: [] })),
         candidates: [],
         calls: 0,
         maxCalls: Math.min(8, remainingCalls),
@@ -219,23 +225,29 @@ export class WorkAnchor {
     if (run?.id === id) await run.done;
     return workView(await this.read(owner, id));
   }
-  async download(owner: Owner, id: string, candidate: string) {
+  async review(owner: Owner, id: string, candidate: string) {
     const work = await this.read(owner, id);
-    const c = work.candidates.find(
-      (c) =>
-        c.id === candidate &&
-        c.checks.some((check) => check.status === "passed"),
-    );
+    const item = work.candidates.find((c) => c.id === candidate);
     if (
-      !c ||
+      !item ||
       hash({
         base: work.plan.base,
-        tree: c.tree,
-        patch: byteHash(Buffer.from(c.patch)),
+        tree: item.tree,
+        patch: byteHash(Buffer.from(item.patch)),
       }) !== candidate
     )
-      throw new AppError(404, "検証済みの差分がありません");
-    return Buffer.from(c.patch);
+      throw new AppError(404, "該当する変更案がありません");
+    return {
+      patch: item.patch,
+      checks: item.checks,
+      passed: item.checks.some((c) => c.status === "passed"),
+    };
+  }
+  async download(owner: Owner, id: string, candidate: string) {
+    const item = await this.review(owner, id, candidate);
+    if (!item.passed)
+      throw new AppError(409, "この差分の検証は成功していません");
+    return Buffer.from(item.patch);
   }
   async close() {
     this.closing = true;
@@ -323,15 +335,31 @@ export class WorkAnchor {
     if (pending.length) {
       if (initial.calls + pending.length > initial.maxCalls)
         throw new AppError(409, "モデル呼び出しの上限に達しました");
+      const paths = [
+        ...new Set(
+          pending.flatMap((i) => {
+            const a = plan.assignments[i]!;
+            return [a.path, ...(a.references ?? [])];
+          }),
+        ),
+      ];
       const sources = await git({
         kind: "sources",
         repo: plan.repo,
         base: plan.base,
-        paths: plan.assignments.map((a) => a.path),
+        paths,
       });
-      if (sources.kind !== "sources")
+      if (sources.kind !== "sources" || sources.files.length !== paths.length)
         throw new Error("Missing source snapshot");
       for (const file of sources.files) if (file !== null) this.exposable(file);
+      const sourceByPath = new Map(
+        paths.map((path, i) => [path, sources.files[i] ?? null]),
+      );
+      for (const i of pending)
+        for (const path of plan.assignments[i]!.references ?? []) {
+          if (sourceByPath.get(path) == null)
+            throw new AppError(400, "参照ファイルが基点にありません: " + path);
+        }
       const generate = await this.options.bind(
         owner.id,
         initial,
@@ -365,73 +393,98 @@ export class WorkAnchor {
           }, ctx);
         },
       );
-      const results = await Promise.allSettled(
-        pending.map(async (i) => {
-          const a = plan.assignments[i]!;
-          const input = await this.change(owner, id, (work) => {
-            if (work.status !== "running") throw new Error("Dispatch stopped");
-            const attempts = work.assignments[i]!.attempts;
-            const last = attempts.at(-1);
-            if (last?.state === "queued") last.state = "running";
-            else {
-              if (attempts.length >= 8)
-                throw new AppError(409, "担当の再試行上限に達しました");
-              attempts.push({
-                number: attempts.length + 1,
-                state: "running",
-                ...(last?.guidance ? { guidance: last.guidance } : {}),
-              });
-            }
-            return {
-              guidance: attempts.at(-1)?.guidance ?? "",
-              previous:
-                attempts.findLast((attempt) => attempt.state === "ready")
-                  ?.content ?? null,
+      const produce = async (i: number) => {
+        const a = plan.assignments[i]!;
+        const input = await this.change(owner, id, (work) => {
+          if (work.status !== "running") throw new Error("Dispatch stopped");
+          const attempts = work.assignments[i]!.attempts;
+          const last = attempts.at(-1);
+          if (last?.state === "queued") last.state = "running";
+          else {
+            if (attempts.length >= 8)
+              throw new AppError(409, "担当の再試行上限に達しました");
+            attempts.push({
+              number: attempts.length + 1,
+              state: "running",
+              ...(last?.guidance ? { guidance: last.guidance } : {}),
+            });
+          }
+          return {
+            guidance: attempts.at(-1)?.guidance ?? "",
+            previous:
+              attempts.findLast((attempt) => attempt.state === "ready")
+                ?.content ?? null,
+          };
+        });
+        try {
+          const response = await generate(
+            JSON.stringify({
+              goal: plan.goal,
+              assignment: a,
+              source: sourceByPath.get(a.path),
+              ...(a.references?.length
+                ? {
+                    references: a.references.map((path) => ({
+                      path,
+                      content: sourceByPath.get(path),
+                    })),
+                  }
+                : {}),
+              ...input,
+            }),
+            signal,
+          );
+          await this.change(owner, id, (work) => {
+            work.assignments[i]!.attempts.at(-1)!.usage = {
+              time: Date.now(),
+              model: response.provider + "/" + response.model,
+              tokens: response.usage,
+              error: response.stopReason !== "stop",
             };
           });
+          signal.throwIfAborted();
+          if (response.stopReason !== "stop")
+            throw new Error("Incomplete assignment");
+          const text = response.content
+            .filter((b) => b.type === "text")
+            .map((b) => b.text)
+            .join("");
+          const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/i.exec(
+            text.trim(),
+          );
+          const { content } = replacement.parse(
+            JSON.parse(fenced?.[1] ?? text),
+          );
+          if (content !== null) this.exposable(content);
+          await this.change(owner, id, (work) => {
+            const attempt = work.assignments[i]!.attempts.at(-1)!;
+            attempt.state = "ready";
+            attempt.content = content;
+          });
+        } catch (error) {
+          await this.change(owner, id, (work) => {
+            const attempt = work.assignments[i]!.attempts.at(-1)!;
+            attempt.state = signal.aborted ? "interrupted" : "failed";
+            attempt.detail = "担当の変更を取得できませんでした";
+          });
+          throw error;
+        }
+      };
+      // Two consumers share the ordered queue. A paused work keeps unstarted files pending.
+      const queue = pending.values();
+      let failed = false;
+      const consume = async () => {
+        for (const i of queue) {
+          await boundary();
           try {
-            const response = await generate(
-              JSON.stringify({
-                goal: plan.goal,
-                assignment: a,
-                source: sources.files[i],
-                ...input,
-              }),
-              signal,
-            );
-            await this.change(owner, id, (work) => {
-              work.assignments[i]!.attempts.at(-1)!.usage = {
-                time: Date.now(),
-                model: response.provider + "/" + response.model,
-                tokens: response.usage,
-                error: response.stopReason !== "stop",
-              };
-            });
-            signal.throwIfAborted();
-            if (response.stopReason !== "stop")
-              throw new Error("Incomplete assignment");
-            const text = response.content
-              .filter((b) => b.type === "text")
-              .map((b) => b.text)
-              .join("");
-            const { content } = replacement.parse(JSON.parse(text));
-            if (content !== null) this.exposable(content);
-            await this.change(owner, id, (work) => {
-              const attempt = work.assignments[i]!.attempts.at(-1)!;
-              attempt.state = "ready";
-              attempt.content = content;
-            });
-          } catch (error) {
-            await this.change(owner, id, (work) => {
-              const attempt = work.assignments[i]!.attempts.at(-1)!;
-              attempt.state = signal.aborted ? "interrupted" : "failed";
-              attempt.detail = "担当の変更を取得できませんでした";
-            });
-            throw error;
+            await produce(i);
+          } catch {
+            failed = true;
           }
-        }),
-      );
-      if (results.some((r) => r.status === "rejected"))
+        }
+      };
+      const results = await Promise.allSettled([consume(), consume()]);
+      if (failed || results.some((r) => r.status === "rejected"))
         throw new AppError(
           409,
           "未完了の担当があります。成功した担当の変更は保存しました",
