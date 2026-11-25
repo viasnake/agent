@@ -118,6 +118,79 @@ const updatedTime = new Intl.DateTimeFormat("ja-JP", {
   minute: "2-digit",
 });
 
+function TopicBoard({
+  rows,
+  onOpen,
+}: {
+  rows: ProjectRow[];
+  onOpen: (id: string) => void;
+}) {
+  const topics = [...rows].sort(
+    (a, b) =>
+      (b.lastPostedAt ?? 0) - (a.lastPostedAt ?? 0) ||
+      b.updatedAt - a.updatedAt ||
+      a.id.localeCompare(b.id),
+  );
+  return (
+    <table className="topic-board" aria-label="スレッド一覧">
+      <thead>
+        <tr>
+          <th scope="col">スレッド</th>
+          <th scope="col">状態</th>
+          <th scope="col">投稿数</th>
+          <th scope="col">最終投稿</th>
+        </tr>
+      </thead>
+      <tbody>
+        {topics.map((p) => {
+          const excerpt =
+            p.status === "decision"
+              ? p.question?.question
+              : p.status === "interrupted"
+                ? p.detail
+                : p.summary;
+          return (
+            <tr key={p.id}>
+              <th scope="row">
+                <a
+                  href={"?project=" + encodeURIComponent(p.id)}
+                  onClick={(event) => {
+                    if (
+                      event.ctrlKey ||
+                      event.metaKey ||
+                      event.shiftKey ||
+                      event.altKey
+                    )
+                      return;
+                    event.preventDefault();
+                    onOpen(p.id);
+                  }}
+                >
+                  {p.title}
+                </a>
+                {excerpt && <p>{excerpt}</p>}
+              </th>
+              <td>
+                <StateLabel status={p.status} />
+              </td>
+              <td className="topic-count">{p.postCount}</td>
+              <td>
+                {p.lastPostedAt ? (
+                  <time dateTime={new Date(p.lastPostedAt).toISOString()}>
+                    {updatedTime.format(p.lastPostedAt)}
+                  </time>
+                ) : (
+                  "—"
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 function ProjectCard({
   project: p,
   onOpen,
@@ -198,15 +271,36 @@ export function ProjectDashboard({
   onNew: () => void;
   onMenu: () => void;
 }) {
-  const [mode, setMode] = useState<"home" | "list" | "activity">("home"),
+  type Mode = "home" | "list" | "activity";
+  const [mode, setMode] = useState<Mode>(() => {
+      const key = new URLSearchParams(location.search).get("projects");
+      return key === "board"
+        ? "list"
+        : key === "activity"
+          ? "activity"
+          : "home";
+    }),
     [activity, setActivity] = useState<PortfolioPost[] | null>(null);
   const [rows, setRows] = useState<ProjectRow[] | null>(null),
     [error, setError] = useState(""),
     [answerError, setAnswerError] = useState(""),
     [busy, setBusy] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"active" | "delivered" | "archived">(
-    "active",
-  );
+  const [filter, setFilter] = useState<
+    "all" | "decision" | "active" | "delivered" | "archived"
+  >("all");
+  function openMode(value: Mode) {
+    setMode(value);
+    history.replaceState(
+      null,
+      "",
+      location.pathname +
+        (value === "list"
+          ? "?projects=board"
+          : value === "activity"
+            ? "?projects=activity"
+            : "?projects"),
+    );
+  }
   const showActivity = mode === "activity";
   const alive = useRef(false),
     generation = useRef(0);
@@ -279,6 +373,8 @@ export function ProjectDashboard({
     current = all.filter((p) => !p.archived),
     decisions = current.filter((p) => p.status === "decision"),
     groups = {
+      all: current,
+      decision: decisions,
       active: current.filter((p) => p.status !== "delivered"),
       delivered: current.filter((p) => p.status === "delivered"),
       archived: all.filter((p) => p.archived),
@@ -295,11 +391,7 @@ export function ProjectDashboard({
         key={p.id}
         project={p}
         onOpen={onOpen}
-        showStatus={
-          mode === "list" ||
-          p.status === "waiting" ||
-          p.status === "interrupted"
-        }
+        showStatus={p.status === "waiting" || p.status === "interrupted"}
       />
     );
   }
@@ -339,14 +431,14 @@ export function ProjectDashboard({
               {(
                 [
                   ["home", "概要"],
-                  ["list", "案件一覧"],
+                  ["list", "掲示板"],
                   ["activity", "活動履歴"],
                 ] as const
               ).map(([value, label]) => (
                 <button
                   key={value}
                   aria-pressed={mode === value}
-                  onClick={() => setMode(value)}
+                  onClick={() => openMode(value)}
                 >
                   {label}
                 </button>
@@ -455,7 +547,7 @@ export function ProjectDashboard({
                           className="btn-text theme-primary"
                           onClick={() => {
                             setFilter("delivered");
-                            setMode("list");
+                            openMode("list");
                           }}
                         >
                           すべての成果物
@@ -476,27 +568,37 @@ export function ProjectDashboard({
               </section>
             )}
             {mode === "list" && (
-              <section aria-label="案件一覧">
+              <section aria-label="案件掲示板">
                 <div
                   className="portfolio-filter"
                   role="group"
                   aria-label="表示する案件"
                 >
-                  {(["active", "delivered", "archived"] as const).map(
-                    (value, i) => (
-                      <button
-                        key={value}
-                        aria-pressed={filter === value}
-                        onClick={() => setFilter(value)}
-                      >
-                        {["対応中", "完了", "アーカイブ"][i]}{" "}
-                        <span>{groups[value].length}</span>
-                      </button>
-                    ),
-                  )}
+                  {(
+                    [
+                      "all",
+                      "decision",
+                      "active",
+                      "delivered",
+                      "archived",
+                    ] as const
+                  ).map((value, i) => (
+                    <button
+                      key={value}
+                      aria-pressed={filter === value}
+                      onClick={() => setFilter(value)}
+                    >
+                      {
+                        ["すべて", "回答待ち", "対応中", "完了", "アーカイブ"][
+                          i
+                        ]
+                      }{" "}
+                      <span>{groups[value].length}</span>
+                    </button>
+                  ))}
                 </div>
                 {visible.length ? (
-                  visible.map(card)
+                  <TopicBoard rows={visible} onOpen={onOpen} />
                 ) : (
                   <p className="work-empty">該当する案件はありません。</p>
                 )}

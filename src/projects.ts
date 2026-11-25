@@ -174,6 +174,8 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
     archived: !!c.archived,
     status,
     revision: p.revision,
+    postCount: p.lastPost?.id ?? 0,
+    lastPostedAt: p.lastPost?.at,
     instruction: p.instruction.slice(0, 400),
     summary: p.summary,
     nextStep: p.nextStep,

@@ -182,6 +182,9 @@ test("the lead delegates competing solutions, specialists investigate and repair
     async () => (await f.service.conversation(f.id)).status === "idle",
   );
   assert.equal((await f.service.projects())[0]!.revision, 2);
+  const revised = (await f.service.view(f.id)).project!;
+  assert.equal(revised.brief, "Find and fix the incorrect value");
+  assert.equal(revised.currentInstruction, "仕様変更です");
   await assert.rejects(
     f.service.team.adopt(
       await f.service.conversation(f.id),

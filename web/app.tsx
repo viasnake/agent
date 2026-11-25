@@ -58,6 +58,7 @@ type ThreadProps = {
   projectDraft: boolean;
   timelineVisible: boolean;
   onHistory: () => void;
+  onBoard: () => void;
   draftId: string | null;
   view: View | null;
   entries: Entry[];
@@ -103,6 +104,7 @@ function Chat({
   projectDraft,
   timelineVisible,
   onHistory,
+  onBoard,
   draftId,
   view,
   entries,
@@ -197,7 +199,8 @@ function Chat({
           {view?.project && view.timeline && (
             <ProjectTimeline
               key={view.project.id}
-              session={view.project.id}
+              project={view.project}
+              onBoard={onBoard}
               latest={view.timeline}
               question={view.question}
               active={view.conversation.status === "running"}
@@ -1262,9 +1265,10 @@ function App() {
           onClick={() => {
             if (settingsOpen && !confirmSettingsExit(settingsDirty)) return;
             setSettingsOpen(false);
+            if (!dashboard || settingsOpen)
+              history.replaceState(null, "", location.pathname + "?projects");
             setDashboard(true);
             setSidebar(false);
-            history.replaceState(null, "", location.pathname + "?projects");
           }}
         >
           <Icon name="sidebar" />
@@ -1456,7 +1460,7 @@ function App() {
                   aria-controls="timeline-panel"
                 >
                   <Icon name="timeline" />
-                  タイムライン
+                  スレッド
                 </TabsTrigger>
               )}
               <TabsTrigger
@@ -1662,6 +1666,14 @@ function App() {
                       draftId={selected ?? (newProject ? "new-project" : null)}
                       projectDraft={newProject}
                       timelineVisible={timelineVisible}
+                      onBoard={() => {
+                        history.replaceState(
+                          null,
+                          "",
+                          location.pathname + "?projects=board",
+                        );
+                        setDashboard(true);
+                      }}
                       onHistory={() => setTab("chat")}
                       key={threadKey}
                       view={view}

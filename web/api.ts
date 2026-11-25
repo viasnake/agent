@@ -35,7 +35,10 @@ export type Conversation = {
 };
 export type View = {
   timeline?: import("../src/project-timeline.js").TimelinePage;
-  project?: import("../src/projects.js").ProjectRow;
+  project?: import("../src/projects.js").ProjectRow & {
+    brief: string;
+    currentInstruction?: string;
+  };
   work?: import("../src/parallel-work.js").WorkView[];
   conversation: Conversation;
   transcript: Entry[];

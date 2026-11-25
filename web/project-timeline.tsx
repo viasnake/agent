@@ -13,7 +13,7 @@ import type {
   TimelinePage,
 } from "../src/project-timeline.js";
 import type { PendingQuestion } from "../src/choices.js";
-import { api } from "./api.js";
+import { api, type View } from "./api.js";
 import { Icon } from "./icons.js";
 
 const kindLabel = {
@@ -62,6 +62,11 @@ function Post({
   children?: ReactNode;
 }) {
   const name = post.name || actors[post.actor];
+  const number = !project && (
+    <span className="post-number" aria-label={`投稿 ${post.id}`}>
+      #{post.id}
+    </span>
+  );
   const timestamp = (
     <time
       dateTime={new Date(post.at).toISOString()}
@@ -77,6 +82,7 @@ function Post({
           <summary>
             <span>{name}が着手</span>
             {timestamp}
+            {number}
             <Icon name="chevron" />
           </summary>
           <p>{post.text}</p>
@@ -91,28 +97,32 @@ function Post({
       }
       data-post-id={post.id}
     >
-      <span className={"post-avatar actor-" + post.actor} aria-hidden="true">
-        {post.actor === "member" ? (
-          Array.from(name)[0]
-        ) : (
-          <Icon
-            name={
-              post.actor === "user"
-                ? "chat"
-                : post.actor === "reviewer"
-                  ? "check"
-                  : post.actor === "system"
-                    ? "settings"
-                    : "agent"
-            }
-          />
-        )}
-      </span>
+      <div className="post-author">
+        <span className={"post-avatar actor-" + post.actor} aria-hidden="true">
+          {post.actor === "member" ? (
+            Array.from(name)[0]
+          ) : (
+            <Icon
+              name={
+                post.actor === "user"
+                  ? "chat"
+                  : post.actor === "reviewer"
+                    ? "check"
+                    : post.actor === "system"
+                      ? "settings"
+                      : "agent"
+              }
+            />
+          )}
+        </span>
+        {!project && <strong>{name}</strong>}
+      </div>
       <div className="post-main">
         <header>
-          <strong>{name}</strong>
+          {project && <strong>{name}</strong>}
           <span className="post-kind">{kindLabel[post.kind]}</span>
           {timestamp}
+          {number}
           {project}
         </header>
         <p>{post.text}</p>
@@ -191,7 +201,8 @@ function combine(rows: ProjectPost[], added: ProjectPost[]) {
   return fresh.length ? [...rows, ...fresh].sort((a, b) => a.id - b.id) : rows;
 }
 export function ProjectTimeline({
-  session,
+  project,
+  onBoard,
   latest,
   question,
   disabled,
@@ -200,7 +211,8 @@ export function ProjectTimeline({
   visible,
   active,
 }: {
-  session: string;
+  project: NonNullable<View["project"]>;
+  onBoard: () => void;
   latest: TimelinePage;
   question?: PendingQuestion;
   disabled: boolean;
@@ -209,6 +221,11 @@ export function ProjectTimeline({
   visible: boolean;
   active: boolean;
 }) {
+  const session = project.id;
+  const revised =
+    !!project.currentInstruction &&
+    project.currentInstruction !== project.brief;
+  const request = project.currentInstruction || project.brief;
   const [rows, setRows] = useState(latest.posts),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
@@ -270,6 +287,49 @@ export function ProjectTimeline({
   );
   return (
     <div className="timeline-pane" hidden={!visible}>
+      <section className="topic-intro" aria-label="スレッドの概要">
+        <div className="topic-intro-inner">
+          <div className="topic-path">
+            <button
+              className="btn-text theme-secondary btn-sm"
+              onClick={onBoard}
+            >
+              <Icon name="left" />
+              掲示板
+            </button>
+            <span>{project.postCount} 投稿</span>
+          </div>
+          {request && (
+            <details className="topic-request">
+              <summary>
+                <b>{revised ? "現在の依頼" : "最初の依頼"}</b>
+                <span>{request}</span>
+                <Icon name="chevron" />
+              </summary>
+              <p>{request}</p>
+              {revised && project.brief && (
+                <>
+                  <b>最初の依頼</b>
+                  <p>{project.brief}</p>
+                </>
+              )}
+            </details>
+          )}
+          {project.status === "delivered" && (
+            <div className="topic-result">
+              <strong>結論</strong>
+              {project.summary && <p>{project.summary}</p>}
+              {project.deliveryPost && (
+                <ProjectDeliverable
+                  key={project.deliveryPost}
+                  session={session}
+                  postId={project.deliveryPost}
+                />
+              )}
+            </div>
+          )}
+        </div>
+      </section>
       <div
         className="timeline-viewport"
         ref={viewport}

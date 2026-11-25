@@ -3070,7 +3070,12 @@ ${this.config.instructions}${this.redact(catalog)}`;
       conversation,
       ...(project
         ? {
-            project: projectRow(conversation, project),
+            project: {
+              ...projectRow(conversation, project),
+              brief: project.brief,
+              currentInstruction:
+                project.revision > 1 ? project.instruction : undefined,
+            },
             timeline: await readPosts(
               this.harness,
               conversation.piId,

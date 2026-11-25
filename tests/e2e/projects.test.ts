@@ -173,6 +173,41 @@ test("one directive starts a project; the portfolio shows independent teams and 
       await dash.locator(".delivered-proof").innerText(),
       /依頼 · 請求番号と発行日を添えて/,
     );
+    await dash.getByRole("button", { name: "掲示板" }).click();
+    await page.reload();
+    const board = dash.getByRole("table", { name: "スレッド一覧" });
+    await board.getByRole("link", { name: "障害後の問い合わせ案内" }).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("projects"), "board");
+    assert.equal(await board.locator("tbody tr").count(), 3);
+    const times = await board
+      .locator("time")
+      .evaluateAll((elements) =>
+        elements.map((el) => el.getAttribute("datetime")),
+      );
+    assert.deepEqual(times, [...times].sort().reverse());
+    const pendingRow = board
+      .getByRole("row")
+      .filter({ hasText: "次回リリースの告知を準備" });
+    const pendingView = await f.service.view(first.id);
+    assert.equal(
+      await pendingRow.locator(".topic-count").innerText(),
+      String(pendingView.timeline!.posts.at(-1)!.id),
+    );
+    await dash.getByRole("button", { name: /^回答待ち 1$/ }).click();
+    assert.equal(await board.locator("tbody tr").count(), 1);
+    await dash.getByRole("button", { name: /^すべて 3$/ }).click();
+    for (const width of [390, 1320]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert.ok(
+        await dash.evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
+      );
+    }
+    await board.getByRole("link", { name: "障害後の問い合わせ案内" }).click();
+    const intro = page.getByLabel("スレッドの概要");
+    await intro.getByText("本文を読む", { exact: true }).click();
+    await intro.getByRole("heading", { name: "お問い合わせの際に" }).waitFor();
+    await intro.getByRole("button", { name: "掲示板" }).click();
+    await board.waitFor();
     await dash.getByRole("button", { name: "活動履歴" }).click();
     await dash.locator(".recent-posts .post-question").waitFor();
     await dash.locator(".recent-posts .post-start").first().waitFor();
@@ -208,10 +243,10 @@ test("one directive starts a project; the portfolio shows independent teams and 
     await until(async () =>
       (await f.service.projects()).every((p) => p.status === "delivered"),
     );
-    await dash.getByRole("button", { name: "案件一覧" }).click();
+    await dash.getByRole("button", { name: "掲示板" }).click();
     await page.getByRole("button", { name: /完了 3/ }).click();
     await dash
-      .getByRole("button", { name: "次回リリースの告知を準備", exact: true })
+      .getByRole("link", { name: "次回リリースの告知を準備", exact: true })
       .click();
     await page
       .locator("#title")
@@ -328,13 +363,21 @@ test("project timeline retains the reader's place, accepts a decision inline and
     await page.goto(origin);
     await page.locator(`[data-session-id="${id}"] .conversation-item`).click();
     const stream = page.getByLabel("案件のタイムライン");
+    const request = page.locator(".topic-request");
+    await request.locator("summary").click();
+    await request
+      .locator("p")
+      .filter({ hasText: "請求書が二重に発行される原因を調べ" })
+      .waitFor();
+    assert.equal(await stream.locator(".post-directive").count(), 0);
+    await request.locator("summary").click();
     const start = stream.locator(".start-notice").first();
     await start.locator("summary").click();
     await start.locator("p").waitFor();
     await start.locator("summary").click();
     assert.equal(
       await page
-        .getByRole("tab", { name: "タイムライン" })
+        .getByRole("tab", { name: "スレッド" })
         .getAttribute("aria-selected"),
       "true",
     );
@@ -374,7 +417,7 @@ test("project timeline retains the reader's place, accepts a decision inline and
       );
     }
     await page.getByRole("tab", { name: "会話", exact: true }).click();
-    await page.getByRole("tab", { name: "タイムライン" }).click();
+    await page.getByRole("tab", { name: "スレッド" }).click();
     assert.equal(
       await page.locator("#message").inputValue(),
       "請求番号の範囲も確認してください",
