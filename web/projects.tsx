@@ -7,10 +7,10 @@ import { api, forget, requestId } from "./api.js";
 import { Icon } from "./icons.js";
 
 export const projectStatusLabels = {
-  decision: "判断待ち",
+  decision: "回答待ち",
   working: "進行中",
-  delivered: "完了報告",
-  waiting: "完了報告なし",
+  delivered: "完了",
+  waiting: "未完了",
   interrupted: "中断",
   draft: "依頼前",
 };
@@ -29,21 +29,36 @@ function StateLabel({ status }: { status: ProjectRow["status"] }) {
     </span>
   );
 }
-export function ProjectTeamStatus({ project: p }: { project: ProjectRow }) {
+export function ProjectTeamStatus({
+  project: p,
+  showSummary = true,
+}: {
+  project: ProjectRow;
+  showSummary?: boolean;
+}) {
+  const hasReview = !!(p.evidence || p.assessment);
+  if (!p.members.length && !hasReview && !(showSummary && p.summary))
+    return null;
   return (
     <details className="project-team-detail">
       <summary>
-        {p.members.length ? "担当と進捗" : "照合結果と根拠"}{" "}
+        <span>
+          {p.members.length
+            ? `担当 ${p.members.length} 人`
+            : hasReview
+              ? "検証記録"
+              : "進捗"}
+        </span>
         {p.members.length > 0 && (
-          <span>
-            {p.members.filter((m) => m.status === "reported").length} /{" "}
-            {p.members.length} 件報告済み
+          <span className="team-names">
+            {p.members.map((member) => member.role).join("・")}
           </span>
         )}
+        <Icon name="chevron" />
       </summary>
       {p.assessment && (
         <p>
-          <strong>完了報告の照合 </strong>
+          <strong>レビュー </strong>
           {p.assessment.verdict === "checking"
             ? "確認中"
             : p.assessment.verdict === "revise"
@@ -60,10 +75,10 @@ export function ProjectTeamStatus({ project: p }: { project: ProjectRow }) {
             {quote}
           </blockquote>
         ))}
-      {p.summary && <p>{p.summary}</p>}
+      {showSummary && p.summary && <p>{p.summary}</p>}
       {p.evidence && (
         <p>
-          <strong>完了の根拠 </strong>
+          <strong>根拠 </strong>
           {p.evidence}
         </p>
       )}
@@ -87,7 +102,7 @@ export function ProjectTeamStatus({ project: p }: { project: ProjectRow }) {
               <a
                 href={`/api/conversations/${p.id}/download?path=${encodeURIComponent(m.file)}`}
               >
-                採用したパッチを保存
+                パッチを保存
               </a>
             )}
           </li>
@@ -106,7 +121,9 @@ const updatedTime = new Intl.DateTimeFormat("ja-JP", {
 function ProjectCard({
   project: p,
   onOpen,
+  showStatus,
 }: {
+  showStatus: boolean;
   project: ProjectRow;
   onOpen: (id: string) => void;
 }) {
@@ -117,36 +134,35 @@ function ProjectCard({
       : p.assessment?.verdict === "revise"
         ? p.assessment.reason
         : p.summary || (p.instruction !== p.title ? p.instruction : "");
+  const updated = new Date(p.updatedAt);
   const patches = sent ? p.members.filter((m) => m.file) : [];
   return (
     <article className="work-card">
-      <div className="portfolio-top">
-        <StateLabel status={p.status} />
-        <time dateTime={new Date(p.updatedAt).toISOString()}>
-          {updatedTime.format(p.updatedAt)}
+      <div className="card-heading">
+        <h3>
+          <button className="project-link" onClick={() => onOpen(p.id)}>
+            {p.title}
+          </button>
+        </h3>
+        <time
+          dateTime={updated.toISOString()}
+          title={updatedTime.format(updated)}
+        >
+          {updated.toDateString() === new Date().toDateString()
+            ? updated.toLocaleTimeString("ja-JP", {
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : updatedTime.format(updated)}
         </time>
       </div>
-      <h3>
-        <button className="project-link" onClick={() => onOpen(p.id)}>
-          {p.title}
-        </button>
-      </h3>
+      {showStatus && <StateLabel status={p.status} />}
       {note && <p className="portfolio-summary">{note}</p>}
       {p.status === "working" && p.nextStep && (
         <p className="work-next">
           <strong>次の作業</strong>
           {p.nextStep}
         </p>
-      )}
-      {!sent && p.members.length > 0 && (
-        <div className="work-members">
-          {p.members.map((m) => (
-            <span key={m.id}>
-              {m.role}
-              <small>{memberLabels[m.status]}</small>
-            </span>
-          ))}
-        </div>
       )}
       {p.deliveryPost && (
         <ProjectDeliverable
@@ -162,14 +178,12 @@ function ProjectCard({
           href={`/api/conversations/${p.id}/download?path=${encodeURIComponent(m.file!)}`}
         >
           <Icon name="file" />
-          {patches.length > 1
-            ? m.role + "のパッチを保存"
-            : "採用したパッチを保存"}
+          {patches.length > 1 ? m.role + "のパッチを保存" : "パッチを保存"}
         </a>
       ))}
       {(p.members.length > 0 ||
         (!p.deliveryPost && (p.evidence || p.assessment))) && (
-        <ProjectTeamStatus project={p} />
+        <ProjectTeamStatus project={p} showSummary={note !== p.summary} />
       )}
     </article>
   );
@@ -276,25 +290,36 @@ export function ProjectDashboard({
     ),
     drafts = current.filter((p) => p.status === "draft");
   function card(p: ProjectRow) {
-    return <ProjectCard key={p.id} project={p} onOpen={onOpen} />;
+    return (
+      <ProjectCard
+        key={p.id}
+        project={p}
+        onOpen={onOpen}
+        showStatus={
+          mode === "list" ||
+          p.status === "waiting" ||
+          p.status === "interrupted"
+        }
+      />
+    );
   }
 
   return (
     <main className="project-dashboard" aria-labelledby="projects-heading">
-      <header className="projects-header">
-        <button
-          className="mobile-only btn-text theme-secondary btn-sm"
-          onClick={onMenu}
-          aria-label="セッション一覧を開く"
-        >
-          <Icon name="menu" />
-        </button>
-        <h1 id="projects-heading">プロジェクト</h1>
-        <button className="btn-solid theme-primary" onClick={onNew}>
-          <Icon name="plus" /> 新しい依頼
-        </button>
-      </header>
       <div className="project-body">
+        <header className="projects-header">
+          <button
+            className="mobile-only btn-text theme-secondary btn-sm"
+            onClick={onMenu}
+            aria-label="セッション一覧を開く"
+          >
+            <Icon name="menu" />
+          </button>
+          <h1 id="projects-heading">プロジェクト</h1>
+          <button className="btn-solid theme-primary" onClick={onNew}>
+            <Icon name="plus" /> 新しい依頼
+          </button>
+        </header>
         {error && (
           <p role="alert">
             {error}{" "}
@@ -313,9 +338,9 @@ export function ProjectDashboard({
             <nav className="work-nav" aria-label="プロジェクトの表示">
               {(
                 [
-                  ["home", "仕事のホーム"],
+                  ["home", "概要"],
                   ["list", "案件一覧"],
-                  ["activity", "報告フィード"],
+                  ["activity", "活動履歴"],
                 ] as const
               ).map(([value, label]) => (
                 <button
@@ -329,106 +354,116 @@ export function ProjectDashboard({
             </nav>
             {mode === "home" && (
               <>
-                <section
-                  className={
-                    "work-decisions" + (decisions.length ? " needs-answer" : "")
-                  }
-                  aria-labelledby="decisions-heading"
-                >
-                  <h2 id="decisions-heading">
-                    <Icon name="chat" />
-                    あなたの判断待ち <span>{decisions.length}</span>
-                  </h2>
-                  {decisions.length === 0 ? (
-                    <p className="work-empty">
-                      現在、回答が必要な案件はありません。
-                    </p>
-                  ) : (
-                    decisions.map((p) => (
+                {decisions.length > 0 && (
+                  <section
+                    className="work-decisions"
+                    aria-labelledby="decisions-heading"
+                  >
+                    <h2 id="decisions-heading">
+                      <Icon name="chat" />
+                      回答待ち <span>{decisions.length}</span>
+                    </h2>
+                    {decisions.map((p) => (
                       <article className="decision-request" key={p.id}>
                         <button
                           className="project-link"
                           onClick={() => onOpen(p.id)}
                         >
                           {p.title}
+                          <Icon name="right" />
                         </button>
                         <h3>{p.question!.question}</h3>
-                        {p.assessment &&
-                          "sources" in p.assessment &&
-                          p.assessment.sources?.map(({ label, quote }) => (
-                            <blockquote className="work-source" key={quote}>
-                              <strong>{label}</strong>
-                              {quote}
-                            </blockquote>
-                          ))}
-                        {p.summary && <p>{p.summary}</p>}
                         <ProjectAnswer
                           key={p.question!.entryId}
                           question={p.question!}
                           busy={!!busy}
                           onAnswer={(value) => void decide(p, value)}
                         />
+                        {p.summary ||
+                        (p.assessment &&
+                          "sources" in p.assessment &&
+                          p.assessment.sources?.length) ? (
+                          <details className="decision-context">
+                            <summary>背景</summary>
+                            {p.summary && <p>{p.summary}</p>}
+                            {p.assessment &&
+                              "sources" in p.assessment &&
+                              p.assessment.sources?.map(({ label, quote }) => (
+                                <blockquote className="work-source" key={quote}>
+                                  <strong>{label}</strong>
+                                  {quote}
+                                </blockquote>
+                              ))}
+                          </details>
+                        ) : null}
                       </article>
-                    ))
-                  )}
-                </section>
-                <div className="work-columns">
-                  <section
-                    aria-labelledby="work-running-heading"
-                    className="work-column"
-                  >
-                    <h2 id="work-running-heading">
-                      <Icon name="fork" />
-                      チームが進めている案件 <span>{working.length}</span>
-                    </h2>
-                    {working.length ? (
-                      working.map(card)
-                    ) : (
-                      <p className="work-empty">進行中の案件はありません。</p>
-                    )}
-                    {stopped.length > 0 && (
-                      <section className="work-stopped">
-                        <h2>
-                          中断・要確認 <span>{stopped.length}</span>
-                        </h2>
-                        {stopped.map(card)}
-                      </section>
-                    )}
-                    {drafts.length > 0 && (
-                      <section className="work-stopped">
-                        <h2>
-                          依頼前 <span>{drafts.length}</span>
-                        </h2>
-                        {drafts.map(card)}
-                      </section>
-                    )}
+                    ))}
                   </section>
-                  <section
-                    aria-labelledby="work-results-heading"
-                    className="work-column"
-                  >
-                    <h2 id="work-results-heading">
-                      <Icon name="file" />
-                      届いた成果物 <span>{groups.delivered.length}</span>
-                    </h2>
-                    {groups.delivered.length ? (
-                      groups.delivered.slice(0, 4).map(card)
-                    ) : (
-                      <p className="work-empty">納品された案件はありません。</p>
-                    )}
-                    {groups.delivered.length > 4 && (
-                      <button
-                        className="btn-text theme-primary"
-                        onClick={() => {
-                          setFilter("delivered");
-                          setMode("list");
-                        }}
-                      >
-                        すべての納品を見る
-                      </button>
-                    )}
+                )}
+                {current.length === 0 ? (
+                  <section className="work-blank">
+                    <Icon name="chat" />
+                    <h2>案件はまだありません</h2>
                   </section>
-                </div>
+                ) : (
+                  <div className="work-columns">
+                    <section
+                      aria-labelledby="work-running-heading"
+                      className="work-column"
+                    >
+                      <h2 id="work-running-heading">
+                        <Icon name="fork" />
+                        進行中 <span>{working.length}</span>
+                      </h2>
+                      {working.length ? (
+                        working.map(card)
+                      ) : (
+                        <p className="work-empty">進行中の案件はありません</p>
+                      )}
+                      {stopped.length > 0 && (
+                        <section className="work-stopped">
+                          <h2>
+                            要確認 <span>{stopped.length}</span>
+                          </h2>
+                          {stopped.map(card)}
+                        </section>
+                      )}
+                      {drafts.length > 0 && (
+                        <section className="work-stopped">
+                          <h2>
+                            依頼前 <span>{drafts.length}</span>
+                          </h2>
+                          {drafts.map(card)}
+                        </section>
+                      )}
+                    </section>
+                    <section
+                      aria-labelledby="work-results-heading"
+                      className="work-column"
+                    >
+                      <h2 id="work-results-heading">
+                        <Icon name="file" />
+                        成果物 <span>{groups.delivered.length}</span>
+                      </h2>
+                      {groups.delivered.length ? (
+                        groups.delivered.slice(0, 4).map(card)
+                      ) : (
+                        <p className="work-empty">まだ成果物はありません</p>
+                      )}
+                      {groups.delivered.length > 4 && (
+                        <button
+                          className="btn-text theme-primary"
+                          onClick={() => {
+                            setFilter("delivered");
+                            setMode("list");
+                          }}
+                        >
+                          すべての成果物
+                        </button>
+                      )}
+                    </section>
+                  </div>
+                )}
               </>
             )}
             {mode === "activity" && (
@@ -454,7 +489,7 @@ export function ProjectDashboard({
                         aria-pressed={filter === value}
                         onClick={() => setFilter(value)}
                       >
-                        {["対応中", "完了報告", "アーカイブ"][i]}{" "}
+                        {["対応中", "完了", "アーカイブ"][i]}{" "}
                         <span>{groups[value].length}</span>
                       </button>
                     ),

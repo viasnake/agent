@@ -20,16 +20,16 @@ const kindLabel = {
   directive: "指示",
   assignment: "分担",
   start: "着手",
-  progress: "進捗報告",
-  report: "担当報告",
+  progress: "進捗",
+  report: "報告",
   passed: "テスト成功",
   failed: "テスト失敗",
   artifact: "成果物",
-  review: "照合開始",
+  review: "レビュー",
   revision: "差し戻し",
-  question: "判断依頼",
+  question: "質問",
   decision: "回答",
-  delivery: "完了報告",
+  delivery: "納品",
   interrupted: "中断",
   resume: "再開",
 };
@@ -62,9 +62,33 @@ function Post({
   children?: ReactNode;
 }) {
   const name = post.name || actors[post.actor];
+  const timestamp = (
+    <time
+      dateTime={new Date(post.at).toISOString()}
+      title={new Date(post.at).toLocaleString("ja-JP")}
+    >
+      {time.format(post.at)}
+    </time>
+  );
+  if (post.kind === "start" && !project) {
+    return (
+      <article className="timeline-post post-start" data-post-id={post.id}>
+        <details className="start-notice">
+          <summary>
+            <span>{name}が着手</span>
+            {timestamp}
+            <Icon name="chevron" />
+          </summary>
+          <p>{post.text}</p>
+        </details>
+      </article>
+    );
+  }
   return (
     <article
-      className={"timeline-post post-" + post.kind}
+      className={
+        "timeline-post post-" + post.kind + (children ? " awaiting-answer" : "")
+      }
       data-post-id={post.id}
     >
       <span className={"post-avatar actor-" + post.actor} aria-hidden="true">
@@ -88,12 +112,7 @@ function Post({
         <header>
           <strong>{name}</strong>
           <span className="post-kind">{kindLabel[post.kind]}</span>
-          <time
-            dateTime={new Date(post.at).toISOString()}
-            title={new Date(post.at).toLocaleString("ja-JP")}
-          >
-            {time.format(post.at)}
-          </time>
+          {timestamp}
           {project}
         </header>
         <p>{post.text}</p>
@@ -104,27 +123,29 @@ function Post({
             detail={post.detail}
           />
         )}
-        {post.detail && !post.deliverable && (
-          <details className="post-details">
-            <summary>
-              {post.kind === "delivery"
-                ? "完了の根拠"
-                : post.kind === "passed" || post.kind === "failed"
-                  ? "検証コマンドと出力"
-                  : post.kind === "question"
-                    ? "提示した選択肢"
-                    : "詳細"}
-            </summary>
-            <pre>{post.detail}</pre>
-          </details>
-        )}
+        {post.detail &&
+          !post.deliverable &&
+          !(post.kind === "question" && children) && (
+            <details className="post-details">
+              <summary>
+                {post.kind === "delivery"
+                  ? "完了の根拠"
+                  : post.kind === "passed" || post.kind === "failed"
+                    ? "テストログ"
+                    : post.kind === "question"
+                      ? "選択肢"
+                      : "詳細"}
+              </summary>
+              <pre>{post.detail}</pre>
+            </details>
+          )}
         {post.file && (
           <a
             className="post-file"
             href={`/api/conversations/${session}/download?path=${encodeURIComponent(post.file)}`}
           >
             <Icon name="file" />
-            採用したパッチを保存
+            パッチを保存
           </a>
         )}
         {children}
@@ -140,7 +161,7 @@ export function RecentPosts({
   onOpen: (id: string) => void;
 }) {
   if (!posts.length)
-    return <p className="project-empty">新しい報告はまだありません。</p>;
+    return <p className="project-empty">報告はまだありません</p>;
   return (
     <div className="recent-posts">
       {posts.map(({ session, title, post }, i) => (
@@ -267,9 +288,9 @@ export function ProjectTimeline({
         <div className="timeline-stream">
           {!rows.length && (
             <div className="timeline-empty">
-              <p>この案件で新たに行われた指示や報告がここに並びます。</p>
+              <p>投稿はまだありません</p>
               <button className="btn-text theme-secondary" onClick={onHistory}>
-                これまでの会話を読む
+                会話を開く
               </button>
             </div>
           )}
@@ -282,7 +303,7 @@ export function ProjectTimeline({
                   disabled={busy}
                   onClick={() => void earlier(post.id)}
                 >
-                  {busy ? "読み込み中…" : "以前の投稿を読む"}
+                  {busy ? "読み込み中…" : "以前の投稿"}
                 </button>
               )}
               {(!i ||
@@ -327,7 +348,7 @@ export function ProjectTimeline({
           }}
         >
           <Icon name="down" />
-          新しい報告へ
+          最新へ
         </button>
       )}
     </div>

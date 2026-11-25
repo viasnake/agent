@@ -129,11 +129,9 @@ test("one directive starts a project; the portfolio shows independent teams and 
       colorScheme: "light",
     });
     await page.goto(origin);
-    await page.getByRole("button", { name: "仕事のホーム" }).waitFor();
+    await page.getByRole("button", { name: "概要" }).waitFor();
     await page.getByRole("button", { name: "新しい依頼" }).click();
-    await page
-      .getByRole("heading", { name: "チームに何を依頼しますか？" })
-      .waitFor();
+    await page.getByRole("heading", { name: "何を依頼しますか？" }).waitFor();
     await page
       .locator("#message")
       .fill("保存したパッチが一覧に出ない原因を調べて");
@@ -158,18 +156,27 @@ test("one directive starts a project; the portfolio shows independent teams and 
       })
       .first()
       .waitFor();
-    await dash.getByText("納品本文を読む", { exact: true }).click();
+    const background = dash.getByText(
+      "初稿と校閲が完了しました。公開範囲の決定後に仕上げます。",
+    );
+    assert.equal(await background.isVisible(), false);
+    await dash.getByText("背景", { exact: true }).click();
+    await background.waitFor();
+    await dash.getByText("背景", { exact: true }).click();
+    await dash.getByText("本文を読む", { exact: true }).click();
     await dash.getByRole("heading", { name: "お問い合わせの際に" }).waitFor();
+    const proof = dash.locator(".delivered-proof");
+    assert.equal(await proof.locator("p").isVisible(), false);
+    await proof.locator("summary").focus();
+    await page.keyboard.press("Enter");
     assert.match(
       await dash.locator(".delivered-proof").innerText(),
       /依頼 · 請求番号と発行日を添えて/,
     );
-    await dash.getByRole("button", { name: "報告フィード" }).click();
+    await dash.getByRole("button", { name: "活動履歴" }).click();
     await dash.locator(".recent-posts .post-question").waitFor();
     await dash.locator(".recent-posts .post-start").first().waitFor();
-    await dash
-      .getByRole("button", { name: "仕事のホーム", exact: true })
-      .click();
+    await dash.getByRole("button", { name: "概要", exact: true }).click();
     for (const width of [1320, 390]) {
       await page.setViewportSize({ width, height: 900 });
       assert.ok(
@@ -193,16 +200,16 @@ test("one directive starts a project; the portfolio shows independent teams and 
       answer('{"verdict":"accept","reason":"記録と一致"}'),
       answer("案内の準備ができました。"),
     ]);
-    await dash.getByRole("button", { name: "自分の言葉で回答" }).click();
+    await dash.getByRole("button", { name: "自由回答" }).click();
     await dash
-      .getByRole("textbox", { name: "判断依頼への回答" })
+      .getByRole("textbox", { name: "質問への回答" })
       .fill("既存ユーザーのうち試用中の方に先行案内してください");
-    await dash.getByRole("button", { name: "回答して再開" }).click();
+    await dash.getByRole("button", { name: "回答を送信" }).click();
     await until(async () =>
       (await f.service.projects()).every((p) => p.status === "delivered"),
     );
     await dash.getByRole("button", { name: "案件一覧" }).click();
-    await page.getByRole("button", { name: /完了報告 3/ }).click();
+    await page.getByRole("button", { name: /完了 3/ }).click();
     await dash
       .getByRole("button", { name: "次回リリースの告知を準備", exact: true })
       .click();
@@ -227,7 +234,7 @@ test("one directive starts a project; the portfolio shows independent teams and 
       0,
     );
     await page.getByRole("tab", { name: "会話", exact: true }).click();
-    await page.getByText("担当と進捗", { exact: false }).last().click();
+    await page.getByText("担当 2 人", { exact: false }).last().click();
     await page
       .getByText("告知本文の初稿をまとめました。", { exact: true })
       .last()
@@ -321,7 +328,10 @@ test("project timeline retains the reader's place, accepts a decision inline and
     await page.goto(origin);
     await page.locator(`[data-session-id="${id}"] .conversation-item`).click();
     const stream = page.getByLabel("案件のタイムライン");
-    await stream.locator(".post-start").first().waitFor();
+    const start = stream.locator(".start-notice").first();
+    await start.locator("summary").click();
+    await start.locator("p").waitFor();
+    await start.locator("summary").click();
     assert.equal(
       await page
         .getByRole("tab", { name: "タイムライン" })
@@ -329,13 +339,13 @@ test("project timeline retains the reader's place, accepts a decision inline and
       "true",
     );
     await stream.evaluate((el) => (el.scrollTop = 0));
-    await stream.getByRole("button", { name: "以前の投稿を読む" }).click();
+    await stream.getByRole("button", { name: "以前の投稿" }).click();
     await stream.locator(".post-directive").waitFor({ state: "attached" });
     const before = await stream.evaluate((el) => el.scrollTop);
     assert.ok(before > 0);
     await page.locator("#message").fill("請求番号の範囲も確認してください");
     release();
-    const jump = page.getByRole("button", { name: "新しい報告へ" });
+    const jump = page.getByRole("button", { name: "最新へ" });
     await jump.waitFor();
     await until(
       async () => (await f.service.projects())[0]?.status === "decision",
@@ -349,9 +359,13 @@ test("project timeline retains the reader's place, accepts a decision inline and
       exact: true,
     });
     await decide.waitFor();
+    assert.equal(
+      await stream.locator(".awaiting-answer .post-details").count(),
+      0,
+    );
     await page
       .locator("#state")
-      .getByText("判断待ち", { exact: true })
+      .getByText("回答待ち", { exact: true })
       .waitFor();
     for (const width of [390, 1320]) {
       await page.setViewportSize({ width, height: 900 });
@@ -381,10 +395,7 @@ test("project timeline retains the reader's place, accepts a decision inline and
     await page.reload();
     await page.locator(`[data-session-id="${id}"] .conversation-item`).click();
     await stream.locator(".post-delivery").waitFor();
-    await page
-      .locator("#state")
-      .getByText("完了報告", { exact: true })
-      .waitFor();
+    await page.locator("#state").getByText("完了", { exact: true }).waitFor();
     assert.equal(await stream.locator(".post-decision").count(), 1);
     assert.equal(
       await stream

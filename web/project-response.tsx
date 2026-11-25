@@ -1,4 +1,5 @@
 import { api } from "./api.js";
+import { Icon } from "./icons.js";
 import type { TimelinePage } from "../src/project-timeline.js";
 import { useEffect, useState } from "react";
 import type { PendingQuestion } from "../src/choices.js";
@@ -33,7 +34,7 @@ export function ProjectAnswer({
           aria-expanded={typing}
           onClick={() => setTyping(!typing)}
         >
-          自分の言葉で回答
+          自由回答
         </button>
       </div>
       {typing && (
@@ -48,8 +49,8 @@ export function ProjectAnswer({
             autoFocus
             rows={2}
             maxLength={2000}
-            aria-label="判断依頼への回答"
-            placeholder="条件や判断の理由を添える…"
+            aria-label="質問への回答"
+            placeholder="回答を入力"
             value={answer}
             onChange={(e) => setAnswer(e.target.value)}
           />
@@ -57,7 +58,7 @@ export function ProjectAnswer({
             className="btn-solid theme-primary btn-sm"
             disabled={busy || !answer.trim()}
           >
-            回答して再開
+            回答を送信
           </button>
         </form>
       )}
@@ -114,7 +115,11 @@ export function ProjectDeliverable({
       className="project-deliverable"
       onToggle={(e) => setOpen(e.currentTarget.open)}
     >
-      <summary>納品本文を読む</summary>
+      <summary>
+        <Icon name="file" />
+        本文を読む
+        <Icon name="chevron" />
+      </summary>
       {open &&
         (body ? (
           <div className="delivered-sheet">
@@ -122,10 +127,10 @@ export function ProjectDeliverable({
               <MarkdownText text={body} finalAnswer />
             </ConversationId.Provider>
             {evidence && (
-              <section className="delivered-proof">
-                <h4>根拠と照合記録</h4>
+              <details className="delivered-proof">
+                <summary>検証記録</summary>
                 <p>{evidence}</p>
-              </section>
+              </details>
             )}
           </div>
         ) : (

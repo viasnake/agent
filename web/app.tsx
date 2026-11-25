@@ -244,15 +244,8 @@ function Chat({
                     <Icon name="agent" />
                   </span>
                   <h2>
-                    {projectDraft
-                      ? "チームに何を依頼しますか？"
-                      : "何を始めますか？"}
+                    {projectDraft ? "何を依頼しますか？" : "何を始めますか？"}
                   </h2>
-                  {projectDraft && (
-                    <p>
-                      目的と期待する成果を伝えてください。担当の割り振りと進行は責任者に任せられます。
-                    </p>
-                  )}
                 </div>
               )}
               <ThreadPrimitive.Messages>
@@ -361,8 +354,10 @@ function Chat({
                 id="message"
                 placeholder={
                   timelineVisible
-                    ? "この案件に指示や補足を送る…"
-                    : "メッセージを入力…"
+                    ? "追加の指示を入力…"
+                    : projectDraft
+                      ? "依頼内容を入力…"
+                      : "メッセージを入力…"
                 }
                 className="composer-input"
                 rows={2}
