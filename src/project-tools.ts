@@ -56,13 +56,13 @@ export function projectTools(service: AgentService) {
       ),
       tool(
         "project_team",
-        "Delegate independent responsibilities to concurrent specialists. Give each a role and an outcome. They can investigate the same repository and test competing multi-file proposals against a pinned commit. Omit repository for document, analysis, or review tasks and supply necessary source material in context. Returns reports and actual check results for synthesis. Retry a failed role alone when useful.",
+        "Delegate independent responsibilities to concurrent specialists. Name each role in Japanese for its concrete responsibility (for example 請求処理の調査 or 再現テスト). Distinguish assignments doing different work. Give each a specific task and outcome. They can investigate the same repository and test competing multi-file proposals against a pinned commit. Omit repository for document, analysis, or review tasks and supply necessary source material in context. Returns reports and actual check results for synthesis. Retry a failed role alone when useful.",
         teamInput,
         (id, input, signal) => service.delegateProject(id, input, signal),
       ),
       tool(
         "project_report",
-        "Post a concise progress update or deliver the requested outcome with evidence. The dashboard displays this to the manager. For working include nextStep when the next action is known. For delivered put the actual requested text, analysis or document in deliverable (Markdown), and describe what you verified in evidence; export the selected patch if relevant. A reviewer checks the proposed delivery before publishing. Correct revision_requested feedback and resubmit.",
+        "Post a concise progress update or deliver the requested outcome with evidence. The dashboard displays this to the manager. For working include nextStep when the next action is known. For delivered put the actual requested text, analysis or document in deliverable (Markdown), and describe what you verified in evidence; export the selected patch if relevant. A reviewer checks the proposed delivery before publishing. On revision_requested, correct that discrepancy or gather new primary evidence before resubmitting. An unchanged submission returns the same decision. A reviewer failure is not a request to rewrite the output.",
         projectReportInput,
         (id, input, signal) => service.reportProject(id, input, signal),
       ),

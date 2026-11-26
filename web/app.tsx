@@ -1,9 +1,5 @@
 import { ProjectTimeline } from "./project-timeline.js";
-import {
-  ProjectDashboard,
-  ProjectTeamStatus,
-  projectStatusLabels,
-} from "./projects.js";
+import { ProjectDashboard, projectStatusLabels } from "./projects.js";
 import { ParallelWork } from "./parallel-work.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
@@ -58,6 +54,7 @@ type ThreadProps = {
   projectDraft: boolean;
   timelineVisible: boolean;
   onHistory: () => void;
+  onReports: () => void;
   onBoard: () => void;
   draftId: string | null;
   view: View | null;
@@ -104,6 +101,7 @@ function Chat({
   projectDraft,
   timelineVisible,
   onHistory,
+  onReports,
   onBoard,
   draftId,
   view,
@@ -153,6 +151,7 @@ function Chat({
     hasEarlier: !!cursor,
     onLoadEarlier: onEarlier,
   });
+  const projectHistory = !!view?.project && !timelineVisible;
   const input = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
@@ -176,7 +175,11 @@ function Chat({
         <ThreadPrimitive.Root
           className={`chat-thread ${!timelineVisible && !messages.length && !loading ? "chat-empty" : ""} ${dragging ? "drop-target" : ""}`}
           onDragOver={(event) => {
-            if (!sending && event.dataTransfer.types.includes("Files")) {
+            if (
+              !projectHistory &&
+              !sending &&
+              event.dataTransfer.types.includes("Files")
+            ) {
               event.preventDefault();
               setDragging(true);
             }
@@ -189,7 +192,8 @@ function Chat({
           }}
           onDrop={(event) => {
             setDragging(false);
-            if (sending || !event.dataTransfer.files.length) return;
+            if (projectHistory || sending || !event.dataTransfer.files.length)
+              return;
             event.preventDefault();
             setAttachments(
               [...attachments, ...event.dataTransfer.files].slice(0, 20),
@@ -215,7 +219,7 @@ function Chat({
             ref={viewport}
             className="thread-viewport"
             id="transcript"
-            aria-label="会話の履歴"
+            aria-label={view?.project ? "エージェントの実行履歴" : "会話の履歴"}
             onScroll={(event) => {
               const top = event.currentTarget.scrollTop;
               const movingUp = top < previousScrollTop.current;
@@ -260,7 +264,7 @@ function Chat({
                   )
                 }
               </ThreadPrimitive.Messages>
-              {view?.question && (
+              {view?.question && !view.project && (
                 <div
                   className="conversation-notice d-grid gap-2"
                   role="group"
@@ -304,7 +308,6 @@ function Chat({
                   )}
                 </details>
               )}
-              {view?.project && <ProjectTeamStatus project={view.project} />}
               {view?.work?.map((work) => (
                 <ParallelWork
                   key={work.id}
@@ -333,7 +336,17 @@ function Chat({
             </div>
           </ThreadPrimitive.Viewport>
           {!timelineVisible && <SelectionToolbar disabled={sending} />}
-          <div className="composer-dock">
+          {projectHistory && (
+            <div className="project-history-footer">
+              <button
+                className="btn-outline theme-secondary btn-sm"
+                onClick={onReports}
+              >
+                案件スレッドに戻る
+              </button>
+            </div>
+          )}
+          <div className="composer-dock" hidden={projectHistory}>
             {!timelineVisible && (
               <ThreadPrimitive.ScrollToBottom
                 className="scroll-bottom btn-outline theme-secondary btn-sm"
@@ -1426,8 +1439,13 @@ function App() {
                 {selected && (
                   <button
                     className="btn-text theme-secondary btn-sm icon-button"
-                    aria-label="会話内を検索"
-                    title="会話内を検索（Ctrl / ⌘ + Shift + F）"
+                    aria-label={
+                      view?.project ? "実行履歴を検索" : "会話内を検索"
+                    }
+                    title={
+                      (view?.project ? "実行履歴を検索" : "会話内を検索") +
+                      "（Ctrl / ⌘ + Shift + F）"
+                    }
                     onClick={() => {
                       setTab("chat");
                       setSearchOpen(true);
@@ -1460,7 +1478,7 @@ function App() {
                   aria-controls="timeline-panel"
                 >
                   <Icon name="timeline" />
-                  スレッド
+                  案件スレッド
                 </TabsTrigger>
               )}
               <TabsTrigger
@@ -1468,8 +1486,8 @@ function App() {
                 id="chat-tab"
                 aria-controls="chat-panel"
               >
-                <Icon name="chat" />
-                会話
+                <Icon name={view?.project ? "terminal" : "chat"} />
+                {view?.project ? "実行履歴" : "会話"}
               </TabsTrigger>
               <TabsTrigger
                 value="changes"
@@ -1620,10 +1638,11 @@ function App() {
                 {searchOpen && selected && (
                   <ConversationSearch
                     id={selected}
+                    label={view?.project ? "実行履歴を検索" : undefined}
                     onClose={() => {
                       setSearchOpen(false);
                       document
-                        .getElementById("message")
+                        .getElementById(view?.project ? "chat-tab" : "message")
                         ?.focus({ preventScroll: true });
                     }}
                     onSelect={jumpTo}
@@ -1675,6 +1694,12 @@ function App() {
                         setDashboard(true);
                       }}
                       onHistory={() => setTab("chat")}
+                      onReports={() => {
+                        setTab("timeline");
+                        requestAnimationFrame(() =>
+                          document.getElementById("timeline-tab")?.focus(),
+                        );
+                      }}
                       key={threadKey}
                       view={view}
                       entries={entries}

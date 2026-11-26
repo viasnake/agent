@@ -175,6 +175,7 @@ type Active = {
   controller: AbortController;
   command?: LongCommand;
   projectDispatch?: AbortController;
+  unavailableReviews?: Set<string>;
   projectFollowup?: { version: number; evidence: Set<string> };
   skillMaintenance?: SkillMaintenance;
   deadlineAt: number;
@@ -2176,7 +2177,9 @@ ${this.config.instructions}${this.redact(catalog)}`;
               delete p.nextStep;
               p.delivered = false;
               delete p.evidence;
-              (await tx.doc(ProjectEvidenceDoc, record.piId)).patches = {};
+              const evidence = await tx.doc(ProjectEvidenceDoc, record.piId);
+              evidence.patches = {};
+              delete evidence.reviews;
             } else
               await appendPost(tx, record.piId, p, {
                 kind: "resume",
@@ -2292,8 +2295,6 @@ ${this.config.instructions}${this.redact(catalog)}`;
                 if (m.file)
                   evidence.add(hash(["adopt", m.check?.tree ?? m.file]));
               }
-              if (p.assessment?.verdict === "revise")
-                evidence.add(hash(["review", p.assessment.reason]));
               for (const entry of recent) {
                 if (entry.kind === "agent.project-followup") break;
                 for (const msg of entry.model ?? []) {
@@ -2313,7 +2314,11 @@ ${this.config.instructions}${this.redact(catalog)}`;
               const withinBudget =
                 conversation.requests < active.limits.modelRequests &&
                 Date.now() < active.deadlineAt;
-              if (progressed && withinBudget) {
+              if (
+                progressed &&
+                withinBudget &&
+                p.assessment?.verdict !== "unavailable"
+              ) {
                 await pi.submit(tx, {
                   type: "input",
                   content:
@@ -2324,9 +2329,12 @@ ${this.config.instructions}${this.redact(catalog)}`;
                 return new Set([...(prior ?? []), ...evidence]);
               }
               conversation.status = "interrupted";
-              conversation.detail = withinBudget
-                ? "自動で続行しましたが、新しい作業結果や完了報告を取得できませんでした"
-                : "実行時間またはモデル呼び出しの上限に達しました";
+              conversation.detail =
+                p.assessment?.verdict === "unavailable"
+                  ? p.assessment.reason
+                  : withinBudget
+                    ? "自動で続行しましたが、新しい作業結果や完了報告を取得できませんでした"
+                    : "実行時間またはモデル呼び出しの上限に達しました";
               await appendPost(tx, conversation.piId, p, {
                 kind: "interrupted",
                 actor: "system",
@@ -2675,6 +2683,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
           records,
           bounded,
           active.model.specialist,
+          (active.unavailableReviews ??= new Set()),
         );
       },
     );

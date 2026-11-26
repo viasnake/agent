@@ -1,3 +1,4 @@
+import { ProjectTeamStatus } from "./project-team.js";
 import { ProjectAnswer, ProjectDeliverable } from "./project-response.js";
 import { RecentPosts } from "./project-timeline.js";
 import type { PortfolioPost } from "../src/project-timeline.js";
@@ -14,101 +15,12 @@ export const projectStatusLabels = {
   interrupted: "中断",
   draft: "依頼前",
 };
-const memberLabels = {
-  queued: "待機中",
-  running: "作業中",
-  reported: "報告済み",
-  failed: "実行失敗",
-  interrupted: "中断",
-};
 function StateLabel({ status }: { status: ProjectRow["status"] }) {
   return (
     <span className={"project-state state-" + status}>
       <i />
       {projectStatusLabels[status]}
     </span>
-  );
-}
-export function ProjectTeamStatus({
-  project: p,
-  showSummary = true,
-}: {
-  project: ProjectRow;
-  showSummary?: boolean;
-}) {
-  const hasReview = !!(p.evidence || p.assessment);
-  if (!p.members.length && !hasReview && !(showSummary && p.summary))
-    return null;
-  return (
-    <details className="project-team-detail">
-      <summary>
-        <span>
-          {p.members.length
-            ? `担当 ${p.members.length} 人`
-            : hasReview
-              ? "検証記録"
-              : "進捗"}
-        </span>
-        {p.members.length > 0 && (
-          <span className="team-names">
-            {p.members.map((member) => member.role).join("・")}
-          </span>
-        )}
-        <Icon name="chevron" />
-      </summary>
-      {p.assessment && (
-        <p>
-          <strong>レビュー </strong>
-          {p.assessment.verdict === "checking"
-            ? "確認中"
-            : p.assessment.verdict === "revise"
-              ? "責任者へ差し戻し"
-              : "確認済み"}
-          {p.assessment.reason && " · " + p.assessment.reason}
-        </p>
-      )}
-      {p.assessment &&
-        "sources" in p.assessment &&
-        p.assessment.sources?.map(({ label, quote }) => (
-          <blockquote className="work-source" key={quote}>
-            <strong>{label}</strong>
-            {quote}
-          </blockquote>
-        ))}
-      {showSummary && p.summary && <p>{p.summary}</p>}
-      {p.evidence && (
-        <p>
-          <strong>根拠 </strong>
-          {p.evidence}
-        </p>
-      )}
-      <ul>
-        {p.members.map((m) => (
-          <li key={m.id}>
-            <b>{m.role}</b> · {memberLabels[m.status]}
-            <div>{m.task}</div>
-            {m.status === "running" && <div>{m.activity}</div>}
-            {m.report && <p>{m.report}</p>}
-            {m.check && (
-              <details>
-                <summary>テスト{m.check.passed ? "成功" : "失敗"}</summary>
-                <pre>
-                  {m.check.command && "$ " + m.check.command + "\n"}
-                  {m.check.output || "出力なし"}
-                </pre>
-              </details>
-            )}
-            {m.file && (
-              <a
-                href={`/api/conversations/${p.id}/download?path=${encodeURIComponent(m.file)}`}
-              >
-                パッチを保存
-              </a>
-            )}
-          </li>
-        ))}
-      </ul>
-    </details>
   );
 }
 const updatedTime = new Intl.DateTimeFormat("ja-JP", {

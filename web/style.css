@@ -2946,3 +2946,29 @@ button {
     padding-inline-start: calc(3.2rem + 8px);
   }
 }
+
+.composer-dock[hidden] {
+  display: none;
+}
+.project-history-footer {
+  display: flex;
+  justify-content: center;
+  padding: 10px;
+  border-top: 1px solid var(--bs-border-muted);
+}
+.topic-intro .project-team-detail {
+  margin-top: 0;
+}
+.team-roles {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+.team-roles > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.team-roles dd {
+  margin: 0;
+}

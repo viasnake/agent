@@ -17,6 +17,7 @@ export type PostKind =
   | "failed"
   | "artifact"
   | "review"
+  | "review_error"
   | "revision"
   | "question"
   | "decision"

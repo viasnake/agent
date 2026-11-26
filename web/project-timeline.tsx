@@ -1,3 +1,4 @@
+import { ProjectTeamStatus, projectRoles } from "./project-team.js";
 import { ProjectAnswer, ProjectDeliverable } from "./project-response.js";
 import {
   Fragment,
@@ -25,7 +26,8 @@ const kindLabel = {
   passed: "テスト成功",
   failed: "テスト失敗",
   artifact: "成果物",
-  review: "レビュー",
+  review: "検証開始",
+  review_error: "検証中断",
   revision: "差し戻し",
   question: "質問",
   decision: "回答",
@@ -35,9 +37,9 @@ const kindLabel = {
 };
 const actors = {
   user: "あなた",
-  lead: "責任者",
+  lead: projectRoles.lead.name,
   member: "担当",
-  reviewer: "照合担当",
+  reviewer: projectRoles.reviewer.name,
   system: "システム",
 };
 const time = new Intl.DateTimeFormat("ja-JP", {
@@ -315,6 +317,11 @@ export function ProjectTimeline({
               )}
             </details>
           )}
+          <ProjectTeamStatus
+            project={project}
+            includeLead
+            showSummary={false}
+          />
           {project.status === "delivered" && (
             <div className="topic-result">
               <strong>結論</strong>
@@ -350,7 +357,7 @@ export function ProjectTimeline({
             <div className="timeline-empty">
               <p>投稿はまだありません</p>
               <button className="btn-text theme-secondary" onClick={onHistory}>
-                会話を開く
+                実行履歴を開く
               </button>
             </div>
           )}

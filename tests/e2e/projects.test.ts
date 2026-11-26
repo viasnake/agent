@@ -268,11 +268,16 @@ test("one directive starts a project; the portfolio shows independent teams and 
       await stream.locator(".post-question .post-choices button").count(),
       0,
     );
-    await page.getByRole("tab", { name: "会話", exact: true }).click();
-    await page.getByText("担当 2 人", { exact: false }).last().click();
+    await page.getByRole("tab", { name: "実行履歴", exact: true }).click();
+    assert.equal(await page.locator("#message").isVisible(), false);
+    await page.getByRole("button", { name: "案件スレッドに戻る" }).click();
+    await page.getByText("チームの分担", { exact: true }).click();
     await page
+      .getByText("作業を分担し、報告をまとめて納品します。", { exact: true })
+      .waitFor();
+    await page
+      .locator(".topic-intro .project-team-detail")
       .getByText("告知本文の初稿をまとめました。", { exact: true })
-      .last()
       .waitFor();
   } finally {
     release();
@@ -377,7 +382,7 @@ test("project timeline retains the reader's place, accepts a decision inline and
     await start.locator("summary").click();
     assert.equal(
       await page
-        .getByRole("tab", { name: "スレッド" })
+        .getByRole("tab", { name: "案件スレッド" })
         .getAttribute("aria-selected"),
       "true",
     );
@@ -416,8 +421,8 @@ test("project timeline retains the reader's place, accepts a decision inline and
         await stream.evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
       );
     }
-    await page.getByRole("tab", { name: "会話", exact: true }).click();
-    await page.getByRole("tab", { name: "スレッド" }).click();
+    await page.getByRole("tab", { name: "実行履歴", exact: true }).click();
+    await page.getByRole("tab", { name: "案件スレッド" }).click();
     assert.equal(
       await page.locator("#message").inputValue(),
       "請求番号の範囲も確認してください",

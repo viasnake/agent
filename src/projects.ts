@@ -105,7 +105,7 @@ export type Project = {
   members: Member[];
   question?: PendingQuestion;
   assessment?: {
-    verdict: "checking" | "revise" | "accept";
+    verdict: "checking" | "revise" | "accept" | "unavailable";
     reason: string;
     sources?: { label: string; quote: string }[];
   };
@@ -133,7 +133,13 @@ export type MemberUsage = {
   tokens: Pick<Usage, keyof Usage>;
   error: boolean;
 };
+export type DeliveryDecision = {
+  verdict: "accept" | "revise";
+  reason: string;
+  sources?: { label: string; quote: string }[];
+};
 export const ProjectEvidenceDoc = defineDoc<{
+  reviews?: (DeliveryDecision & { key: string })[];
   patches: Record<
     string,
     {
@@ -185,7 +191,7 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
     question: p.question,
     assessment:
       c.status === "interrupted" && p.assessment?.verdict === "checking"
-        ? { verdict: "revise" as const, reason: "照合中に応答が中断しました" }
+        ? { verdict: "unavailable" as const, reason: "検証が中断しました" }
         : p.assessment,
     members: p.members.map((m) => ({ ...m })),
   } as const;
