@@ -7,7 +7,7 @@ type Line = {
   next?: number;
 };
 
-export function patchLines(patch: string) {
+export function patchLines(patch: string, showFiles = false) {
   const source = patch.split("\n");
   if (source.at(-1) === "") source.pop();
   const lines: Line[] = [];
@@ -16,7 +16,10 @@ export function patchLines(patch: string) {
   let inHunk = false;
   for (const text of source) {
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
-    if (hunk) {
+    if (text.startsWith("diff --git ")) {
+      inHunk = false;
+      if (showFiles) lines.push({ text, kind: "note" });
+    } else if (hunk) {
       old = Number(hunk[1]);
       next = Number(hunk[2]);
       inHunk = true;
@@ -37,8 +40,14 @@ export function patchLines(patch: string) {
   return lines;
 }
 
-export function GitPatch({ text }: { text: string }) {
-  const lines = useMemo(() => patchLines(text), [text]);
+export function GitPatch({
+  text,
+  showFiles = false,
+}: {
+  text: string;
+  showFiles?: boolean;
+}) {
+  const lines = useMemo(() => patchLines(text, showFiles), [text, showFiles]);
   // Bound the number of DOM nodes for patches containing many very short lines.
   if (!lines.length || lines.length > 2500)
     return (

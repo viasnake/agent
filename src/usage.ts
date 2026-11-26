@@ -1,3 +1,5 @@
+import { ProjectEvidenceDoc, type MemberUsage } from "./projects.js";
+import { assignmentUsage, WorkDoc, type Work } from "./parallel-work.js";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord/context";
 import {
@@ -82,6 +84,8 @@ function addTotals(total: UsageTotals, row: UsageTotals): void {
 // Pi owns cumulative accounting, including compaction and fork isolation.
 export function conversationUsage(
   state: Readonly<UsageState> | undefined,
+  work: readonly Work[] = [],
+  team: readonly MemberUsage[] = [],
 ): ConversationUsage {
   const rows = (bucket: UsageState["models"]) =>
     Object.entries(bucket).map(([name, usage]) => ({
@@ -89,6 +93,11 @@ export function conversationUsage(
       ...usageTotals(usage),
     }));
   const models = rows(state?.models ?? {});
+  for (const a of [...assignmentUsage(work), ...team]) {
+    const row = models.find((m) => m.name === a.model);
+    if (row) addTotals(row, usageTotals(a.tokens));
+    else models.push({ name: a.model, ...usageTotals(a.tokens) });
+  }
   const tools = rows(state?.tools ?? {});
   const total = emptyTotals();
   for (const row of [...models, ...tools]) addTotals(total, row);
@@ -120,7 +129,58 @@ export async function recordedUsage(
   const models = new Map<string, ActivityRow>();
   const tools = new Map<string, ActivityRow>();
   const days = new Map<string, DailyUsage>();
+  function record(
+    model: boolean,
+    name: string,
+    timestamp: number,
+    error: boolean,
+    usage?: Usage,
+    label?: string,
+  ) {
+    let day: DailyUsage | undefined;
+    if (period && dateOf) {
+      if (!Number.isFinite(timestamp)) return;
+      const date = dateOf.format(timestamp);
+      if (date < period.from || date > period.to) return;
+      day = days.get(date) ?? {
+        date,
+        modelCalls: 0,
+        toolCalls: 0,
+        toolErrors: 0,
+        totalTokens: 0,
+      };
+      days.set(date, day);
+    }
+    const bucket = model ? models : tools;
+    const row: ActivityRow = bucket.get(name) ?? {
+      name,
+      calls: 0,
+      errors: 0,
+      ...emptyTotals(),
+    };
+    if (label && !row.label) row.label = label;
+    row.calls++;
+    if (error) row.errors++;
+    if (usage) addTotals(row, usageTotals(usage));
+    bucket.set(name, row);
+    if (day) {
+      if (model) day.modelCalls++;
+      else {
+        day.toolCalls++;
+        if (error) day.toolErrors++;
+      }
+      day.totalTokens += usage?.totalTokens ?? 0;
+    }
+  }
   for (const id of conversations) {
+    for (const a of [
+      ...assignmentUsage(
+        (await harness.snapshot(WorkDoc, id, context))?.items ?? [],
+      ),
+      ...((await harness.snapshot(ProjectEvidenceDoc, id, context))?.usage ??
+        []),
+    ])
+      record(true, a.model, a.time, a.error, a.tokens);
     const pi = await harness.conversation(id, context);
     if (!pi) throw new AppError(503, "保存されたセッションがありません");
     let cursor: Cursor | undefined;
@@ -140,54 +200,23 @@ export async function recordedUsage(
         const model = message.role === "assistant";
         if (!(model ? AssistantEntry.is(entry) : ToolResultEntry.is(entry)))
           continue;
-        let day: DailyUsage | undefined;
-        if (period && dateOf) {
-          if (!Number.isFinite(message.timestamp)) continue;
-          const date = dateOf.format(message.timestamp);
-          if (date < period.from || date > period.to) continue;
-          day = days.get(date) ?? {
-            date,
-            modelCalls: 0,
-            toolCalls: 0,
-            toolErrors: 0,
-            totalTokens: 0,
-          };
-          days.set(date, day);
-        }
-        const bucket = model ? models : tools;
         const name = model
           ? `${message.provider}/${message.model}`
           : message.toolName;
-        const row: ActivityRow = bucket.get(name) ?? {
-          name,
-          calls: 0,
-          errors: 0,
-          ...emptyTotals(),
-        };
         const error = model
           ? message.stopReason === "error" || message.stopReason === "aborted"
           : message.isError;
-        if (!model && name.startsWith("mcp_") && !row.label) {
-          const details = message.details;
+        let label: string | undefined;
+        if (!model && name.startsWith("mcp_")) {
+          const d = message.details;
           const saved =
-            details &&
-            typeof details === "object" &&
-            "agentMcpToolLabel" in details &&
-            details.agentMcpToolLabel;
-          row.label = typeof saved === "string" ? saved : labels.get(name);
+            d &&
+            typeof d === "object" &&
+            "agentMcpToolLabel" in d &&
+            d.agentMcpToolLabel;
+          label = typeof saved === "string" ? saved : labels.get(name);
         }
-        row.calls++;
-        if (error) row.errors++;
-        if (message.usage) addTotals(row, usageTotals(message.usage));
-        bucket.set(name, row);
-        if (day) {
-          if (model) day.modelCalls++;
-          else {
-            day.toolCalls++;
-            if (error) day.toolErrors++;
-          }
-          day.totalTokens += message.usage?.totalTokens ?? 0;
-        }
+        record(model, name, message.timestamp, error, message.usage, label);
       }
       cursor = page.next;
     } while (cursor);

@@ -1,10 +1,15 @@
 import { workEnvironment } from "../work-credentials.js";
 import { Worktrees } from "./worktrees.js";
+import { gitWork } from "./parallel-work.js";
+import { candidateKey, gitWorkInput } from "../parallel-work.js";
 import { gitReview } from "./git-review.js";
 import { gitReviewRequest } from "../git-review.js";
 import { constants } from "node:fs";
 import {
   lstat,
+  mkdtemp,
+  rename,
+  writeFile,
   mkdir,
   open,
   readdir,
@@ -590,6 +595,15 @@ export class Worker {
             .input,
         ),
       };
+    if (op === "parallel_work")
+      return {
+        parallelWork: await gitWork(
+          this.workspace(id),
+          this.env(),
+          gitWorkInput.parse(args),
+          signal,
+        ),
+      };
     if (op === "git_review")
       return {
         gitReview: await gitReview(
@@ -632,6 +646,40 @@ export class Worker {
       return this.standardTool(id, args, signal, onProgress);
     }
     if (op === "list") return this.list(id);
+    if (op === "export_patch") {
+      const input = z
+        .object({ candidate: candidateKey, data: z.base64().max(2200000) })
+        .strict()
+        .parse(args);
+      const name = `outputs/parallel-${input.candidate}/changes.patch`;
+      const data = Buffer.from(input.data, "base64");
+      const directory = await this.path(
+        id,
+        name.slice(0, -"/changes.patch".length),
+      );
+      const tmp = await mkdtemp(join(this.workspace(id), ".patch-export-"));
+      try {
+        await writeFile(join(tmp, "changes.patch"), data, {
+          mode: 0o600,
+          flag: "wx",
+        });
+        try {
+          await rename(tmp, directory);
+        } catch (error) {
+          if (
+            !["ENOTEMPTY", "EEXIST"].includes(
+              (error as NodeJS.ErrnoException).code ?? "",
+            )
+          )
+            throw error;
+          if (!(await this.bytes(id, name)).equals(data))
+            throw new Error("出力先に別の内容があります");
+        }
+        return { path: name };
+      } finally {
+        await rm(tmp, { recursive: true, force: true });
+      }
+    }
     const name = safeRelative(z.string().parse(args.path));
     if (op === "read_attachment") {
       if (!name.startsWith("attachments/")) throw new Error("Attachments only");

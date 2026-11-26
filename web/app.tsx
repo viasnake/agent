@@ -1,3 +1,10 @@
+import { ProjectTimeline } from "./project-timeline.js";
+import {
+  ProjectDashboard,
+  ProjectTeamStatus,
+  projectStatusLabels,
+} from "./projects.js";
+import { ParallelWork } from "./parallel-work.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
 import { NotificationProvider, useNotify } from "./notifications.js";
@@ -48,6 +55,10 @@ import {
 import { Icon } from "./icons.js";
 
 type ThreadProps = {
+  projectDraft: boolean;
+  timelineVisible: boolean;
+  onHistory: () => void;
+  onBoard: () => void;
   draftId: string | null;
   view: View | null;
   entries: Entry[];
@@ -61,7 +72,7 @@ type ThreadProps = {
   attachments: File[];
   setAttachments: (files: File[]) => void;
   onSend: (message: AppendMessage) => Promise<void>;
-  onChoice: (entryId: number, option: number) => Promise<void>;
+  onChoice: (entryId: number, option: number | string) => Promise<void>;
   onEarlier: () => Promise<void>;
 };
 function SendButton({
@@ -90,6 +101,10 @@ function SendButton({
   );
 }
 function Chat({
+  projectDraft,
+  timelineVisible,
+  onHistory,
+  onBoard,
   draftId,
   view,
   entries,
@@ -159,7 +174,7 @@ function Chat({
     <AssistantRuntimeProvider runtime={runtime}>
       <ConversationId.Provider value={view?.conversation.id ?? null}>
         <ThreadPrimitive.Root
-          className={`chat-thread ${!messages.length && !loading ? "chat-empty" : ""} ${dragging ? "drop-target" : ""}`}
+          className={`chat-thread ${!timelineVisible && !messages.length && !loading ? "chat-empty" : ""} ${dragging ? "drop-target" : ""}`}
           onDragOver={(event) => {
             if (!sending && event.dataTransfer.types.includes("Files")) {
               event.preventDefault();
@@ -181,7 +196,22 @@ function Chat({
             );
           }}
         >
+          {view?.project && view.timeline && (
+            <ProjectTimeline
+              key={view.project.id}
+              project={view.project}
+              onBoard={onBoard}
+              latest={view.timeline}
+              question={view.question}
+              active={view.conversation.status === "running"}
+              visible={timelineVisible}
+              disabled={sending || waitingForModel}
+              onChoice={onChoice}
+              onHistory={onHistory}
+            />
+          )}
           <ThreadPrimitive.Viewport
+            hidden={timelineVisible}
             ref={viewport}
             className="thread-viewport"
             id="transcript"
@@ -216,7 +246,9 @@ function Chat({
                   <span className="empty-icon">
                     <Icon name="agent" />
                   </span>
-                  <h2>何を始めますか？</h2>
+                  <h2>
+                    {projectDraft ? "何を依頼しますか？" : "何を始めますか？"}
+                  </h2>
                 </div>
               )}
               <ThreadPrimitive.Messages>
@@ -272,6 +304,14 @@ function Chat({
                   )}
                 </details>
               )}
+              {view?.project && <ProjectTeamStatus project={view.project} />}
+              {view?.work?.map((work) => (
+                <ParallelWork
+                  key={work.id}
+                  session={view.conversation.id}
+                  work={work}
+                />
+              ))}
               {view?.conversation.skillNotice && (
                 <div className="conversation-notice" role="status">
                   {view.conversation.skillNotice}
@@ -292,14 +332,16 @@ function Chat({
               )}
             </div>
           </ThreadPrimitive.Viewport>
-          <SelectionToolbar disabled={sending} />
+          {!timelineVisible && <SelectionToolbar disabled={sending} />}
           <div className="composer-dock">
-            <ThreadPrimitive.ScrollToBottom
-              className="scroll-bottom btn-outline theme-secondary btn-sm"
-              aria-label="最新のメッセージへ"
-            >
-              <Icon name="down" />
-            </ThreadPrimitive.ScrollToBottom>
+            {!timelineVisible && (
+              <ThreadPrimitive.ScrollToBottom
+                className="scroll-bottom btn-outline theme-secondary btn-sm"
+                aria-label="最新のメッセージへ"
+              >
+                <Icon name="down" />
+              </ThreadPrimitive.ScrollToBottom>
+            )}
             <ComposerPrimitive.Root
               id="message-form"
               className="composer"
@@ -313,7 +355,13 @@ function Chat({
               </label>
               <ComposerPrimitive.Input
                 id="message"
-                placeholder="メッセージを入力…"
+                placeholder={
+                  timelineVisible
+                    ? "追加の指示を入力…"
+                    : projectDraft
+                      ? "依頼内容を入力…"
+                      : "メッセージを入力…"
+                }
                 className="composer-input"
                 rows={2}
                 maxRows={8}
@@ -471,6 +519,12 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(
     new URLSearchParams(location.search).has("settings"),
   );
+  const [dashboard, setDashboard] = useState(
+    new URLSearchParams(location.search).has("projects"),
+  );
+  const [newProject, setNewProject] = useState(
+    new URLSearchParams(location.search).has("new-project"),
+  );
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -480,7 +534,13 @@ function App() {
   );
   const [ready, setReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(() => {
+    const id = new URLSearchParams(location.search).get("project");
+    return id && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)
+      ? id
+      : null;
+  });
+  const openHomeOnArrival = useRef(!location.search && !readDraft(null));
   const selectedRef = useRef(selected);
   const selectionVersion = useRef(0);
   const [reload, setReload] = useState(0);
@@ -495,9 +555,18 @@ function App() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<unknown>(null);
   const [files, setFiles] = useState<Files>({ files: [] });
-  const [tab, setTab] = useState<"chat" | "changes" | "files" | "usage">(
-    "chat",
-  );
+  const [chosenTab, setTab] = useState<
+    "default" | "timeline" | "chat" | "changes" | "files" | "usage"
+  >("default");
+  const tab =
+    chosenTab === "default"
+      ? view?.project
+        ? "timeline"
+        : "chat"
+      : chosenTab === "timeline" && !view?.project
+        ? "chat"
+        : chosenTab;
+  const timelineVisible = tab === "timeline";
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
   const filesVersion = useRef(0);
@@ -525,7 +594,20 @@ function App() {
     const result = await api<{ conversations: Conversation[] }>(
       "/api/conversations",
     );
-    if (listVersion.current === version) setConversations(result.conversations);
+    if (listVersion.current === version) {
+      setConversations(result.conversations);
+      if (
+        openHomeOnArrival.current &&
+        !selectionVersion.current &&
+        !location.search &&
+        !readDraft(null) &&
+        result.conversations.some((c) => c.managedProject && !c.archived)
+      ) {
+        setDashboard(true);
+        history.replaceState(null, "", location.pathname + "?projects");
+      }
+      openHomeOnArrival.current = false;
+    }
   }, []);
   const refreshFiles = useCallback(
     async (id: string) => {
@@ -559,15 +641,30 @@ function App() {
       ).values(),
     ]);
   }, []);
-  function select(id: string | null) {
+  function select(id: string | null, project = false) {
+    setDashboard(false);
+    setNewProject(!id && project);
     setSearchOpen(false);
     setSettingsOpen(false);
     setMemoryDraft(null);
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(
+      null,
+      "",
+      location.pathname +
+        (id &&
+        (project || conversations.some((c) => c.id === id && c.managedProject))
+          ? "?project=" + encodeURIComponent(id)
+          : project
+            ? "?new-project"
+            : ""),
+    );
     setSidebar(false);
     // Reselecting the visible conversation must preserve its subscription and draft.
     if (id !== null && selectedRef.current === id) return;
-    attachmentDrafts.current.set(selectedRef.current ?? "new", attachments);
+    attachmentDrafts.current.set(
+      selectedRef.current ?? (newProject ? "new-project" : "new"),
+      attachments,
+    );
     selectionVersion.current++;
     setReload((value) => value + 1);
     selectedRef.current = id;
@@ -578,8 +675,11 @@ function App() {
     setFiles({ files: [] });
     setFilesLoading(false);
     setFilesError("");
-    setTab("chat");
-    setAttachments(attachmentDrafts.current.get(id ?? "new") ?? []);
+    setTab("default");
+    setAttachments(
+      attachmentDrafts.current.get(id ?? (project ? "new-project" : "new")) ??
+        [],
+    );
     setActiveEntry(null);
     setError("");
     setLoadError("");
@@ -768,10 +868,13 @@ function App() {
       document.getElementById("message")?.focus({ preventScroll: true });
     setChoiceFocus(null);
   }, [choiceFocus, sending]);
-  async function sendChoice(entryId: number, option: number) {
+  async function sendChoice(entryId: number, option: number | string) {
     const id = selectedRef.current;
     if (!id || sending) return;
-    const choice = { entryId, option };
+    const choice =
+      typeof option === "string"
+        ? { entryId, answer: option }
+        : { entryId, option };
     const key = `choice-${id}-${entryId}`;
     setSending(true);
     setError("");
@@ -807,6 +910,7 @@ function App() {
         if (draftAuto && !choice)
           throw new Error("Auto を利用できません。モデルを選び直してください");
         const selection = {
+          ...(newProject ? { managedProject: true } : {}),
           ...(choice
             ? { modelId: choice.connectionId, model: choice.model }
             : {}),
@@ -825,8 +929,12 @@ function App() {
         );
         id = created.id;
         setDraftAuto(false);
-        saveDraft(null, "");
-        attachmentDrafts.current.delete("new");
+        saveDraft(newProject ? "new-project" : null, "");
+        if (newProject) {
+          setNewProject(false);
+          history.replaceState(null, "", location.pathname + "?project=" + id);
+        }
+        attachmentDrafts.current.delete(newProject ? "new-project" : "new");
         // Keep the composer mounted so a rejected/lost response can restore its draft.
         selectedRef.current = id;
         setSelected(id);
@@ -1067,6 +1175,7 @@ function App() {
     setSidebar(false);
   }
   async function openSource(source: MemorySource) {
+    setDashboard(false);
     if (selectedRef.current === source.sessionId && !settingsOpen) {
       if (source.entryId) await jumpTo(source.entryId);
       setTab("chat");
@@ -1147,11 +1256,29 @@ function App() {
             <span className="sidebar-label-text">新しいセッション</span>
           </button>
         </div>
+        <button
+          className="new-conversation btn-text theme-secondary"
+          aria-label="プロジェクト"
+          title="プロジェクト"
+          aria-pressed={dashboard && !settingsOpen}
+          disabled={sending || deleting}
+          onClick={() => {
+            if (settingsOpen && !confirmSettingsExit(settingsDirty)) return;
+            setSettingsOpen(false);
+            if (!dashboard || settingsOpen)
+              history.replaceState(null, "", location.pathname + "?projects");
+            setDashboard(true);
+            setSidebar(false);
+          }}
+        >
+          <Icon name="sidebar" />
+          <span className="sidebar-label-text">プロジェクト</span>
+        </button>
         <SessionList
           sessions={conversations.map((session) =>
             session.id === view?.conversation.id ? view.conversation : session,
           )}
-          selected={selected}
+          selected={dashboard && !settingsOpen ? null : selected}
           disabled={sending || deleting}
           onSelect={(id) => {
             if (!settingsOpen || confirmSettingsExit(settingsDirty)) select(id);
@@ -1229,6 +1356,16 @@ function App() {
         </div>
       </aside>
       <div className="workspace-stack">
+        {dashboard && !settingsOpen && (
+          <ProjectDashboard
+            onOpen={(id) => {
+              select(id, true);
+              setTab("timeline");
+            }}
+            onNew={() => select(null, true)}
+            onMenu={() => setSidebar(true)}
+          />
+        )}
         {settingsOpen && (
           <Settings
             sidebarOpen={sidebar}
@@ -1240,13 +1377,16 @@ function App() {
         )}
         <Tabs
           value={tab}
-          onValueChange={(value) => setTab(value as typeof tab)}
+          onValueChange={(value) => {
+            setTab(value as typeof tab);
+            if (value === "files" && selected) void refreshFiles(selected);
+          }}
           asChild
         >
           <main
             className="workspace"
-            aria-hidden={settingsOpen}
-            inert={settingsOpen}
+            aria-hidden={settingsOpen || dashboard}
+            inert={settingsOpen || dashboard}
           >
             <header className="conversation-header">
               <button
@@ -1259,7 +1399,8 @@ function App() {
                 <Icon name="menu" />
               </button>
               <h1 id="title">
-                {view?.conversation.title ?? "新しいセッション"}
+                {view?.conversation.title ??
+                  (newProject ? "新しいプロジェクト" : "新しいセッション")}
               </h1>
               {view?.conversation.parentId && (
                 <button
@@ -1276,7 +1417,9 @@ function App() {
                   id="state"
                   className={`badge badge-subtle ${currentStatus === "running" ? "theme-primary" : "theme-secondary"}`}
                 >
-                  {statuses[currentStatus!] ?? currentStatus}
+                  {view.project
+                    ? projectStatusLabels[view.project.status]
+                    : (statuses[currentStatus!] ?? currentStatus)}
                 </span>
               )}
               <div id="actions" className="ms-auto">
@@ -1310,6 +1453,16 @@ function App() {
               </div>
             </header>
             <TabsList className="session-tabs" aria-label="セッションの内容">
+              {view?.project && (
+                <TabsTrigger
+                  value="timeline"
+                  id="timeline-tab"
+                  aria-controls="timeline-panel"
+                >
+                  <Icon name="timeline" />
+                  スレッド
+                </TabsTrigger>
+              )}
               <TabsTrigger
                 value="chat"
                 id="chat-tab"
@@ -1456,12 +1609,12 @@ function App() {
                 </div>
               </TabsContent>
               <TabsContent
-                value="chat"
+                value={timelineVisible ? "timeline" : "chat"}
                 forceMount
-                id="chat-panel"
-                aria-labelledby="chat-tab"
-                aria-hidden={tab !== "chat"}
-                inert={tab !== "chat"}
+                id={timelineVisible ? "timeline-panel" : "chat-panel"}
+                aria-labelledby={timelineVisible ? "timeline-tab" : "chat-tab"}
+                aria-hidden={tab !== "chat" && !timelineVisible}
+                inert={tab !== "chat" && !timelineVisible}
                 className="session-panel"
               >
                 {searchOpen && selected && (
@@ -1510,7 +1663,18 @@ function App() {
                     }}
                   >
                     <Chat
-                      draftId={selected}
+                      draftId={selected ?? (newProject ? "new-project" : null)}
+                      projectDraft={newProject}
+                      timelineVisible={timelineVisible}
+                      onBoard={() => {
+                        history.replaceState(
+                          null,
+                          "",
+                          location.pathname + "?projects=board",
+                        );
+                        setDashboard(true);
+                      }}
+                      onHistory={() => setTab("chat")}
                       key={threadKey}
                       view={view}
                       entries={entries}

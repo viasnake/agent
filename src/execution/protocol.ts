@@ -3,6 +3,7 @@ import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { TerminalIO } from "./terminal.js";
 import { gitIdentityView } from "./git-identity.js";
 import { gitReviewResult, type GitReviewResult } from "../git-review.js";
+import { gitWorkResult } from "../parallel-work.js";
 export const requestSchema = z
   .object({
     id: z.string().uuid(),
@@ -23,6 +24,8 @@ export const requestSchema = z
       "worktrees",
       "git_identity",
       "git_review",
+      "parallel_work",
+      "export_patch",
     ]),
     args: z.record(z.string(), z.unknown()),
   })
@@ -45,6 +48,7 @@ export type WorkerResult = {
   tools?: ToolInfo[];
   result?: ToolExecutionResult;
   gitReview?: GitReviewResult;
+  parallelWork?: z.infer<typeof gitWorkResult>;
   gitIdentity?: z.infer<typeof gitIdentityView> | { conflict: true };
 };
 export const executableOperations = new Set<WorkerRequest["op"]>([
@@ -55,6 +59,7 @@ export const executableOperations = new Set<WorkerRequest["op"]>([
   "worktrees",
   "git_identity",
   "git_review",
+  "parallel_work",
 ]);
 export const replySchema = z
   .object({
@@ -94,6 +99,7 @@ export const replySchema = z
           )
           .optional(),
         gitReview: gitReviewResult.optional(),
+        parallelWork: gitWorkResult.optional(),
         gitIdentity: z
           .union([
             gitIdentityView,

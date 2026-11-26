@@ -256,18 +256,19 @@ export class WorkerClient implements Runner {
     }
     if (!executableOperations.has(op))
       return this.files.call(id, op, args, signal);
-    if (this.operations.has(id))
+    const lane = op === "parallel_work" ? id + ":work" : id;
+    if (this.operations.has(lane))
       throw new Error("Session tool already running");
     const controller = new AbortController();
     const combined = signal
       ? AbortSignal.any([controller.signal, signal])
       : controller.signal;
     const finished = this.execute(id, op, args, combined, onProgress);
-    this.operations.set(id, { controller, finished });
+    this.operations.set(lane, { controller, finished });
     try {
       return await finished;
     } finally {
-      this.operations.delete(id);
+      this.operations.delete(lane);
     }
   }
 

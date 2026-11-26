@@ -14,6 +14,7 @@ export type Conversation = {
   parentId?: string;
   forkEntry?: number;
   branchSource?: { entryId: number; mode: "fork" | "edit" | "regenerate" };
+  managedProject?: boolean;
   pinned?: boolean;
   archived?: boolean;
   workspaceCreated?: boolean;

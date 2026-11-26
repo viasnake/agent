@@ -1,3 +1,5 @@
+import { timelinePageSize } from "./project-timeline.js";
+import { candidateKey, workControlInput } from "./parallel-work.js";
 import { autoModelId } from "./model-routing.js";
 import { choiceInput } from "./choices.js";
 import Fastify from "fastify";
@@ -492,6 +494,27 @@ export async function createServer(
       ),
     ),
   );
+  app.get("/api/project-dashboard/activity", async () =>
+    safe({ posts: await service.recentProjectPosts() }),
+  );
+  app.get("/api/conversations/:id/timeline", async (request) => {
+    const { before, limit } = z
+      .object({
+        before: z.coerce.number().int().positive().optional(),
+        limit: z.coerce.number().int().min(1).max(timelinePageSize).optional(),
+      })
+      .parse(request.query);
+    return safe(
+      await service.timeline(
+        identifier.parse(request.params).id,
+        before,
+        limit,
+      ),
+    );
+  });
+  app.get("/api/project-dashboard", async () =>
+    safe({ projects: await service.projects() }),
+  );
   app.get("/api/conversations", async () =>
     safe({ conversations: (await service.list()).reverse() }),
   );
@@ -500,6 +523,7 @@ export async function createServer(
       .object({
         requestId,
         title: z.string().min(1).max(200),
+        managedProject: z.boolean().optional(),
         modelId: modelConnectionId.optional(),
         model: z.string().min(1).max(200).optional(),
       })
@@ -513,6 +537,7 @@ export async function createServer(
           body.title,
           body.modelId,
           body.model,
+          body.managedProject,
         ),
       );
   });
@@ -658,6 +683,55 @@ export async function createServer(
     z.object({}).strict().parse(request.body);
     return service.stop(id);
   });
+  const workRoute = z.object({ id: z.uuid(), workId: z.uuid() });
+  app.post("/api/conversations/:id/work/:workId/control", async (request) => {
+    const { id, workId } = workRoute.parse(request.params);
+    const control = workControlInput.parse(request.body);
+    return service.controlWork(
+      id,
+      workId,
+      control.action === "repair" ? control : control.action,
+    );
+  });
+  const candidateRoute = workRoute.extend({ candidate: candidateKey });
+  app.get(
+    "/api/conversations/:id/work/:workId/candidates/:candidate",
+    async (request) => {
+      const { id, workId, candidate } = candidateRoute.parse(request.params);
+      return service.work.review(
+        await service.conversation(id),
+        workId,
+        candidate,
+      );
+    },
+  );
+  app.post(
+    "/api/conversations/:id/work/:workId/candidates/:candidate/export",
+    async (request) => {
+      const { id, workId, candidate } = candidateRoute.parse(request.params);
+      z.object({}).strict().parse(request.body);
+      return service.exportWorkPatch(id, workId, candidate);
+    },
+  );
+  app.get(
+    "/api/conversations/:id/work/:workId/patch/:candidate",
+    async (request, reply) => {
+      const { id, workId, candidate } = candidateRoute.parse(request.params);
+      const bytes = await service.work.download(
+        await service.conversation(id),
+        workId,
+        candidate,
+      );
+      return reply
+        .header("Content-Type", "application/octet-stream")
+        .header(
+          "Content-Disposition",
+          `attachment; filename="change-${candidate.slice(0, 12)}.patch"`,
+        )
+        .header("Content-Security-Policy", "sandbox; default-src 'none'")
+        .send(bytes);
+    },
+  );
   app.get("/api/conversations/:id/files", async (request) => {
     const { id } = identifier.parse(request.params);
     return service.files(id);

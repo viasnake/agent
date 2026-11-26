@@ -29,10 +29,17 @@ export type Conversation = {
   parentId?: string;
   forkEntry?: number;
   branchSource?: { entryId: number; mode: "fork" | "edit" | "regenerate" };
+  managedProject?: boolean;
   pinned?: boolean;
   archived?: boolean;
 };
 export type View = {
+  timeline?: import("../src/project-timeline.js").TimelinePage;
+  project?: import("../src/projects.js").ProjectRow & {
+    brief: string;
+    currentInstruction?: string;
+  };
+  work?: import("../src/parallel-work.js").WorkView[];
   conversation: Conversation;
   transcript: Entry[];
   usage: ConversationUsage;
