@@ -415,7 +415,9 @@ test("an unsupported release claim returns to the lead and is corrected before d
   const [p] = await f.service.projects();
   assert.ok(p!.deliveryPost);
   const posts = (await f.service.timeline(id)).posts;
-  assert.equal(posts.filter((p) => p.kind === "review").length, 2);
+  const reviews = posts.filter((p) => p.kind === "review");
+  assert.equal(reviews.length, 2);
+  assert.match(reviews[1]!.text, /前回の指摘/);
   assert.equal(posts.filter((p) => p.kind === "revision").length, 1);
   const deliveries = posts.filter((p) => p.kind === "delivery");
   assert.deepEqual(

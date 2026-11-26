@@ -246,7 +246,9 @@ export class ProjectTeam {
         {
           kind: "review",
           actor: "reviewer",
-          text: "完了報告を受け取りました。依頼内容と実行記録を照合します。",
+          text: previousFeedback
+            ? "再提出を受け取りました。前回の指摘が解消されたか確認します。"
+            : "完了報告を受け取りました。依頼内容と実行記録を照合します。",
         },
       );
       const references = [
