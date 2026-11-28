@@ -45,7 +45,7 @@ test("browser displays credentials and shares them with every session in light a
       .waitFor();
   }
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page.getByRole("button", { name: "設定", exact: true }).click();
     await page
       .getByRole("button", { name: "クレデンシャル", exact: true })
@@ -154,7 +154,7 @@ test("browser displays credentials and shares them with every session in light a
     await returnToSession(page);
     assert.equal(
       await page
-        .getByRole("button", { name: "セッションのクレデンシャル" })
+        .getByRole("button", { name: "スレッドのクレデンシャル" })
         .count(),
       0,
     );
@@ -184,7 +184,7 @@ test("browser displays credentials and shares them with every session in light a
       .click();
     assert.equal(
       await page
-        .getByRole("button", { name: "セッションのクレデンシャル" })
+        .getByRole("button", { name: "スレッドのクレデンシャル" })
         .count(),
       0,
     );

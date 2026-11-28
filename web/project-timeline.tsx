@@ -18,6 +18,7 @@ import { api, type View } from "./api.js";
 import { Icon } from "./icons.js";
 
 const kindLabel = {
+  reply: "返信",
   directive: "指示",
   assignment: "分担",
   start: "着手",
@@ -326,7 +327,7 @@ export function ProjectTimeline({
       <div
         className="timeline-viewport"
         ref={viewport}
-        aria-label="案件のタイムライン"
+        aria-label="スレッドの投稿"
         tabIndex={0}
         onScroll={(e) => {
           const el = e.currentTarget;

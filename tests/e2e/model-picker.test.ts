@@ -37,7 +37,7 @@ test("model search focuses immediately and recent choices follow the user across
   await f.service.saveSettings(settings);
   await f.service.create(
     randomUUID(),
-    "保存済みセッション",
+    "保存済みスレッド",
     primary,
     "gpt-4.1-mini",
   );
@@ -52,7 +52,7 @@ test("model search focuses immediately and recent choices follow the user across
   });
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   const page = await browser.newPage();
-  const picker = page.getByRole("button", { name: "セッションのモデル" });
+  const picker = page.getByRole("button", { name: "スレッドのモデル" });
   const search = page.getByRole("searchbox", { name: "モデルを検索" });
   const recent = page.getByRole("group", { name: "最近選択したモデル" });
   async function choose(group: string, name: string) {
@@ -75,7 +75,7 @@ test("model search focuses immediately and recent choices follow the user across
     );
   }
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await picker.filter({ hasText: "gpt-4.1" }).click();
     assert.equal(
       await search.evaluate((input) => input === document.activeElement),
@@ -112,7 +112,7 @@ test("model search focuses immediately and recent choices follow the user across
     await page.keyboard.press("Escape");
 
     await page
-      .getByRole("button", { name: "保存済みセッション", exact: true })
+      .getByRole("button", { name: "保存済みスレッド", exact: true })
       .click();
     await picker.filter({ hasText: "gpt-4.1-mini" }).waitFor();
     await choose("最近選択したモデル", "gpt-4.1-mini Secondary");
@@ -128,12 +128,15 @@ test("model search focuses immediately and recent choices follow the user across
       "true",
     );
     await page.keyboard.press("Escape");
+    await page
+      .getByRole("button", { name: "新しいスレッド", exact: true })
+      .click();
     f.faux.setResponses([answer("選択したモデルで完了")]);
-    await page.locator("#message").fill("新しいセッションを作成");
+    await page.locator("#message").fill("新しいスレッドを作成");
     await page.locator("#send").click();
     await page.getByText("選択したモデルで完了", { exact: true }).waitFor();
     const created = (await f.service.list()).find(
-      (session) => session.title === "新しいセッションを作成",
+      (session) => session.title === "新しいスレッドを作成",
     );
     assert.equal(created?.modelConfigId, secondary);
     assert.equal(created?.model, "gpt-4.1-mini");
@@ -143,7 +146,7 @@ test("model search focuses immediately and recent choices follow the user across
       revision: f.service.management().revision,
       models: settings.models.slice(0, 1),
     });
-    await page.reload();
+    await page.goto(origin + "/?new");
     await picker.filter({ hasText: "gpt-4.1" }).click();
     await assertRecent(["gpt-4.1 Primary"]);
     assert.equal(

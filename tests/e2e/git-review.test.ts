@@ -68,7 +68,7 @@ test("changes tab shows Git patches separately from downloadable files", async (
     const downloads = page.getByRole("region", { name: "添付・生成ファイル" });
     const file = page.getByRole("button", { name: "変更: app.txt" });
     const patch = page.locator(".git-review-patch");
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await selectSession(a.id);
     await files();
     await downloads.getByRole("link", { name: /review.txt/ }).waitFor();
@@ -186,7 +186,7 @@ test("changes tab shows Git patches separately from downloadable files", async (
       true,
     );
     assert.equal(await file.isVisible(), false);
-    const sessionTabs = page.getByRole("tablist", { name: "セッションの内容" });
+    const sessionTabs = page.getByRole("tablist", { name: "スレッドの内容" });
     assert.equal(
       await sessionTabs.evaluate(
         (node) => node.scrollWidth === node.clientWidth,
@@ -217,7 +217,7 @@ test("changes tab shows Git patches separately from downloadable files", async (
     await page.setViewportSize({ width: 1280, height: 800 });
     await selectSession(b.id);
     await changes();
-    await page.getByText("セッション内に Git クローンはありません").waitFor();
+    await page.getByText("スレッド内に Git クローンはありません").waitFor();
     assert.equal(await patch.count(), 0);
     assert.deepEqual(errors, []);
   } finally {

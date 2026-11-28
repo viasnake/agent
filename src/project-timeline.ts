@@ -8,6 +8,7 @@ import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import type { Project } from "./projects.js";
 
 export type PostKind =
+  | "reply"
   | "directive"
   | "assignment"
   | "start"
@@ -89,6 +90,7 @@ export async function appendPost(
   }
   if (
     [
+      "reply",
       "directive",
       "progress",
       "report",

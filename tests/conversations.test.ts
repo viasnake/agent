@@ -522,6 +522,12 @@ test("renaming and bounded search preserve selection; branching is atomic and ne
     f.config.limits.fileBytes = limit;
     const key = randomUUID();
     const branch = await f.service.branch(id, key, response.id, "fork");
+    const branchRow = (await f.service.projects()).find(
+      (row) => row.id === branch.id,
+    );
+    assert.equal(branchRow?.status, "answered");
+    assert.match(branchRow?.lastReport ?? "", /original response needle/);
+    assert.equal(branchRow?.deliveryPost, undefined);
     assert.deepEqual(
       await f.service.branch(id, key, response.id, "fork"),
       branch,

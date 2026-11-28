@@ -86,19 +86,19 @@ export function ProjectModelSettings({
   }
   return (
     <SettingsDisclosure
-      title="案件のモデル分担"
+      title="モデルの分担"
       open={open}
       onToggle={setOpen}
       status={
         config.workers.length || config.reviewer
           ? "個別指定"
-          : "案件のモデルを使用"
+          : "スレッドのモデルを使用"
       }
     >
       {open && (
         <div className="accordion-body settings-card d-grid gap-3 p-4">
           <p className="small fg-2 m-0">
-            主担当は案件で選んだモデルです。作業はモデルの用途に合わせて分担します。
+            主担当はスレッドで選んだモデルです。作業はモデルの用途に合わせて分担します。
           </p>
           {error && (
             <button

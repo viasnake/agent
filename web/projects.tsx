@@ -1,3 +1,4 @@
+import { workspaceViews, type WorkspaceView } from "./workspace-nav.js";
 import { ProjectTeamStatus } from "./project-team.js";
 import { ProjectAnswer, ProjectDeliverable } from "./project-response.js";
 import { RecentPosts } from "./project-timeline.js";
@@ -13,7 +14,9 @@ export const projectStatusLabels = {
   delivered: "完了",
   waiting: "未完了",
   interrupted: "中断",
-  draft: "依頼前",
+  draft: "未投稿",
+  history: "履歴あり",
+  answered: "返信済み",
 };
 function StateLabel({ status }: { status: ProjectRow["status"] }) {
   return (
@@ -39,7 +42,7 @@ function TopicBoard({
 }) {
   const topics = [...rows].sort(
     (a, b) =>
-      (b.lastPostedAt ?? 0) - (a.lastPostedAt ?? 0) ||
+      (b.lastPostedAt ?? b.updatedAt) - (a.lastPostedAt ?? a.updatedAt) ||
       b.updatedAt - a.updatedAt ||
       a.id.localeCompare(b.id),
   );
@@ -47,7 +50,7 @@ function TopicBoard({
     <table className="topic-board" aria-label="スレッド一覧">
       <thead>
         <tr>
-          <th scope="col">案件・最新報告</th>
+          <th scope="col">件名・最新投稿</th>
           <th scope="col">状態</th>
           <th scope="col">更新</th>
         </tr>
@@ -64,7 +67,7 @@ function TopicBoard({
             <tr key={p.id}>
               <th scope="row">
                 <a
-                  href={"?project=" + encodeURIComponent(p.id)}
+                  href={"?thread=" + encodeURIComponent(p.id)}
                   onClick={(event) => {
                     if (
                       event.ctrlKey ||
@@ -85,15 +88,23 @@ function TopicBoard({
                 <StateLabel status={p.status} />
               </td>
               <td>
-                {p.lastPostedAt ? (
-                  <time dateTime={new Date(p.lastPostedAt).toISOString()}>
-                    {updatedTime.format(p.lastPostedAt)}
+                {p.lastPostedAt || p.updatedAt ? (
+                  <time
+                    dateTime={new Date(
+                      p.lastPostedAt ?? p.updatedAt,
+                    ).toISOString()}
+                  >
+                    {updatedTime.format(p.lastPostedAt ?? p.updatedAt)}
                   </time>
                 ) : (
                   "—"
                 )}
                 <small className="topic-total">
-                  <span className="topic-count">{p.postCount}</span> 投稿
+                  {p.postCount ? (
+                    <>
+                      <span className="topic-count">{p.postCount}</span> 投稿
+                    </>
+                  ) : null}
                 </small>
               </td>
             </tr>
@@ -176,6 +187,8 @@ function ProjectCard({
 }
 
 export function ProjectDashboard({
+  mode,
+  openMode,
   onOpen,
   onNew,
   onMenu,
@@ -183,17 +196,10 @@ export function ProjectDashboard({
   onOpen: (id: string) => void;
   onNew: () => void;
   onMenu: () => void;
+  mode: WorkspaceView;
+  openMode: (view: WorkspaceView) => void;
 }) {
-  type Mode = "home" | "list" | "activity";
-  const [mode, setMode] = useState<Mode>(() => {
-      const key = new URLSearchParams(location.search).get("projects");
-      return key === "board"
-        ? "list"
-        : key === "activity"
-          ? "activity"
-          : "home";
-    }),
-    [activity, setActivity] = useState<PortfolioPost[] | null>(null);
+  const [activity, setActivity] = useState<PortfolioPost[] | null>(null);
   const [rows, setRows] = useState<ProjectRow[] | null>(null),
     [error, setError] = useState(""),
     [answerError, setAnswerError] = useState(""),
@@ -201,19 +207,6 @@ export function ProjectDashboard({
   const [filter, setFilter] = useState<
     "all" | "decision" | "active" | "delivered" | "archived"
   >("all");
-  function openMode(value: Mode) {
-    setMode(value);
-    history.replaceState(
-      null,
-      "",
-      location.pathname +
-        (value === "list"
-          ? "?projects=board"
-          : value === "activity"
-            ? "?projects=activity"
-            : "?projects"),
-    );
-  }
   const showActivity = mode === "activity";
   const alive = useRef(false),
     generation = useRef(0);
@@ -288,12 +281,12 @@ export function ProjectDashboard({
     groups = {
       all: current,
       decision: decisions,
-      active: current.filter((p) => p.status !== "delivered"),
+      active: current.filter((p) => p.status === "working"),
       delivered: current.filter((p) => p.status === "delivered"),
       archived: all.filter((p) => p.archived),
     };
   const visible = groups[filter];
-  const working = current.filter((p) => p.status === "working"),
+  const working = groups.active,
     stopped = current.filter(
       (p) => p.status === "interrupted" || p.status === "waiting",
     ),
@@ -316,13 +309,16 @@ export function ProjectDashboard({
           <button
             className="mobile-only btn-text theme-secondary btn-sm"
             onClick={onMenu}
-            aria-label="セッション一覧を開く"
+            aria-label="スレッド一覧を開く"
           >
             <Icon name="menu" />
           </button>
-          <h1 id="projects-heading">プロジェクト</h1>
-          <button className="btn-solid theme-primary" onClick={onNew}>
-            <Icon name="plus" /> 新しい依頼
+          <h1 id="projects-heading">{workspaceViews[mode].label}</h1>
+          <button
+            className="mobile-only btn-solid theme-primary"
+            onClick={onNew}
+          >
+            <Icon name="plus" /> 新しいスレッド
           </button>
         </header>
         {error && (
@@ -340,25 +336,30 @@ export function ProjectDashboard({
         {!rows && !error && <p role="status">進捗を読み込み中…</p>}
         {rows && (
           <>
-            <nav className="work-nav" aria-label="プロジェクトの表示">
-              {(
-                [
-                  ["home", "概要"],
-                  ["list", "掲示板"],
-                  ["activity", "活動履歴"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  aria-pressed={mode === value}
-                  onClick={() => openMode(value)}
-                >
-                  {label}
-                </button>
-              ))}
-            </nav>
             {mode === "home" && (
               <>
+                <div className="work-summary">
+                  {(
+                    [
+                      ["decision", "回答待ち", decisions.length],
+                      ["active", "進行中", groups.active.length],
+                      ["delivered", "成果物", groups.delivered.length],
+                    ] as const
+                  ).map(([key, label, count]) => (
+                    <button
+                      type="button"
+                      key={key}
+                      className={"summary-" + key}
+                      onClick={() => {
+                        setFilter(key);
+                        openMode("board");
+                      }}
+                    >
+                      <span>{label}</span>
+                      <b>{count}</b>
+                    </button>
+                  ))}
+                </div>
                 {decisions.length > 0 && (
                   <section
                     className="work-decisions"
@@ -408,7 +409,7 @@ export function ProjectDashboard({
                 {current.length === 0 ? (
                   <section className="work-blank">
                     <Icon name="chat" />
-                    <h2>案件はまだありません</h2>
+                    <h2>スレッドはまだありません</h2>
                   </section>
                 ) : (
                   <div className="work-columns">
@@ -423,7 +424,9 @@ export function ProjectDashboard({
                       {working.length ? (
                         working.map(card)
                       ) : (
-                        <p className="work-empty">進行中の案件はありません</p>
+                        <p className="work-empty">
+                          進行中のスレッドはありません
+                        </p>
                       )}
                       {stopped.length > 0 && (
                         <section className="work-stopped">
@@ -460,7 +463,7 @@ export function ProjectDashboard({
                           className="btn-text theme-primary"
                           onClick={() => {
                             setFilter("delivered");
-                            openMode("list");
+                            openMode("board");
                           }}
                         >
                           すべての成果物
@@ -468,6 +471,21 @@ export function ProjectDashboard({
                       )}
                     </section>
                   </div>
+                )}
+                {current.length > 0 && (
+                  <section className="workspace-recent">
+                    <h2>最近のスレッド</h2>
+                    <TopicBoard
+                      rows={[...current]
+                        .sort(
+                          (a, b) =>
+                            (b.lastPostedAt ?? b.updatedAt) -
+                            (a.lastPostedAt ?? a.updatedAt),
+                        )
+                        .slice(0, 6)}
+                      onOpen={onOpen}
+                    />
+                  </section>
                 )}
               </>
             )}
@@ -480,12 +498,12 @@ export function ProjectDashboard({
                 )}
               </section>
             )}
-            {mode === "list" && (
-              <section aria-label="案件掲示板">
+            {mode === "board" && (
+              <section aria-label="掲示板">
                 <div
                   className="portfolio-filter"
                   role="group"
-                  aria-label="表示する案件"
+                  aria-label="表示するスレッド"
                 >
                   {(
                     [
@@ -502,7 +520,7 @@ export function ProjectDashboard({
                       onClick={() => setFilter(value)}
                     >
                       {
-                        ["すべて", "回答待ち", "対応中", "完了", "アーカイブ"][
+                        ["すべて", "回答待ち", "進行中", "完了", "アーカイブ"][
                           i
                         ]
                       }{" "}
@@ -513,7 +531,7 @@ export function ProjectDashboard({
                 {visible.length ? (
                   <TopicBoard rows={visible} onOpen={onOpen} />
                 ) : (
-                  <p className="work-empty">該当する案件はありません。</p>
+                  <p className="work-empty">該当するスレッドはありません。</p>
                 )}
               </section>
             )}

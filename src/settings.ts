@@ -576,7 +576,10 @@ export class SettingsStore {
           (role) => !parsed.models.some((m) => m.id === role.connectionId),
         )
       )
-        throw new AppError(400, "案件で使うモデルの接続を選び直してください");
+        throw new AppError(
+          400,
+          "スレッドで使うモデルの接続を選び直してください",
+        );
       const next: Settings = {
         ...parsed,
         projectModels: team,

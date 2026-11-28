@@ -29,7 +29,7 @@ const statuses = {
 };
 const fileKey = ({ path, status }: FileChange) => `${status}:${path}`;
 const repositoryLabel = (path: string) =>
-  path === "." ? "セッションの作業フォルダ" : path;
+  path === "." ? "スレッドの作業フォルダ" : path;
 function unavailable(result: GitReviewResult) {
   return result.kind === "unavailable"
     ? reasons[result.reason]
@@ -350,7 +350,7 @@ export function GitReview({ id, running }: { id: string; running: boolean }) {
         <p className="git-review-state">
           {repositories.limited
             ? "検索上限に達し、対象のリポジトリを確認できませんでした。"
-            : "セッション内に Git クローンはありません"}
+            : "スレッド内に Git クローンはありません"}
         </p>
       ) : (
         <>

@@ -223,7 +223,10 @@ test("project decisions resume with existing specialist reports and dashboard st
       async () => (await service.projects())[0]?.status === "decision",
     );
     const [row] = await service.projects();
-    assert.equal((await service.projects()).length, 1);
+    assert.deepEqual(
+      (await service.projects()).map((p) => p.status),
+      ["decision", "draft"],
+    );
     assert.equal(row!.members[0]!.status, "reported");
     await service.close();
     const reopened = await fixture([], { root: f.root });
@@ -615,10 +618,10 @@ test("project posts survive paging, retry, steering and reopening; the portfolio
       [directive],
     );
     assert.equal((await service.recentProjectPosts()).length, 12);
-    await assert.rejects(service.timeline(normal.id), { statusCode: 404 });
+    assert.deepEqual((await service.timeline(normal.id)).posts, []);
     const other = await service.create(
       randomUUID(),
-      "別案件",
+      "別スレッド",
       undefined,
       undefined,
       true,
@@ -870,7 +873,7 @@ test("a project freezes its worker pool and reviewer at admission and charges ev
   });
   await assert.rejects(
     f.service.send(id, randomUUID(), "次の依頼"),
-    /案件のモデル設定/,
+    /スレッドのモデル設定/,
   );
   assert.equal((await f.service.projects())[0]?.revision, 1);
   assert.equal((await f.service.timeline(id)).posts.length, posts.length);

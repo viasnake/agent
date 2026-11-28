@@ -8,6 +8,7 @@ import type { Conversation } from "./state.js";
 import { AppError, byteHash, hash } from "./security.js";
 import { gitWorkInput, gitWorkResult } from "./parallel-work.js";
 import {
+  emptyThread,
   memberAction,
   ProjectDoc,
   ProjectEvidenceDoc,
@@ -59,9 +60,7 @@ export class ProjectTeam {
     const p = await this.options
       .harness()
       .snapshot(ProjectDoc, owner.piId, ctx);
-    if (!owner.managedProject || !p)
-      throw new AppError(404, "プロジェクトがありません");
-    return p;
+    return p ?? emptyThread();
   }
   private async update<T>(
     owner: Conversation,
@@ -71,12 +70,14 @@ export class ProjectTeam {
   ) {
     const result = await this.options.harness().commit(async (tx) => {
       const p = await tx.doc(ProjectDoc, owner.piId);
-      if (!owner.managedProject || p.revision !== revision)
+      if (p.revision !== revision)
         throw new AppError(
           409,
           "指示が更新されました。現在の指示を確認してください",
         );
       const result = await fn(p, tx);
+      p.hasTeamPosts = true;
+      p.reviewRequired = true;
       if (post) await appendPost(tx, owner.piId, p, post);
       p.updatedAt = Date.now();
       return result;

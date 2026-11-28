@@ -2016,7 +2016,6 @@ button {
   padding: clamp(24px, 4cqi, 52px) clamp(16px, 5cqi, 64px) 64px;
 }
 .projects-header,
-.work-nav,
 .portfolio-filter,
 .work-column h2,
 .work-decisions h2,
@@ -2042,15 +2041,6 @@ button {
 .projects-header .btn-solid svg {
   width: 16px;
 }
-.work-nav,
-.portfolio-filter {
-  gap: 24px;
-}
-.work-nav {
-  margin: 16px 0 30px;
-  border-bottom: 1px solid var(--bs-border-muted);
-}
-.work-nav button,
 .portfolio-filter button,
 .project-link {
   background: transparent;
@@ -2058,16 +2048,6 @@ button {
   color: var(--bs-fg-2);
   font: inherit;
 }
-.work-nav button {
-  padding: 10px 1px 12px;
-  border-bottom: 2px solid transparent;
-}
-.work-nav button[aria-pressed="true"] {
-  color: var(--bs-fg-body);
-  font-weight: 650;
-  border-color: currentColor;
-}
-.work-nav button:hover,
 .portfolio-filter button:hover,
 .project-link:hover {
   color: var(--bs-primary-fg);
@@ -2336,9 +2316,6 @@ button {
 @container (max-width: 480px) {
   .project-body {
     padding-top: 16px;
-  }
-  .work-nav {
-    margin: 12px 0 20px;
   }
   .projects-header {
     gap: 6px;
@@ -2948,4 +2925,157 @@ button {
 }
 .team-roles dd {
   margin: 0;
+}
+
+/* Workspace navigation and home */
+.workspace-name {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px 18px;
+  font-weight: 700;
+  color: var(--bs-fg-body);
+}
+.workspace-name svg {
+  width: 24px;
+  height: 24px;
+  color: var(--bs-primary-fg);
+}
+#new-conversation {
+  background: var(--bs-primary-bg-subtle);
+  color: var(--bs-fg-body);
+  font-weight: 650;
+}
+.workspace-nav {
+  display: grid;
+  gap: 2px;
+  padding: 14px 0;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--bs-border-muted);
+}
+.workspace-nav .new-conversation {
+  border-radius: 6px;
+  min-height: 35px;
+  font-size: 0.875rem;
+}
+.workspace-nav [aria-current="page"] {
+  background: var(--bs-bg-3);
+  color: var(--bs-fg-body);
+  font-weight: 650;
+}
+.project-dashboard {
+  flex: 1;
+  background: var(--bs-bg-1);
+}
+.project-body {
+  max-width: 76rem;
+}
+.projects-header {
+  margin-bottom: 22px;
+}
+.work-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.work-summary button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: var(--bs-bg-body);
+  color: var(--bs-fg-body);
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 8px;
+  padding: 14px 18px;
+  font: inherit;
+}
+.work-summary button:hover {
+  border-color: var(--bs-primary-fg);
+}
+.work-summary span {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.work-summary b {
+  font-size: 1.45rem;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.work-summary .summary-decision b {
+  color: var(--bs-warning-fg);
+}
+.work-column,
+.workspace-recent,
+.project-body > section[aria-label="掲示板"] {
+  background: var(--bs-bg-body);
+  border: 1px solid var(--bs-border-muted);
+  border-radius: 8px;
+  padding: 18px;
+}
+.work-columns {
+  gap: 16px;
+  align-items: start;
+}
+.workspace-recent {
+  margin-top: 18px;
+}
+.workspace-recent h2 {
+  margin: 0 0 14px;
+  font-size: 1rem;
+}
+.work-decisions {
+  margin-bottom: 18px;
+}
+@media (min-width: 768px) {
+  .projects-header .mobile-only {
+    display: none;
+  }
+}
+@container (max-width:580px) {
+  .work-summary {
+    gap: 6px;
+  }
+  .work-summary button {
+    align-items: start;
+    flex-direction: column;
+    padding: 10px;
+  }
+  .work-column,
+  .workspace-recent,
+  .project-body > section[aria-label="掲示板"] {
+    padding: 12px;
+  }
+}
+
+@media (max-height: 550px) {
+  .sidebar {
+    padding-block: 6px;
+  }
+  .workspace-name {
+    display: none;
+  }
+  .workspace-nav {
+    display: flex;
+    gap: 2px;
+    padding-block: 4px;
+    margin-bottom: 0;
+  }
+  .workspace-nav .new-conversation {
+    justify-content: center;
+    padding: 4px;
+    min-height: 32px;
+  }
+  .workspace-nav .sidebar-label-text {
+    display: none;
+  }
+  .session-list-controls {
+    margin-top: 4px;
+  }
+  .sidebar-footer {
+    gap: 0;
+    padding-top: 3px;
+    margin-top: 4px;
+  }
 }

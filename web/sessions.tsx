@@ -111,8 +111,8 @@ export function SessionList({
           <Icon name="search" />
           <input
             type="search"
-            aria-label="セッションを検索"
-            placeholder="セッションを検索"
+            aria-label="スレッドを検索"
+            placeholder="スレッドを検索"
             maxLength={200}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -120,8 +120,8 @@ export function SessionList({
         </label>
         <button
           className="btn-text theme-secondary btn-sm icon-button"
-          aria-label={archived ? "通常のセッションを表示" : "アーカイブを表示"}
-          title={archived ? "セッションに戻る" : "アーカイブ"}
+          aria-label={archived ? "通常のスレッドを表示" : "アーカイブを表示"}
+          title={archived ? "スレッドに戻る" : "アーカイブ"}
           aria-pressed={archived}
           disabled={!!query.trim()}
           onClick={() => setArchived(!archived)}
@@ -129,8 +129,8 @@ export function SessionList({
           <Icon name="archive" />
         </button>
       </div>
-      <nav id="conversations" aria-label="セッション一覧">
-        {!!query.trim() && <h2 className="sidebar-label">セッション名</h2>}
+      <nav id="conversations" aria-label="スレッド一覧">
+        {!!query.trim() && <h2 className="sidebar-label">スレッド名</h2>}
         {visible.map((session, index) => (
           <div key={session.id}>
             {!query.trim() &&
@@ -164,7 +164,7 @@ export function SessionList({
               <button
                 className="session-more btn-text theme-secondary btn-sm icon-button"
                 aria-label={`「${session.title}」の操作`}
-                title="セッションの操作"
+                title="スレッドの操作"
                 aria-haspopup="dialog"
                 aria-controls={menuId}
                 disabled={disabled}
@@ -181,9 +181,7 @@ export function SessionList({
         ))}
         {!visible.length && (
           <p className="session-list-empty">
-            {query
-              ? "一致するセッション名はありません"
-              : "セッションはありません"}
+            {query ? "一致するスレッド名はありません" : "スレッドはありません"}
           </p>
         )}
         {!!query.trim() && (
@@ -202,7 +200,7 @@ export function SessionList({
           id={menuId}
           popover="auto"
           role="dialog"
-          aria-label="セッションの操作"
+          aria-label="スレッドの操作"
           className="session-popover"
           onToggle={(event) => {
             if (
@@ -253,7 +251,7 @@ export function SessionList({
             onClick={() => choose("delete")}
           >
             <Icon name="trash" />
-            セッションを削除
+            スレッドを削除
           </button>
           {target && (
             <a
@@ -340,12 +338,12 @@ function SessionDialog({
           }
         }}
       >
-        <h2 id={heading}>{deleting ? "セッションを削除" : "名前を変更"}</h2>
+        <h2 id={heading}>{deleting ? "スレッドを削除" : "名前を変更"}</h2>
         {deleting ? (
           <p className="session-dialog-title">{action.session.title}</p>
         ) : (
           <label className="form-label">
-            セッション名
+            スレッド名
             <input
               className="form-control"
               value={title}

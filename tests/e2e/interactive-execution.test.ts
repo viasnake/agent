@@ -53,7 +53,7 @@ test("the conversation displays live command output and submits a choice without
   try {
     browser = await chromium.launch({ args: ["--no-sandbox"] });
     const page = await browser.newPage({ colorScheme: "dark" });
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     const session = page.locator(
       `[data-session-id="${id}"] .conversation-item`,
     );

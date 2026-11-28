@@ -1,0 +1,41 @@
+import { Icon } from "./icons.js";
+
+export const workspaceViews = {
+  home: { label: "ホーム", icon: "home" },
+  board: { label: "掲示板", icon: "board" },
+  activity: { label: "更新履歴", icon: "timeline" },
+} as const;
+export type WorkspaceView = keyof typeof workspaceViews;
+
+export function workspaceView(query: URLSearchParams): WorkspaceView {
+  const value = query.get("view") ?? query.get("projects");
+  return value === "board" || value === "activity" ? value : "home";
+}
+export function WorkspaceNav({
+  current,
+  onOpen,
+}: {
+  current?: WorkspaceView;
+  onOpen: (view: WorkspaceView) => void;
+}) {
+  return (
+    <nav className="workspace-nav" aria-label="ワークスペース">
+      {(Object.keys(workspaceViews) as WorkspaceView[]).map((view) => (
+        <button
+          type="button"
+          className="btn-text theme-secondary new-conversation"
+          key={view}
+          title={workspaceViews[view].label}
+          aria-label={workspaceViews[view].label}
+          aria-current={view === current ? "page" : undefined}
+          onClick={() => onOpen(view)}
+        >
+          <Icon name={workspaceViews[view].icon} />
+          <span className="sidebar-label-text">
+            {workspaceViews[view].label}
+          </span>
+        </button>
+      ))}
+    </nav>
+  );
+}

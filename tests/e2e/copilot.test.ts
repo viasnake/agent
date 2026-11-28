@@ -71,7 +71,7 @@ test("Copilot device UI, reauthentication, disconnect and model picker in light 
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page.getByRole("button", { name: "設定", exact: true }).click();
     await page.getByRole("button", { name: "追加", exact: true }).click();
     await page
@@ -132,7 +132,7 @@ test("Copilot device UI, reauthentication, disconnect and model picker in light 
     assert.equal(credentials.refresh, "browser-copilot-refresh-secret");
     await returnToSession(page);
     await page
-      .getByRole("button", { name: "セッションのモデル", exact: true })
+      .getByRole("button", { name: "スレッドのモデル", exact: true })
       .click();
     const group = page.getByRole("group", {
       name: "GitHub Copilot",
@@ -156,7 +156,7 @@ test("Copilot device UI, reauthentication, disconnect and model picker in light 
     assert.equal(f.service.management().models[0]!.authorized, false);
     await returnToSession(page);
     await page
-      .getByRole("button", { name: "セッションのモデル", exact: true })
+      .getByRole("button", { name: "スレッドのモデル", exact: true })
       .click();
     await page
       .getByText("選択できるモデルがありません", { exact: true })

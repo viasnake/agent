@@ -48,12 +48,12 @@ test("Auto is configured from saved models and remains selected after an answer 
     colorScheme: "light",
   });
   const picker = page.getByRole("button", {
-    name: "セッションのモデル",
+    name: "スレッドのモデル",
     exact: true,
   });
   const screenshots = process.env.AGENT_AUTO_SCREENSHOTS;
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page.getByRole("button", { name: "設定", exact: true }).click();
     const panel = page
       .locator("details")

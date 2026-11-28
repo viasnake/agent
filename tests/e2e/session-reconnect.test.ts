@@ -8,8 +8,8 @@ import { createServer } from "../../src/server.js";
 
 test("a restarted server gets a new browser session and restores the live subscription without losing a draft", async () => {
   const f = await fixture();
-  const target = await f.service.create(randomUUID(), "削除するセッション");
-  const visible = await f.service.create(randomUUID(), "表示中のセッション");
+  const target = await f.service.create(randomUUID(), "削除するスレッド");
+  const visible = await f.service.create(randomUUID(), "表示中のスレッド");
   const probe = await createServer(f.service);
   const origin = await probe.listen({ host: "127.0.0.1", port: 0 });
   await probe.close();
@@ -24,32 +24,32 @@ test("a restarted server gets a new browser session and restores the live subscr
   });
   const page = await browser.newPage();
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     const subscription = page.waitForResponse(
       (response) =>
         response.url() === `${origin}/api/conversations/${visible.id}/events` &&
         response.ok(),
     );
     await page
-      .getByRole("button", { name: "表示中のセッション", exact: true })
+      .getByRole("button", { name: "表示中のスレッド", exact: true })
       .click();
     await subscription;
     await page.locator("#message").fill("保持する下書き");
     await page
       .getByRole("button", {
-        name: "「削除するセッション」の操作",
+        name: "「削除するスレッド」の操作",
         exact: true,
       })
       .click();
     await page
-      .getByRole("button", { name: "セッションを削除", exact: true })
+      .getByRole("button", { name: "スレッドを削除", exact: true })
       .click();
     const dialog = page.getByRole("dialog", {
-      name: "セッションを削除",
+      name: "スレッドを削除",
       exact: true,
     });
     assert.equal(await dialog.locator("p").count(), 1);
-    assert.equal(await dialog.locator("p").innerText(), "削除するセッション");
+    assert.equal(await dialog.locator("p").innerText(), "削除するスレッド");
     const started = performance.now();
     const deadline = setTimeout(
       () => server.server.closeAllConnections(),

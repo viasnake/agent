@@ -338,7 +338,7 @@ export function Settings({
       <header className="conversation-header">
         <button
           className="mobile-only btn-text theme-secondary btn-sm"
-          aria-label="セッション一覧を開く"
+          aria-label="スレッド一覧を開く"
           aria-controls="sidebar"
           aria-expanded={sidebarOpen}
           onClick={onOpenSidebar}

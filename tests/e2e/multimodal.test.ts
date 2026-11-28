@@ -41,7 +41,7 @@ test("Web settings save cloud connections and display private image inputs acros
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page.getByRole("button", { name: "設定", exact: true }).click();
     await page.getByRole("button", { name: "追加", exact: true }).click();
     await page
@@ -72,7 +72,7 @@ test("Web settings save cloud connections and display private image inputs acros
     await until(async () => f.service.settings.snapshot().models.length === 2);
     await returnToSession(page);
     await page
-      .getByRole("button", { name: "セッションのモデル", exact: true })
+      .getByRole("button", { name: "スレッドのモデル", exact: true })
       .click();
     await page
       .getByRole("searchbox", { name: "モデルを検索" })

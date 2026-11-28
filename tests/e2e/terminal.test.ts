@@ -25,7 +25,7 @@ test(
     try {
       const context = await browser.newContext({ colorScheme: "light" });
       const page = await context.newPage();
-      await page.goto(origin);
+      await page.goto(origin + "/?new");
       await page.locator("#message").fill("未送信の下書き");
       const popup = context.waitForEvent("page");
       await page.getByRole("link", { name: "ターミナル", exact: true }).click();

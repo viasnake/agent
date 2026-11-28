@@ -102,6 +102,9 @@ export type Project = {
   revision: number;
   lastPost?: { id: number; at: number };
   lastReport?: string;
+  hasTeamPosts?: boolean;
+  reviewRequired?: boolean;
+  answered?: boolean;
   brief: string;
   instruction: string;
   summary: string;
@@ -118,21 +121,22 @@ export type Project = {
     sources?: { label: string; quote: string }[];
   };
 };
+export const emptyThread = (): Project => ({
+  revision: 0,
+  brief: "",
+  instruction: "",
+  summary: "",
+  delivered: false,
+  updatedAt: 0,
+  members: [],
+});
 export const ProjectDoc = defineDoc<Project>({
   kind: "agent.project-thread",
   version: 1,
   scope: "conversation",
   history: "latest",
   fork: "initial",
-  initial: () => ({
-    revision: 0,
-    brief: "",
-    instruction: "",
-    summary: "",
-    delivered: false,
-    updatedAt: 0,
-    members: [],
-  }),
+  initial: emptyThread,
   checkpointWhen: (_v, _ops, info) => info.deltasSinceBase >= 32,
 });
 export type MemberUsage = {
@@ -178,9 +182,13 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
           ? "working"
           : p.delivered
             ? "delivered"
-            : p.revision
-              ? "waiting"
-              : "draft";
+            : p.answered
+              ? "answered"
+              : !p.revision && (p.instruction || p.lastReport)
+                ? "history"
+                : p.revision
+                  ? "waiting"
+                  : "draft";
   return {
     id: c.id,
     title: c.title,
@@ -188,6 +196,12 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
     archived: !!c.archived,
     status,
     revision: p.revision,
+    hasTeamPosts: !!(
+      p.hasTeamPosts ||
+      c.managedProject ||
+      p.assessment ||
+      p.members.length
+    ),
     postCount: p.lastPost?.id ?? 0,
     lastPostedAt: p.lastPost?.at,
     lastReport: p.lastReport,

@@ -1,4 +1,6 @@
 const paths = {
+  home: "m3 10 9-7 9 7v10h-6v-7H9v7H3z",
+  board: "M3 3h18v18H3zM3 9h18M9 9v12",
   timeline: "M5 3v18M9 6h11M9 12h8M9 18h11M3 6h4M3 12h4M3 18h4",
   usage: "M4 3v18h17M8 17v-4M13 17V9M18 17V5",
   sidebar: "M3 4h18v16H3zM9 4v16",

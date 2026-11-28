@@ -131,17 +131,15 @@ test("one directive starts a project; the portfolio shows independent teams and 
       colorScheme: "light",
     });
     await page.goto(origin);
-    await page.getByRole("button", { name: "概要" }).waitFor();
-    await page.getByRole("button", { name: "新しい依頼" }).click();
+    await page.getByRole("button", { name: "ホーム" }).waitFor();
+    await page.getByRole("button", { name: "新しいスレッド" }).click();
     await page.getByRole("heading", { name: "何を依頼しますか？" }).waitFor();
     await page
       .locator("#message")
       .fill("保存したパッチが一覧に出ない原因を調べて");
     await page.locator("#send").click();
     await until(async () => started === 2);
-    await page
-      .getByRole("button", { name: "プロジェクト", exact: true })
-      .click();
+    await page.getByRole("button", { name: "ホーム", exact: true }).click();
     await page
       .getByText("原因調査と回帰テストの設計を並行して進めています。", {
         exact: true,
@@ -158,6 +156,12 @@ test("one directive starts a project; the portfolio shows independent teams and 
       })
       .first()
       .waitFor();
+    await mkdir("test-results", { recursive: true });
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({
+      path: "test-results/workspace-home.png",
+      animations: "disabled",
+    });
     const background = dash.getByText(
       "初稿と校閲が完了しました。公開範囲の決定後に仕上げます。",
     );
@@ -175,11 +179,14 @@ test("one directive starts a project; the portfolio shows independent teams and 
       await dash.locator(".delivered-proof").innerText(),
       /依頼 · 請求番号と発行日を添えて/,
     );
-    await dash.getByRole("button", { name: "掲示板" }).click();
+    await page
+      .getByRole("navigation", { name: "ワークスペース" })
+      .getByRole("button", { name: "掲示板" })
+      .click();
     await page.reload();
     const board = dash.getByRole("table", { name: "スレッド一覧" });
     await board.getByRole("link", { name: "障害後の問い合わせ案内" }).waitFor();
-    assert.equal(new URL(page.url()).searchParams.get("projects"), "board");
+    assert.equal(new URL(page.url()).searchParams.get("view"), "board");
     assert.equal(await board.locator("tbody tr").count(), 3);
     const times = await board
       .locator("time")
@@ -210,10 +217,10 @@ test("one directive starts a project; the portfolio shows independent teams and 
     await intro.getByRole("heading", { name: "お問い合わせの際に" }).waitFor();
     await intro.getByRole("button", { name: "掲示板" }).click();
     await board.waitFor();
-    await dash.getByRole("button", { name: "活動履歴" }).click();
+    await page.getByRole("button", { name: "更新履歴" }).click();
     await dash.locator(".recent-posts .post-question").waitFor();
     await dash.locator(".recent-posts .post-start").first().waitFor();
-    await dash.getByRole("button", { name: "概要", exact: true }).click();
+    await page.getByRole("button", { name: "ホーム", exact: true }).click();
     for (const width of [1320, 390]) {
       await page.setViewportSize({ width, height: 900 });
       assert.ok(
@@ -245,7 +252,10 @@ test("one directive starts a project; the portfolio shows independent teams and 
     await until(async () =>
       (await f.service.projects()).every((p) => p.status === "delivered"),
     );
-    await dash.getByRole("button", { name: "掲示板" }).click();
+    await page
+      .getByRole("navigation", { name: "ワークスペース" })
+      .getByRole("button", { name: "掲示板" })
+      .click();
     await page.getByRole("button", { name: /完了 3/ }).click();
     await dash
       .getByRole("link", { name: "次回リリースの告知を準備", exact: true })
@@ -254,11 +264,11 @@ test("one directive starts a project; the portfolio shows independent teams and 
       .locator("#title")
       .getByText("次回リリースの告知を準備", { exact: true })
       .waitFor();
-    const stream = page.getByLabel("案件のタイムライン");
+    const stream = page.getByLabel("スレッドの投稿");
     await stream
       .getByText("既存ユーザー向けの案内が完成しました。", { exact: true })
       .waitFor();
-    assert.equal(new URL(page.url()).searchParams.get("project"), first.id);
+    assert.equal(new URL(page.url()).searchParams.get("thread"), first.id);
     await page.reload();
     await stream
       .getByText("回答：既存ユーザーのうち試用中の方に先行案内してください", {
@@ -272,7 +282,7 @@ test("one directive starts a project; the portfolio shows independent teams and 
     );
     await page.getByRole("tab", { name: "実行履歴", exact: true }).click();
     assert.equal(await page.locator("#message").isVisible(), false);
-    await page.getByRole("button", { name: "案件スレッドに戻る" }).click();
+    await page.getByRole("button", { name: "スレッドに戻る" }).click();
     await page.getByText("担当とモデル", { exact: true }).click();
     await page
       .getByText("作業を分担し、報告をまとめて納品します。", { exact: true })
@@ -369,7 +379,7 @@ test("project timeline retains the reader's place, accepts a decision inline and
     });
     await page.goto(origin);
     await page.locator(`[data-session-id="${id}"] .conversation-item`).click();
-    const stream = page.getByLabel("案件のタイムライン");
+    const stream = page.getByLabel("スレッドの投稿");
     const request = page.locator(".topic-request");
     await request.locator("summary").click();
     await request
@@ -384,7 +394,7 @@ test("project timeline retains the reader's place, accepts a decision inline and
     await start.locator("summary").click();
     assert.equal(
       await page
-        .getByRole("tab", { name: "案件スレッド" })
+        .getByRole("tab", { name: "スレッド" })
         .getAttribute("aria-selected"),
       "true",
     );
@@ -424,7 +434,7 @@ test("project timeline retains the reader's place, accepts a decision inline and
       );
     }
     await page.getByRole("tab", { name: "実行履歴", exact: true }).click();
-    await page.getByRole("tab", { name: "案件スレッド" }).click();
+    await page.getByRole("tab", { name: "スレッド" }).click();
     assert.equal(
       await page.locator("#message").inputValue(),
       "請求番号の範囲も確認してください",
@@ -511,10 +521,10 @@ test("saved model assignments route a project and stay visible on the board and 
     page.setDefaultTimeout(10000);
     await page.goto(origin);
     await page.getByRole("button", { name: "設定", exact: true }).click();
-    await page.getByText("案件のモデル分担", { exact: true }).click();
+    await page.getByText("モデルの分担", { exact: true }).click();
     const settings = page
       .locator("details")
-      .filter({ has: page.getByText("案件のモデル分担", { exact: true }) });
+      .filter({ has: page.getByText("モデルの分担", { exact: true }) });
     await settings
       .getByRole("combobox", { name: "作業", exact: true })
       .selectOption({ label: "Google · " + worker });
@@ -537,11 +547,20 @@ test("saved model assignments route a project and stay visible on the board and 
       "請求書の再送時に重複する原因を調査",
       openai,
       lead,
-      true,
     );
     engine.setResponses([
+      answer("はい、同じスレッドで調査結果を共有できます。"),
+    ]);
+    await f.service.send(id, randomUUID(), "ここで調査結果を受け取れますか？");
+    await until(async () =>
+      (await f.service.projects()).some(
+        (p) => p.id === id && p.status === "answered",
+      ),
+    );
+    assert.equal((await f.service.view(id)).project?.hasTeamPosts, false);
+    engine.setResponses([
       call("project_team", {
-        revision: 1,
+        revision: 2,
         assignments: [{ role: "原因調査", task: "再送時の保存処理を確認する" }],
       }),
       (_c, _o, _s, m) => {
@@ -551,7 +570,7 @@ test("saved model assignments route a project and stay visible on the board and 
         );
       },
       call("project_report", {
-        revision: 1,
+        revision: 2,
         stage: "delivered",
         summary: "同じ請求番号の再送は既存の1件を返すようにします。",
         deliverable: "請求番号をキーに既存の請求書を返し、二重登録を防ぎます。",
@@ -574,7 +593,7 @@ test("saved model assignments route a project and stay visible on the board and 
       async () => (await f.service.projects())[0]?.status === "delivered",
     );
     await page.goto(origin + "/?project=" + id);
-    const stream = page.getByLabel("案件のタイムライン");
+    const stream = page.getByLabel("スレッドの投稿");
     await stream
       .locator(".post-report")
       .getByText(worker, { exact: true })
@@ -607,7 +626,6 @@ test("saved model assignments route a project and stay visible on the board and 
       "先行リリースの案内を準備",
       openai,
       lead,
-      true,
     );
     engine.setResponses([
       call("request_user_input", {
@@ -623,6 +641,36 @@ test("saved model assignments route a project and stay visible on the board and 
     await until(async () =>
       (await f.service.projects()).some((p) => p.status === "decision"),
     );
+    const quick = await f.service.create(
+      randomUUID(),
+      "月次レポートの提出先",
+      openai,
+      lead,
+    );
+    engine.setResponses([answer("提出先は共有フォルダです。")]);
+    await f.service.send(quick.id, randomUUID(), "月次レポートの提出先は？");
+    await until(async () =>
+      (await f.service.projects()).some(
+        (p) => p.id === quick.id && p.status === "answered",
+      ),
+    );
+    await page.goto(origin);
+    await page.getByRole("heading", { name: "ホーム", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "最近のスレッド" }).waitFor();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: "test-results/workspace-mobile.png",
+      animations: "disabled",
+    });
+    await page
+      .getByRole("button", { name: "スレッド一覧を開く", exact: true })
+      .click();
+    await page
+      .getByRole("navigation", { name: "ワークスペース" })
+      .getByRole("button", { name: "掲示板" })
+      .click();
+    await page.getByRole("table", { name: "スレッド一覧" }).waitFor();
+    await page.setViewportSize({ width: 1320, height: 900 });
     await page.goto(origin + "/?projects=board");
     const board = page.getByRole("table", { name: "スレッド一覧" });
     await board.getByText("先行案内の対象は既存ユーザーだけですか？").waitFor();
@@ -633,6 +681,18 @@ test("saved model assignments route a project and stay visible on the board and 
       path: "test-results/project-model-board.png",
       animations: "disabled",
     });
+    await board.getByRole("link", { name: "月次レポートの提出先" }).click();
+    await page
+      .getByLabel("スレッドの履歴")
+      .getByText("提出先は共有フォルダです。")
+      .waitFor();
+    await page.goBack();
+    await board.waitFor();
+    await page.goForward();
+    await page
+      .getByLabel("スレッドの履歴")
+      .getByText("提出先は共有フォルダです。")
+      .waitFor();
   } finally {
     await browser.close();
     await app.close();
