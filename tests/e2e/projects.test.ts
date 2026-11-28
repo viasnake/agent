@@ -1,3 +1,5 @@
+import { mkdir } from "node:fs/promises";
+import { fauxProvider } from "@earendil-works/pi-ai";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -271,7 +273,7 @@ test("one directive starts a project; the portfolio shows independent teams and 
     await page.getByRole("tab", { name: "実行履歴", exact: true }).click();
     assert.equal(await page.locator("#message").isVisible(), false);
     await page.getByRole("button", { name: "案件スレッドに戻る" }).click();
-    await page.getByText("チームの分担", { exact: true }).click();
+    await page.getByText("担当とモデル", { exact: true }).click();
     await page
       .getByText("作業を分担し、報告をまとめて納品します。", { exact: true })
       .waitFor();
@@ -453,6 +455,185 @@ test("project timeline retains the reader's place, accepts a decision inline and
     );
   } finally {
     release();
+    await browser.close();
+    await app.close();
+    await f.service.close();
+  }
+});
+
+test("saved model assignments route a project and stay visible on the board and in its posts", async () => {
+  const lead = "gpt-4.1",
+    worker = "gemini-2.5-flash",
+    reviewer = "gpt-4.1-mini";
+  const engine = fauxProvider({
+    tokensPerSecond: Infinity,
+    models: [lead, worker, reviewer].map((id) => ({ id })),
+  });
+  const f = await fixture([], {
+    provider: engine.provider,
+    modelCatalog: async () => [lead, reviewer],
+  });
+  const openai = randomUUID(),
+    google = randomUUID();
+  const origin = "http://127.0.0.1:3887";
+  f.config.server.origins = [origin];
+  const app = await createServer(f.service, resolve("dist/web") + "/");
+  const browser = await chromium.launch({ args: ["--no-sandbox"] });
+  try {
+    await f.service.saveSettings({
+      revision: 0,
+      models: [
+        {
+          id: openai,
+          provider: "openai",
+          name: "OpenAI",
+          key: "fixture-openai",
+          model: lead,
+        },
+        {
+          id: google,
+          provider: "google",
+          name: "Google",
+          key: "fixture-google",
+          model: worker,
+        },
+      ],
+      defaultModel: openai,
+      mcp: [],
+      instructions: "",
+      limits: { modelRequests: 20, runSeconds: 60, commandSeconds: 10 },
+    });
+    await app.listen({ host: "127.0.0.1", port: 3887 });
+    const page = await browser.newPage({
+      viewport: { width: 1320, height: 900 },
+      colorScheme: "light",
+    });
+    page.setDefaultTimeout(10000);
+    await page.goto(origin);
+    await page.getByRole("button", { name: "設定", exact: true }).click();
+    await page.getByText("案件のモデル分担", { exact: true }).click();
+    const settings = page
+      .locator("details")
+      .filter({ has: page.getByText("案件のモデル分担", { exact: true }) });
+    await settings
+      .getByRole("combobox", { name: "作業", exact: true })
+      .selectOption({ label: "Google · " + worker });
+    await settings.getByLabel("用途（任意）").fill("原因調査と再現テスト");
+    await settings
+      .getByRole("combobox", { name: "レビュー", exact: true })
+      .selectOption({ label: "OpenAI · " + reviewer });
+    await page.getByRole("button", { name: "設定を保存", exact: true }).click();
+    await until(
+      async () =>
+        f.service.management().projectModels?.reviewer?.model === reviewer,
+    );
+    await mkdir("test-results", { recursive: true });
+    await settings.scrollIntoViewIfNeeded();
+    await settings.screenshot({
+      path: "test-results/project-model-settings.png",
+    });
+    const { id } = await f.service.create(
+      randomUUID(),
+      "請求書の再送時に重複する原因を調査",
+      openai,
+      lead,
+      true,
+    );
+    engine.setResponses([
+      call("project_team", {
+        revision: 1,
+        assignments: [{ role: "原因調査", task: "再送時の保存処理を確認する" }],
+      }),
+      (_c, _o, _s, m) => {
+        assert.equal(m.id, worker);
+        return fauxAssistantMessage(
+          '{"action":"report","summary":"同じ請求番号を再送すると、2件目のレコードが作られます。"}',
+        );
+      },
+      call("project_report", {
+        revision: 1,
+        stage: "delivered",
+        summary: "同じ請求番号の再送は既存の1件を返すようにします。",
+        deliverable: "請求番号をキーに既存の請求書を返し、二重登録を防ぎます。",
+        evidence: "依頼に記載された再現条件と対策を照合。",
+      }),
+      (_c, _o, _s, m) => {
+        assert.equal(m.id, reviewer);
+        return fauxAssistantMessage(
+          '{"verdict":"accept","reason":"再送時に1件に保つ対策を確認。","quotes":["同じ請求番号の再送で2件登録"]}',
+        );
+      },
+      answer("調査結果を報告しました。"),
+    ]);
+    await f.service.send(
+      id,
+      randomUUID(),
+      "同じ請求番号の再送で2件登録されます。原因と対策を報告してください。",
+    );
+    await until(
+      async () => (await f.service.projects())[0]?.status === "delivered",
+    );
+    await page.goto(origin + "/?project=" + id);
+    const stream = page.getByLabel("案件のタイムライン");
+    await stream
+      .locator(".post-report")
+      .getByText(worker, { exact: true })
+      .waitFor();
+
+    await stream
+      .locator(".post-review")
+      .getByText(reviewer, { exact: true })
+      .waitFor();
+    await stream
+      .locator(".post-delivery")
+      .getByText(lead, { exact: true })
+      .waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({
+      path: "test-results/project-model-thread.png",
+      animations: "disabled",
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.ok(
+      await stream.evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
+    );
+    await page.screenshot({
+      path: "test-results/project-model-mobile.png",
+      animations: "disabled",
+    });
+    await page.setViewportSize({ width: 1320, height: 900 });
+    const pending = await f.service.create(
+      randomUUID(),
+      "先行リリースの案内を準備",
+      openai,
+      lead,
+      true,
+    );
+    engine.setResponses([
+      call("request_user_input", {
+        question: "先行案内の対象は既存ユーザーだけですか？",
+        options: ["既存ユーザーのみ", "新規ユーザーも含める"],
+      }),
+    ]);
+    await f.service.send(
+      pending.id,
+      randomUUID(),
+      "先行リリースの案内を準備してください。",
+    );
+    await until(async () =>
+      (await f.service.projects()).some((p) => p.status === "decision"),
+    );
+    await page.goto(origin + "/?projects=board");
+    const board = page.getByRole("table", { name: "スレッド一覧" });
+    await board.getByText("先行案内の対象は既存ユーザーだけですか？").waitFor();
+    await board
+      .getByText("同じ請求番号の再送は既存の1件を返すようにします。")
+      .waitFor();
+    await page.screenshot({
+      path: "test-results/project-model-board.png",
+      animations: "disabled",
+    });
+  } finally {
     await browser.close();
     await app.close();
     await f.service.close();

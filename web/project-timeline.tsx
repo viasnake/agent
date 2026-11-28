@@ -77,12 +77,17 @@ function Post({
       {time.format(post.at)}
     </time>
   );
-  if (post.kind === "start" && !project) {
+  if ((post.kind === "start" || post.kind === "review") && !project) {
     return (
-      <article className="timeline-post post-start" data-post-id={post.id}>
+      <article
+        className={"timeline-post post-notice post-" + post.kind}
+        data-post-id={post.id}
+      >
         <details className="start-notice">
           <summary>
-            <span>{name}が着手</span>
+            <span>{name}</span>
+            {post.model && <small className="post-model">{post.model}</small>}
+            <span>{post.kind === "start" ? "着手" : "レビュー開始"}</span>
             {timestamp}
             {number}
             <Icon name="chevron" />
@@ -99,29 +104,10 @@ function Post({
       }
       data-post-id={post.id}
     >
-      <div className="post-author">
-        <span className={"post-avatar actor-" + post.actor} aria-hidden="true">
-          {post.actor === "member" ? (
-            Array.from(name)[0]
-          ) : (
-            <Icon
-              name={
-                post.actor === "user"
-                  ? "chat"
-                  : post.actor === "reviewer"
-                    ? "check"
-                    : post.actor === "system"
-                      ? "settings"
-                      : "agent"
-              }
-            />
-          )}
-        </span>
-        {!project && <strong>{name}</strong>}
-      </div>
       <div className="post-main">
         <header>
-          {project && <strong>{name}</strong>}
+          <strong>{name}</strong>
+          {post.model && <span className="post-model">{post.model}</span>}
           <span className="post-kind">{kindLabel[post.kind]}</span>
           {timestamp}
           {number}

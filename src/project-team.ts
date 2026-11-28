@@ -28,6 +28,12 @@ type Generate = (
   prompt: string,
   signal: AbortSignal,
 ) => Promise<AssistantMessage>;
+export type ProjectAgent = {
+  model: string;
+  configId?: string;
+  specialist: Generate;
+  specialty?: string;
+};
 const assessment = z
   .object({
     verdict: z.enum(["accept", "revise"]),
@@ -159,7 +165,7 @@ export class ProjectTeam {
     input: z.infer<typeof projectReportInput>,
     records: { tool: string; output: string }[],
     signal: AbortSignal,
-    generate: Generate,
+    reviewer: ProjectAgent,
     unavailable: Set<string>,
   ) {
     if (!input.evidence)
@@ -201,6 +207,8 @@ export class ProjectTeam {
       throw new AppError(409, "担当の作業結果を待ってください");
     const key = hash([
       input.revision,
+      reviewer.configId,
+      reviewer.model,
       this.options.redact(JSON.stringify(submission)),
     ]);
     if (unavailable.has(key))
@@ -268,7 +276,7 @@ export class ProjectTeam {
       try {
         result = await this.verifyDelivery(
           owner,
-          generate,
+          reviewer.specialist,
           signal,
           this.options.redact(prompt),
           !!deliverable,
@@ -429,14 +437,9 @@ export class ProjectTeam {
     plan: TeamInput,
     signal: AbortSignal,
     seconds: number,
-    generate: (
-      system: string,
-      prompt: string,
-      signal: AbortSignal,
-    ) => Promise<AssistantMessage>,
+    workers: ProjectAgent[],
   ) {
     const members: Member[] = plan.assignments.map((a) => ({
-      ...a,
       role: this.options.redact(a.role),
       task: this.options.redact(a.task),
       id: randomUUID(),
@@ -449,10 +452,21 @@ export class ProjectTeam {
       (p) => {
         if (p.members.length + members.length > 32)
           throw new AppError(409, "この指示の担当数の上限に達しました");
+        const slots = plan.assignments.map((assignment, i) => {
+          const slot =
+            assignment.worker === undefined
+              ? (p.members.length + i) % workers.length
+              : assignment.worker - 1;
+          if (!workers[slot])
+            throw new AppError(400, "設定された作業モデルを選んでください");
+          return slot;
+        });
+        for (const [i, member] of members.entries())
+          member.model = workers[slots[i]!]!.model;
         p.members.push(...members);
         if (p.assessment?.verdict !== "revise") delete p.assessment;
         p.delivered = false;
-        return { brief: p.brief, instruction: p.instruction };
+        return { brief: p.brief, instruction: p.instruction, slots };
       },
       {
         kind: "assignment",
@@ -479,7 +493,8 @@ export class ProjectTeam {
       );
       return task;
     };
-    const runMember = async (member: Member) => {
+    const { slots, ...request } = directive;
+    const runMember = async (member: Member, index: number) => {
       const update = (
         patch: Partial<Member>,
         post?: { kind: PostContent["kind"]; text: string },
@@ -509,7 +524,7 @@ export class ProjectTeam {
             turn === 1 ? { kind: "start", text: member.task } : undefined,
           );
           const prompt = JSON.stringify({
-            ...directive,
+            ...request,
             role: member.role,
             task: member.task,
             context: this.options.redact(plan.context ?? ""),
@@ -519,7 +534,7 @@ export class ProjectTeam {
           });
           const raw = await this.dispatch(
             owner,
-            generate,
+            workers[slots[index]!]!.specialist,
             memberInstructions,
             prompt,
             signal,
@@ -687,11 +702,11 @@ export class ProjectTeam {
         });
       }
     };
-    const queue = members.values();
+    const queue = members.entries();
     const consume = async () => {
-      for (const member of queue) {
+      for (const [index, member] of queue) {
         if (signal.aborted) break;
-        await runMember(member);
+        await runMember(member, index);
       }
     };
     await Promise.all([consume(), consume()]);

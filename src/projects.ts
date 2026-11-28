@@ -22,6 +22,7 @@ export const teamInput = z
       .array(
         z
           .object({
+            worker: z.number().int().min(1).max(4).optional(),
             role: z.string().trim().min(1).max(80),
             task: z.string().trim().min(1).max(1800),
           })
@@ -82,6 +83,7 @@ export const memberAction = z.discriminatedUnion("action", [
     .strict(),
 ]);
 export type Member = {
+  model?: string;
   id: string;
   role: string;
   task: string;
@@ -92,8 +94,14 @@ export type Member = {
   file?: string;
 };
 export type Project = {
+  models?: {
+    lead: string;
+    reviewer: string;
+    workers?: { slot: number; model: string; specialty?: string }[];
+  };
   revision: number;
   lastPost?: { id: number; at: number };
+  lastReport?: string;
   brief: string;
   instruction: string;
   summary: string;
@@ -182,6 +190,8 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
     revision: p.revision,
     postCount: p.lastPost?.id ?? 0,
     lastPostedAt: p.lastPost?.at,
+    lastReport: p.lastReport,
+    models: p.models,
     instruction: p.instruction.slice(0, 400),
     summary: p.summary,
     nextStep: p.nextStep,

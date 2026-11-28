@@ -751,3 +751,127 @@ test("new specialist evidence continues an unfinished project; repeated status a
     "interrupted",
   );
 });
+
+test("a project freezes its worker pool and reviewer at admission and charges every model to the same run", async (t) => {
+  const f = await fixture();
+  t.after(() => f.service.close());
+  const connectionId = randomUUID();
+  const otherConnection = randomUUID();
+  const worker = { connectionId, model: "gpt-4.1-mini" };
+  const reviewer = { connectionId: otherConnection, model: "gpt-4.1" };
+  const settings = {
+    models: [
+      {
+        id: connectionId,
+        provider: "openai",
+        key: "fixture-key-one",
+        model: "faux-1",
+      },
+      { id: otherConnection, provider: "openai", key: "fixture-key-two" },
+    ],
+    defaultModel: connectionId,
+    mcp: [],
+    instructions: "",
+    limits: { modelRequests: 20, runSeconds: 60, commandSeconds: 10 },
+    projectModels: {
+      workers: [worker, { ...reviewer, specialty: "集計" }],
+      reviewer,
+    },
+  };
+  await f.service.saveSettings({ ...settings, revision: 0 });
+  const { id } = await f.service.create(
+    randomUUID(),
+    "リリース判定",
+    connectionId,
+    "faux-1",
+    true,
+  );
+  const seen: [string, string][] = [];
+  const report: FauxResponseFactory = (context, _options, _state, model) => {
+    const input = JSON.parse(String(context.messages.at(-1)!.content));
+    seen.push([input.role, model.id]);
+    return fauxAssistantMessage(
+      JSON.stringify({
+        action: "report",
+        summary: input.task + "を確認しました。",
+      }),
+    );
+  };
+  f.faux.setResponses([
+    async (_context, _options, _state, model) => {
+      assert.equal(model.id, "faux-1");
+      await f.service.saveSettings({
+        ...settings,
+        revision: 1,
+        projectModels: null,
+      });
+      return fauxAssistantMessage(
+        fauxToolCall("project_team", {
+          revision: 1,
+          assignments: [
+            { role: "調査", task: "保存処理" },
+            { role: "再現テスト", task: "再送時の件数" },
+          ],
+        }),
+        { stopReason: "toolUse" },
+      );
+    },
+    report,
+    report,
+    call("project_team", {
+      revision: 1,
+      assignments: [{ role: "集計", task: "合計件数", worker: 2 }],
+    }),
+    report,
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary: "12件の成功を確認しました。",
+      deliverable: "12件成功。",
+      evidence: "依頼文の試験結果",
+    }),
+    (_context, _options, _state, model) => {
+      seen.push(["レビュー", model.id]);
+      return fauxAssistantMessage(
+        '{"verdict":"accept","reason":"元の記録と一致","quotes":["12件成功"]}',
+      );
+    },
+    answer("完了"),
+  ]);
+  await f.service.send(id, randomUUID(), "結果をまとめてください。12件成功。");
+  await until(
+    async () => (await f.service.conversation(id)).status !== "running",
+  );
+  assert.deepEqual(
+    new Map(seen),
+    new Map([
+      ["調査", worker.model],
+      ["再現テスト", reviewer.model],
+      ["集計", reviewer.model],
+      ["レビュー", reviewer.model],
+    ]),
+  );
+  assert.equal((await f.service.conversation(id)).requests, 8);
+  const [project] = await f.service.projects();
+  assert.equal(project!.status, "delivered");
+  assert.equal(project!.models?.workers?.[1]?.specialty, "集計");
+  const posts = (await f.service.timeline(id)).posts;
+  assert.equal(posts.find((p) => p.kind === "review")?.model, reviewer.model);
+  assert.ok(
+    posts
+      .filter((p) => p.actor === "member")
+      .every((p) => p.model === new Map(seen).get(p.name!)),
+  );
+  assert.equal(posts.at(-1)?.model, "faux-1");
+  await f.service.saveSettings({
+    ...settings,
+    revision: 2,
+    projectModels: { workers: [{ connectionId, model: "missing-model" }] },
+  });
+  await assert.rejects(
+    f.service.send(id, randomUUID(), "次の依頼"),
+    /案件のモデル設定/,
+  );
+  assert.equal((await f.service.projects())[0]?.revision, 1);
+  assert.equal((await f.service.timeline(id)).posts.length, posts.length);
+});

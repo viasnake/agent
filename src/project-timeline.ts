@@ -30,6 +30,7 @@ export type PostContent = {
   text: string;
   name?: string;
   memberId?: string;
+  model?: string;
   detail?: string;
   deliverable?: string;
   file?: string;
@@ -69,11 +70,37 @@ export async function appendPost(
   const id = (p.lastPost?.id ?? 0) + 1,
     at = Math.max(Date.now(), p.lastPost?.at ?? 0);
   const page = await tx.doc(TimelineDoc, piId, pageKey(id), null);
-  page.posts.push({ ...content, id, at, revision: p.revision });
+  const model =
+    content.actor === "member"
+      ? p.members.find((m) => m.id === content.memberId)?.model
+      : content.actor === "lead" || content.actor === "reviewer"
+        ? p.models?.[content.actor]
+        : undefined;
+  page.posts.push({
+    ...(model && { model }),
+    ...content,
+    id,
+    at,
+    revision: p.revision,
+  });
   if (content.kind === "delivery") {
     if (content.deliverable) p.deliveryPost = id;
     else delete p.deliveryPost;
   }
+  if (
+    [
+      "directive",
+      "progress",
+      "report",
+      "revision",
+      "question",
+      "decision",
+      "delivery",
+      "interrupted",
+      "review_error",
+    ].includes(content.kind)
+  )
+    p.lastReport = content.text.slice(0, 280);
   p.lastPost = { id, at };
 }
 export async function readPosts(

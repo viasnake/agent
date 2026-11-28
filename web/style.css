@@ -2408,36 +2408,6 @@ button {
   padding: 12px 0;
   min-width: 0;
 }
-.post-avatar {
-  display: grid;
-  place-items: center;
-  flex: 0 0 32px;
-  height: 32px;
-  border: 0;
-  border-radius: 9px;
-  font-weight: 700;
-  color: var(--bs-fg-1);
-  background: var(--bs-bg-2);
-}
-.post-avatar.actor-lead {
-  background: var(--bs-fg-body);
-  color: var(--bs-bg-body);
-}
-.post-avatar.actor-reviewer {
-  background: var(--bs-success-bg-subtle);
-  color: var(--bs-success-fg);
-}
-.post-avatar.actor-member {
-  background: var(--bs-info-bg-subtle);
-  color: var(--bs-info-fg);
-}
-.post-avatar.actor-user {
-  border-radius: 50%;
-}
-.post-avatar svg {
-  width: 17px;
-  height: 17px;
-}
 .post-main {
   min-width: 0;
   flex: 1;
@@ -2451,8 +2421,9 @@ button {
 .post-main strong {
   font-size: 0.9rem;
 }
-.post-start:has(.start-notice) {
-  padding: 2px 0 2px 44px;
+.post-notice {
+  padding: 3px 0;
+  color: var(--bs-fg-2);
 }
 .start-notice {
   color: var(--bs-fg-2);
@@ -2591,7 +2562,6 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-inline-start: 44px;
 }
 @media (max-width: 650px) {
   .timeline-stream {
@@ -2716,9 +2686,6 @@ button {
   width: 5.5rem;
 }
 .topic-board th:nth-child(3) {
-  width: 4rem;
-}
-.topic-board th:nth-child(4) {
   width: 8.5rem;
 }
 .topic-board thead th {
@@ -2855,10 +2822,7 @@ button {
     width: 4.3rem;
   }
   .topic-board th:nth-child(3) {
-    width: 3.2rem;
-  }
-  .topic-board th:nth-child(4) {
-    width: 5rem;
+    width: 6.6rem;
   }
   .topic-board :is(th, td) {
     padding: 10px 4px;
@@ -2884,7 +2848,7 @@ button {
   }
   .topic-board tbody tr {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 1fr auto;
     gap: 6px 14px;
     align-items: baseline;
     padding: 14px 0;
@@ -2898,38 +2862,51 @@ button {
   .topic-board tbody th {
     grid-column: 1 / -1;
   }
-  .topic-board tbody .topic-count::after {
-    content: " 投稿";
+  .topic-board tbody td:last-child {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
   }
 }
-
-.recent-posts .post-author {
-  display: contents;
+.topic-total {
+  display: block;
+  font-size: 0.75rem;
 }
-.timeline-stream .timeline-post:not(.post-start) {
-  display: grid;
-  grid-template-columns: 5.6rem minmax(0, 1fr);
-  gap: 18px;
+.timeline-stream .timeline-post {
   border-top: 1px solid var(--bs-border-muted);
-  padding-block: 13px;
 }
-.timeline-stream .post-author {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
+.timeline-stream .timeline-post:not(.post-notice) {
+  padding-block: 14px;
 }
-.timeline-stream .post-author strong {
-  font-size: 0.77rem;
-  line-height: 1.4;
+.timeline-stream .post-main > p {
+  max-width: 72ch;
+  margin-top: 6px;
+}
+.post-kind {
+  font-weight: 600;
+}
+.post-model {
+  color: var(--bs-fg-2);
+  font-size: 0.76rem;
   overflow-wrap: anywhere;
 }
-.timeline-stream .post-avatar {
-  width: 30px;
-  flex: 0 0 30px;
+.start-notice {
+  width: 100%;
 }
-.timeline-stream .post-start:has(.start-notice) {
-  padding-inline-start: calc(5.6rem + 18px);
+.post-notice .post-number {
+  margin-left: auto;
+}
+.post-notice summary {
+  flex-wrap: wrap;
+  min-height: 30px;
+}
+.timeline-stream .post-revision .post-main,
+.timeline-stream .post-delivery .post-main {
+  border-inline-start: 3px solid var(--bs-warning-fg);
+  padding-inline-start: 12px;
+}
+.timeline-stream .post-delivery .post-main {
+  border-color: var(--bs-success-fg);
 }
 .topic-intro:has(details[open]) {
   max-height: min(70%, 34rem);
@@ -2937,16 +2914,16 @@ button {
 .topic-intro .delivered-sheet {
   max-height: none;
 }
-@media (max-width: 650px) {
-  .timeline-stream .timeline-post:not(.post-start) {
-    grid-template-columns: 3.2rem minmax(0, 1fr);
-    gap: 8px;
-  }
-  .timeline-stream .post-start:has(.start-notice) {
-    padding-inline-start: calc(3.2rem + 8px);
-  }
+.project-composer .composer-input {
+  min-height: 2.4rem;
+  padding: 8px 14px 2px;
 }
-
+.project-composer .composer-toolbar {
+  padding: 3px 8px 6px;
+}
+.project-composer .composer {
+  border-radius: 10px;
+}
 .composer-dock[hidden] {
   display: none;
 }

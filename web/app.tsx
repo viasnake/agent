@@ -346,7 +346,14 @@ function Chat({
               </button>
             </div>
           )}
-          <div className="composer-dock" hidden={projectHistory}>
+          <div
+            className={
+              timelineVisible
+                ? "composer-dock project-composer"
+                : "composer-dock"
+            }
+            hidden={projectHistory}
+          >
             {!timelineVisible && (
               <ThreadPrimitive.ScrollToBottom
                 className="scroll-bottom btn-outline theme-secondary btn-sm"
@@ -376,7 +383,7 @@ function Chat({
                       : "メッセージを入力…"
                 }
                 className="composer-input"
-                rows={2}
+                rows={timelineVisible ? 1 : 2}
                 maxRows={8}
                 maxLength={64000}
                 disabled={sending}

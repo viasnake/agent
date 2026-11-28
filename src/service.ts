@@ -3,7 +3,7 @@ import {
   readPosts,
   type PortfolioPost,
 } from "./project-timeline.js";
-import { ProjectTeam } from "./project-team.js";
+import { ProjectTeam, type ProjectAgent } from "./project-team.js";
 import { projectTools } from "./project-tools.js";
 import {
   ProjectDoc,
@@ -72,7 +72,13 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Config } from "./config.js";
 import { ModelAuth } from "./model-auth.js";
 import { SettingsStore, modelCredential } from "./settings.js";
-import type { AutoModelConfig, McpConfig, ModelConfig } from "./settings.js";
+import type {
+  AutoModelConfig,
+  McpConfig,
+  ModelConfig,
+  Settings,
+  ProjectModelSelection,
+} from "./settings.js";
 import { RemoteMcp } from "./mcp.js";
 import type { McpStatus, RemoteOptions } from "./mcp.js";
 import { ConversationsDoc, promoteRecentModel } from "./state.js";
@@ -175,6 +181,7 @@ type Active = {
   controller: AbortController;
   command?: LongCommand;
   projectDispatch?: AbortController;
+  team?: { workers: ProjectAgent[]; reviewer: ProjectAgent };
   unavailableReviews?: Set<string>;
   projectFollowup?: { version: number; evidence: Set<string> };
   skillMaintenance?: SkillMaintenance;
@@ -1089,6 +1096,61 @@ export class AgentService {
       });
     }
   }
+  private async bindProjectModels(
+    conversation: Conversation,
+    lead: Active["model"],
+    settings: Settings,
+    signal: AbortSignal,
+  ): Promise<NonNullable<Active["team"]>> {
+    const configured = settings.projectModels;
+    if (!configured) return { workers: [lead], reviewer: lead };
+    const cache = new Map<string, ProjectAgent>();
+    const bind = async (selection: ProjectModelSelection) => {
+      const key = JSON.stringify([selection.connectionId, selection.model]);
+      if (
+        selection.connectionId === lead.configId &&
+        selection.model === lead.model
+      )
+        return lead;
+      const previous = cache.get(key);
+      if (previous) return previous;
+      const connection = settings.models.find(
+        (m) => m.id === selection.connectionId,
+      );
+      if (
+        !connection ||
+        !modelCredential(connection) ||
+        !(await this.connectionCatalog(connection)).catalog.includes(
+          selection.model,
+        )
+      )
+        throw new AppError(
+          409,
+          "案件のモデル設定で利用できるモデルを選び直してください",
+        );
+      const bound = await this.sessionModel(
+        {
+          ...conversation,
+          modelConfigId: selection.connectionId,
+          model: selection.model,
+        },
+        signal,
+        settings,
+      );
+      cache.set(key, bound);
+      return bound;
+    };
+    const workers: ProjectAgent[] = [];
+    for (const selection of configured.workers)
+      workers.push({
+        ...(await bind(selection)),
+        specialty: this.redact(selection.specialty || ""),
+      });
+    return {
+      workers: workers.length ? workers : [lead],
+      reviewer: configured.reviewer ? await bind(configured.reviewer) : lead,
+    };
+  }
   private async sessionModel(
     conversation: Conversation,
     signal: AbortSignal,
@@ -1131,11 +1193,12 @@ export class AgentService {
       },
     });
     models.setProvider(
-      guardedProvider(provider, (session, model) =>
-        workReserve
+      guardedProvider(provider, (session, requestedModel) => {
+        if (requestedModel !== modelId) throw new Error("Unbound model");
+        return workReserve
           ? workReserve()
-          : this.reserve(conversation.id, session, model),
-      ),
+          : this.reserve(conversation.id, session, signal);
+      }),
     );
 
     const model = models.getModel(provider.id, modelId);
@@ -1948,6 +2011,16 @@ ${this.config.instructions}${this.redact(catalog)}`;
           settings,
           prepared?.resolvedAuto,
         ));
+      const team =
+        active?.team ??
+        (conversation.managedProject
+          ? await this.bindProjectModels(
+              conversation,
+              model,
+              settings,
+              controller.signal,
+            )
+          : undefined);
       const limits = active?.limits ?? { ...this.config.limits };
       const admittedCredentials =
         active?.credentials ?? sharedCredentials(settings.workCredentials);
@@ -2113,6 +2186,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
             id,
             piId: conversation.piId,
             model,
+            team,
             extensions,
             limits,
             signers: new Set(),
@@ -2148,6 +2222,15 @@ ${this.config.instructions}${this.redact(catalog)}`;
           );
           if (record.managedProject) {
             const p = await tx.doc(ProjectDoc, record.piId);
+            p.models = {
+              lead: model.model,
+              reviewer: team!.reviewer.model,
+              workers: team!.workers.map((w, i) => ({
+                slot: i + 1,
+                model: w.model,
+                ...(w.specialty && { specialty: w.specialty }),
+              })),
+            };
             if (options.choice) {
               await appendPost(tx, record.piId, p, {
                 kind: "decision",
@@ -2490,7 +2573,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
   private async reserve(
     id: string,
     sessionId: string | undefined,
-    modelId: string,
+    admission: AbortSignal,
   ): Promise<void> {
     this.assertHealthy();
     const active = this.runs.get(id);
@@ -2504,7 +2587,8 @@ ${this.config.instructions}${this.redact(catalog)}`;
         conversation.status !== "running" ||
         !sessionId ||
         provider.sessionId !== sessionId ||
-        modelId !== active.model.model ||
+        active.controller.signal !== admission ||
+        admission.aborted ||
         conversation.requests >= active.limits.modelRequests ||
         !conversation.deadlineAt ||
         conversation.deadlineAt <= Date.now()
@@ -2629,7 +2713,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
         input,
         bounded,
         active.limits.commandSeconds,
-        active.model.specialist,
+        active.team!.workers,
       ),
     );
   }
@@ -2682,7 +2766,7 @@ ${this.config.instructions}${this.redact(catalog)}`;
           input,
           records,
           bounded,
-          active.model.specialist,
+          active.team!.reviewer,
           (active.unavailableReviews ??= new Set()),
         );
       },

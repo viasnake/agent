@@ -50,13 +50,13 @@ export function projectTools(service: AgentService) {
     tools: [
       tool(
         "project_status",
-        "Get the current directive revision, brief, progress and team results. Read at the start of a project response and after steering.",
+        "Get the current directive revision, brief, progress, model assignments and team results. Read at the start of a project response and after steering.",
         z.object({}).strict(),
         async (id) => service.team.read(await service.projectOwner(id)),
       ),
       tool(
         "project_team",
-        "Delegate independent responsibilities to concurrent specialists. Name each role in Japanese for its concrete responsibility (for example 請求処理の調査 or 再現テスト). Distinguish assignments doing different work. Give each a specific task and outcome. They can investigate the same repository and test competing multi-file proposals against a pinned commit. Omit repository for document, analysis, or review tasks and supply necessary source material in context. Returns reports and actual check results for synthesis. Retry a failed role alone when useful.",
+        "Delegate independent responsibilities to concurrent specialists. Name each role in Japanese for its concrete responsibility (for example 請求処理の調査 or 再現テスト). Use a short task name without a generic 担当 or 係 suffix. Distinguish assignments doing different work. Give each a specific task and outcome. Match the task to the configured specialties in project_status.models.workers and pass its numeric slot as worker. If no specialty applies, omit worker for round-robin assignment. Never invent a slot. They can investigate the same repository and test competing multi-file proposals against a pinned commit. Omit repository for document, analysis, or review tasks and supply necessary source material in context. Returns reports and actual check results for synthesis. Retry a failed role alone when useful.",
         teamInput,
         (id, input, signal) => service.delegateProject(id, input, signal),
       ),

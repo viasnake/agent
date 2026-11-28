@@ -1,3 +1,4 @@
+import { ProjectModelSettings } from "./project-model-settings.js";
 import { AutoModelSettings } from "./auto-model-settings.js";
 import {
   SettingsToolbar,
@@ -37,6 +38,7 @@ function editable(s: PublicSettings): SettingsInput {
   return {
     revision: s.revision,
     defaultModel: s.defaultModel,
+    projectModels: s.projectModels,
     autoModel: s.autoModel
       ? {
           connectionId: s.autoModel.connectionId,
@@ -959,6 +961,18 @@ export function Settings({
                                         models: draft.models.filter(
                                           (m) => m.id !== model.id,
                                         ),
+                                        projectModels: draft.projectModels && {
+                                          workers:
+                                            draft.projectModels.workers.filter(
+                                              (w) =>
+                                                w.connectionId !== model.id,
+                                            ),
+                                          reviewer:
+                                            draft.projectModels.reviewer
+                                              ?.connectionId === model.id
+                                              ? undefined
+                                              : draft.projectModels.reviewer,
+                                        },
                                         autoModel:
                                           draft.autoModel?.connectionId ===
                                           model.id
@@ -982,6 +996,16 @@ export function Settings({
                           </SettingsDisclosure>
                         );
                       })}
+                      {!!draft.models.length && (
+                        <ProjectModelSettings
+                          value={draft.projectModels}
+                          models={draft.models}
+                          revision={draft.revision}
+                          onChange={(projectModels) =>
+                            change((s) => ({ ...s, projectModels }))
+                          }
+                        />
+                      )}
                       {!!draft.models.length && (
                         <AutoModelSettings
                           value={draft.autoModel}

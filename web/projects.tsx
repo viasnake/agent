@@ -47,10 +47,9 @@ function TopicBoard({
     <table className="topic-board" aria-label="スレッド一覧">
       <thead>
         <tr>
-          <th scope="col">スレッド</th>
+          <th scope="col">案件・最新報告</th>
           <th scope="col">状態</th>
-          <th scope="col">投稿数</th>
-          <th scope="col">最終投稿</th>
+          <th scope="col">更新</th>
         </tr>
       </thead>
       <tbody>
@@ -60,7 +59,7 @@ function TopicBoard({
               ? p.question?.question
               : p.status === "interrupted"
                 ? p.detail
-                : p.summary;
+                : p.lastReport || p.summary;
           return (
             <tr key={p.id}>
               <th scope="row">
@@ -80,12 +79,11 @@ function TopicBoard({
                 >
                   {p.title}
                 </a>
-                {excerpt && <p>{excerpt}</p>}
+                {excerpt && excerpt !== p.title && <p>{excerpt}</p>}
               </th>
               <td>
                 <StateLabel status={p.status} />
               </td>
-              <td className="topic-count">{p.postCount}</td>
               <td>
                 {p.lastPostedAt ? (
                   <time dateTime={new Date(p.lastPostedAt).toISOString()}>
@@ -94,6 +92,9 @@ function TopicBoard({
                 ) : (
                   "—"
                 )}
+                <small className="topic-total">
+                  <span className="topic-count">{p.postCount}</span> 投稿
+                </small>
               </td>
             </tr>
           );

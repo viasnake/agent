@@ -198,12 +198,38 @@ export type AutoModelConfig = z.infer<typeof autoModelInput> & {
   token: string;
 };
 
+const projectModel = z
+  .object({
+    connectionId: identifier,
+    model: z.string().trim().min(1).max(200),
+  })
+  .strict();
+const projectModels = z
+  .object({
+    workers: z
+      .array(
+        projectModel
+          .extend({ specialty: z.string().trim().max(160).optional() })
+          .strict(),
+      )
+      .max(4)
+      .refine(
+        (entries) =>
+          new Set(entries.map((e) => JSON.stringify([e.connectionId, e.model])))
+            .size === entries.length,
+      ),
+    reviewer: projectModel.optional(),
+  })
+  .strict();
+export type ProjectModelSelection = z.infer<typeof projectModel>;
+
 export const settingsInput = z
   .object({
     revision: z.number().int().nonnegative(),
     models: z.array(modelInput).max(10),
     defaultModel: identifier.nullable(),
     autoModel: autoModelInput.nullable().optional(),
+    projectModels: projectModels.nullable().optional(),
     mcp: z.array(mcpInput).max(10),
     workCredentials: z.array(workCredentialInput).max(32).optional(),
     instructions: z.string().max(16000),
@@ -540,8 +566,20 @@ export class SettingsStore {
           400,
           "Auto のモデル接続と Workers AI のトークンを確認してください",
         );
+      const team =
+        parsed.projectModels === undefined
+          ? this.value.projectModels
+          : parsed.projectModels;
+      if (
+        team &&
+        [...team.workers, ...(team.reviewer ? [team.reviewer] : [])].some(
+          (role) => !parsed.models.some((m) => m.id === role.connectionId),
+        )
+      )
+        throw new AppError(400, "案件で使うモデルの接続を選び直してください");
       const next: Settings = {
         ...parsed,
+        projectModels: team,
         autoModel: auto && token ? { ...auto, token } : undefined,
         schemaVersion: 1,
         hostId: this.value.hostId,

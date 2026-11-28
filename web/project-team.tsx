@@ -2,9 +2,9 @@ import type { ProjectRow } from "../src/projects.js";
 import { Icon } from "./icons.js";
 
 export const projectRoles = {
-  lead: { name: "進行役", task: "作業を分担し、報告をまとめて納品します。" },
+  lead: { name: "主担当", task: "作業を分担し、報告をまとめて納品します。" },
   reviewer: {
-    name: "納品判定役",
+    name: "レビュアー",
     task: "成果物を依頼と証拠に照らし、納品または差し戻しを判定します。",
   },
 };
@@ -37,7 +37,7 @@ export function ProjectTeamStatus({
       <summary>
         <span>
           {includeLead
-            ? "チームの分担"
+            ? "担当とモデル"
             : p.members.length
               ? `分担 ${p.members.length} 件`
               : hasReview
@@ -53,9 +53,14 @@ export function ProjectTeamStatus({
       </summary>
       {includeLead && (
         <dl className="team-roles">
-          {Object.values(projectRoles).map(({ name, task }) => (
+          {Object.entries(projectRoles).map(([role, { name, task }]) => (
             <div key={name}>
               <dt>{name}</dt>
+              {p.models && (
+                <dd className="post-model">
+                  {role === "lead" ? p.models.lead : p.models.reviewer}
+                </dd>
+              )}
               <dd>{task}</dd>
             </div>
           ))}
@@ -92,7 +97,8 @@ export function ProjectTeamStatus({
       <ul>
         {p.members.map((m) => (
           <li key={m.id}>
-            <b>{m.role}</b> · {memberLabels[m.status]}
+            <b>{m.role}</b> · {memberLabels[m.status]}{" "}
+            {m.model && <span className="post-model">{m.model}</span>}
             <div>{m.task}</div>
             {m.status === "running" && <div>{m.activity}</div>}
             {m.report && <p>{m.report}</p>}
