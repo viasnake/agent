@@ -17,7 +17,7 @@ import type { PendingQuestion } from "../src/choices.js";
 import { api, type View } from "./api.js";
 import { Icon } from "./icons.js";
 
-const kindLabel = {
+export const kindLabel = {
   reply: "返信",
   directive: "指示",
   assignment: "分担",
@@ -36,7 +36,7 @@ const kindLabel = {
   interrupted: "中断",
   resume: "再開",
 };
-const actors = {
+export const actors = {
   user: "あなた",
   lead: projectRoles.lead.name,
   member: "担当",
@@ -53,7 +53,7 @@ const date = new Intl.DateTimeFormat("ja-JP", {
   day: "numeric",
   weekday: "short",
 });
-function Post({
+export function Post({
   post,
   session,
   project,

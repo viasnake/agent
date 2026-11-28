@@ -244,6 +244,29 @@ test("one directive starts a project; the portfolio shows independent teams and 
       answer('{"verdict":"accept","reason":"記録と一致"}'),
       answer("案内の準備ができました。"),
     ]);
+    const modules = page.getByRole("navigation", { name: "ワークスペース" });
+    await modules.getByRole("button", { name: "受信箱" }).click();
+    await dash
+      .locator(".mail-list")
+      .getByRole("button", { name: /次回リリースの告知を準備/ })
+      .click();
+    const reader = dash.getByRole("region", { name: "報告の本文" });
+    await reader
+      .getByRole("group", { name: "先行案内はどの利用者に届けますか？" })
+      .waitFor();
+    const threadRead = async () =>
+      (await f.service.workspaceOverview()).threads.find(
+        (r) => r.id === first.id,
+      )!;
+    await until(async () => {
+      const t = await threadRead();
+      return t.readThrough === t.notice?.id;
+    });
+    assert.equal((await threadRead()).status, "decision");
+    await page.screenshot({
+      path: "test-results/groupware-inbox.png",
+      animations: "disabled",
+    });
     await dash.getByRole("button", { name: "自由回答" }).click();
     await dash
       .getByRole("textbox", { name: "質問への回答" })
@@ -663,20 +686,41 @@ test("saved model assignments route a project and stay visible on the board and 
       animations: "disabled",
     });
     await page
-      .getByRole("button", { name: "スレッド一覧を開く", exact: true })
-      .click();
-    await page
       .getByRole("navigation", { name: "ワークスペース" })
       .getByRole("button", { name: "掲示板" })
       .click();
     await page.getByRole("table", { name: "スレッド一覧" }).waitFor();
     await page.setViewportSize({ width: 1320, height: 900 });
+    const modules = page.getByRole("navigation", { name: "ワークスペース" });
+    await modules.getByRole("button", { name: "成果物", exact: true }).click();
+    await page.getByRole("searchbox", { name: "成果物を検索" }).fill("請求書");
+    await page.locator(".file-subject").first().click();
+    const preview = page.locator(".file-preview");
+    await preview
+      .getByText("請求番号をキーに既存の請求書を返し、二重登録を防ぎます。", {
+        exact: true,
+      })
+      .waitFor();
+    await preview.getByText("検証記録", { exact: true }).click();
+    await preview.locator(".delivered-proof p").waitFor();
+    await page.screenshot({
+      path: "test-results/groupware-documents.png",
+      animations: "disabled",
+    });
+    await page
+      .getByRole("searchbox", { name: "成果物を検索" })
+      .fill("一致しない文字列");
+    await page.getByText("一致する成果物はありません").waitFor();
     await page.goto(origin + "/?projects=board");
     const board = page.getByRole("table", { name: "スレッド一覧" });
     await board.getByText("先行案内の対象は既存ユーザーだけですか？").waitFor();
     await board
       .getByText("同じ請求番号の再送は既存の1件を返すようにします。")
       .waitFor();
+    const boardSearch = page.getByRole("searchbox", { name: "掲示板を検索" });
+    await boardSearch.fill("月次");
+    assert.equal(await board.locator("tbody tr").count(), 1);
+    await boardSearch.clear();
     await page.screenshot({
       path: "test-results/project-model-board.png",
       animations: "disabled",
@@ -693,6 +737,12 @@ test("saved model assignments route a project and stay visible on the board and 
       .getByLabel("スレッドの履歴")
       .getByText("提出先は共有フォルダです。")
       .waitFor();
+    await until(async () => {
+      const row = (await f.service.workspaceOverview()).threads.find(
+        (t) => t.id === quick.id,
+      )!;
+      return row.readThrough === row.notice?.id;
+    });
   } finally {
     await browser.close();
     await app.close();

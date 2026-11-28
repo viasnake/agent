@@ -1,3 +1,10 @@
+import type {
+  WorkspaceDocument,
+  WorkspaceOverview,
+  WorkspaceThread,
+} from "../src/workspace.js";
+import { Documents, Inbox, postTime, unread } from "./workspace-mail.js";
+import { actors, kindLabel } from "./project-timeline.js";
 import { workspaceViews, type WorkspaceView } from "./workspace-nav.js";
 import { ProjectTeamStatus } from "./project-team.js";
 import { ProjectAnswer, ProjectDeliverable } from "./project-response.js";
@@ -124,7 +131,6 @@ function ProjectCard({
   project: ProjectRow;
   onOpen: (id: string) => void;
 }) {
-  const sent = p.status === "delivered";
   const note =
     p.status === "interrupted"
       ? p.detail
@@ -132,7 +138,6 @@ function ProjectCard({
         ? p.assessment.reason
         : p.summary || (p.instruction !== p.title ? p.instruction : "");
   const updated = new Date(p.updatedAt);
-  const patches = sent ? p.members.filter((m) => m.file) : [];
   return (
     <article className="work-card">
       <div className="card-heading">
@@ -161,31 +166,44 @@ function ProjectCard({
           {p.nextStep}
         </p>
       )}
-      {p.deliveryPost && (
-        <ProjectDeliverable
-          key={p.deliveryPost}
-          session={p.id}
-          postId={p.deliveryPost}
-        />
-      )}
-      {patches.map((m) => (
-        <a
-          className="work-file"
-          key={m.id}
-          href={`/api/conversations/${p.id}/download?path=${encodeURIComponent(m.file!)}`}
-        >
-          <Icon name="file" />
-          {patches.length > 1 ? m.role + "のパッチを保存" : "パッチを保存"}
-        </a>
-      ))}
-      {(p.members.length > 0 ||
-        (!p.deliveryPost && (p.evidence || p.assessment))) && (
+      {(p.members.length > 0 || p.evidence || p.assessment) && (
         <ProjectTeamStatus project={p} showSummary={note !== p.summary} />
       )}
     </article>
   );
 }
 
+function ModuleHeading({
+  icon,
+  title,
+  count,
+  onOpen,
+  action,
+}: {
+  icon: Parameters<typeof Icon>[0]["name"];
+  title: string;
+  count?: number;
+  onOpen?: () => void;
+  action?: string;
+}) {
+  return (
+    <header className="module-heading">
+      <h2>
+        <span className="module-icon">
+          <Icon name={icon} />
+        </span>
+        {title}{" "}
+        {count !== undefined && <span className="module-count">{count}</span>}
+      </h2>
+      {onOpen && (
+        <button className="portal-link" onClick={onOpen}>
+          {action ?? "一覧へ"}
+          <Icon name="right" />
+        </button>
+      )}
+    </header>
+  );
+}
 export function ProjectDashboard({
   mode,
   openMode,
@@ -200,21 +218,26 @@ export function ProjectDashboard({
   openMode: (view: WorkspaceView) => void;
 }) {
   const [activity, setActivity] = useState<PortfolioPost[] | null>(null);
-  const [rows, setRows] = useState<ProjectRow[] | null>(null),
+  const [rows, setRows] = useState<WorkspaceThread[] | null>(null),
     [error, setError] = useState(""),
     [answerError, setAnswerError] = useState(""),
     [busy, setBusy] = useState<string | null>(null);
   const [filter, setFilter] = useState<
     "all" | "decision" | "active" | "delivered" | "archived"
   >("all");
+  const [documents, setDocuments] = useState<WorkspaceDocument[] | null>(null);
+  const [boardQuery, setBoardQuery] = useState("");
+  const [mailTarget, setMailTarget] = useState<WorkspaceThread>();
+  const documentScope =
+    mode === "documents" ? "1" : mode === "home" ? "recent" : undefined;
   const showActivity = mode === "activity";
   const alive = useRef(false),
     generation = useRef(0);
   const refresh = useCallback(async () => {
     const version = ++generation.current;
     try {
-      const result = await api<{ projects: ProjectRow[] }>(
-        "/api/project-dashboard",
+      const result = await api<WorkspaceOverview>(
+        "/api/workspace" + (documentScope ? "?documents=" + documentScope : ""),
       );
       const feed = showActivity
         ? await api<{ posts: PortfolioPost[] }>(
@@ -223,16 +246,18 @@ export function ProjectDashboard({
         : undefined;
       if (alive.current && version === generation.current) {
         if (feed) setActivity(feed.posts);
-        setRows(result.projects);
+        setRows(result.threads);
+        setDocuments(result.documents);
         setError("");
       }
     } catch (e) {
       if (alive.current && version === generation.current)
         setError(e instanceof Error ? e.message : "進捗を取得できませんでした");
     }
-  }, [showActivity]);
+  }, [showActivity, documentScope]);
   useEffect(() => {
     alive.current = true;
+    setDocuments(null);
     let timer: ReturnType<typeof setTimeout>,
       disposed = false;
     const poll = async () => {
@@ -275,6 +300,35 @@ export function ProjectDashboard({
       setBusy(null);
     }
   }
+  async function mark(session: string, id: number) {
+    if ((rows?.find((t) => t.id === session)?.readThrough ?? 0) >= id) return;
+    try {
+      const result = await api<{ readThrough: number }>(
+        `/api/conversations/${session}/read-through`,
+        "POST",
+        { postId: id },
+      );
+      if (alive.current) {
+        generation.current++;
+        setRows(
+          (current) =>
+            current?.map((t) =>
+              t.id === session
+                ? {
+                    ...t,
+                    readThrough: Math.max(t.readThrough, result.readThrough),
+                  }
+                : t,
+            ) ?? null,
+        );
+      }
+    } catch (e) {
+      if (alive.current)
+        setAnswerError(
+          e instanceof Error ? e.message : "既読を保存できませんでした",
+        );
+    }
+  }
   const all = rows ?? [],
     current = all.filter((p) => !p.archived),
     decisions = current.filter((p) => p.status === "decision"),
@@ -285,12 +339,24 @@ export function ProjectDashboard({
       delivered: current.filter((p) => p.status === "delivered"),
       archived: all.filter((p) => p.archived),
     };
-  const visible = groups[filter];
+  const boardText = boardQuery.trim().toLocaleLowerCase();
+  const visible = groups[filter].filter((t) =>
+    [
+      t.title,
+      t.summary,
+      t.lastReport,
+      t.question?.question,
+      ...t.members.map((m) => m.role),
+    ].some((v) => v?.toLocaleLowerCase().includes(boardText)),
+  );
+  const reports = current
+    .filter((t) => t.notice && t.status !== "decision")
+    .sort((a, b) => b.notice!.at - a.notice!.at);
+  const unreadCount = current.filter(unread).length;
   const working = groups.active,
     stopped = current.filter(
       (p) => p.status === "interrupted" || p.status === "waiting",
-    ),
-    drafts = current.filter((p) => p.status === "draft");
+    );
   function card(p: ProjectRow) {
     return (
       <ProjectCard
@@ -315,10 +381,10 @@ export function ProjectDashboard({
           </button>
           <h1 id="projects-heading">{workspaceViews[mode].label}</h1>
           <button
-            className="mobile-only btn-solid theme-primary"
+            className="portal-compose btn-solid theme-primary"
             onClick={onNew}
           >
-            <Icon name="plus" /> 新しいスレッド
+            <Icon name="plus" /> 依頼を書く
           </button>
         </header>
         {error && (
@@ -338,156 +404,220 @@ export function ProjectDashboard({
           <>
             {mode === "home" && (
               <>
-                <div className="work-summary">
-                  {(
-                    [
-                      ["decision", "回答待ち", decisions.length],
-                      ["active", "進行中", groups.active.length],
-                      ["delivered", "成果物", groups.delivered.length],
-                    ] as const
-                  ).map(([key, label, count]) => (
-                    <button
-                      type="button"
-                      key={key}
-                      className={"summary-" + key}
-                      onClick={() => {
-                        setFilter(key);
-                        openMode("board");
-                      }}
-                    >
-                      <span>{label}</span>
-                      <b>{count}</b>
-                    </button>
-                  ))}
-                </div>
-                {decisions.length > 0 && (
-                  <section
-                    className="work-decisions"
-                    aria-labelledby="decisions-heading"
-                  >
-                    <h2 id="decisions-heading">
-                      <Icon name="chat" />
-                      回答待ち <span>{decisions.length}</span>
-                    </h2>
-                    {decisions.map((p) => (
-                      <article className="decision-request" key={p.id}>
+                <div className="home-grid">
+                  <div className="home-main">
+                    <section className="home-module home-mail">
+                      <ModuleHeading
+                        icon="inbox"
+                        title="受信箱"
+                        onOpen={() => {
+                          setMailTarget(undefined);
+                          openMode("inbox");
+                        }}
+                        action="受信箱を開く"
+                      />
+                      <div className="home-mail-totals">
+                        <span>
+                          未読 <b>{unreadCount}</b>
+                        </span>
+                        <span>
+                          回答待ち <b>{decisions.length}</b>
+                        </span>
+                      </div>
+                      {decisions.length > 0 && (
+                        <div className="work-decisions">
+                          {decisions.slice(0, 2).map((p) => (
+                            <article className="decision-request" key={p.id}>
+                              <button
+                                className="project-link"
+                                onClick={() => onOpen(p.id)}
+                              >
+                                {p.title}
+                                <Icon name="right" />
+                              </button>
+                              <h3>{p.question!.question}</h3>
+                              <ProjectAnswer
+                                key={p.question!.entryId}
+                                question={p.question!}
+                                busy={!!busy}
+                                onAnswer={(value) => void decide(p, value)}
+                              />
+                              {p.summary ||
+                              (p.assessment &&
+                                "sources" in p.assessment &&
+                                p.assessment.sources?.length) ? (
+                                <details className="decision-context">
+                                  <summary>背景</summary>
+                                  {p.summary && <p>{p.summary}</p>}
+                                  {p.assessment &&
+                                    "sources" in p.assessment &&
+                                    p.assessment.sources?.map(
+                                      ({ label, quote }) => (
+                                        <blockquote
+                                          className="work-source"
+                                          key={quote}
+                                        >
+                                          <strong>{label}</strong>
+                                          {quote}
+                                        </blockquote>
+                                      ),
+                                    )}
+                                </details>
+                              ) : null}
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                      {reports.slice(0, 3).map((t) => (
                         <button
-                          className="project-link"
-                          onClick={() => onOpen(p.id)}
+                          key={t.id}
+                          className="home-report"
+                          onClick={() => {
+                            setMailTarget(t);
+                            openMode("inbox");
+                          }}
                         >
-                          {p.title}
+                          <span
+                            className={
+                              "mail-dot" + (unread(t) ? " is-unread" : "")
+                            }
+                          />
+                          <span>
+                            <small>
+                              {kindLabel[t.notice!.kind]} ·{" "}
+                              {t.notice!.name || actors[t.notice!.actor]}
+                            </small>
+                            <strong>{t.title}</strong>
+                          </span>
+                          {postTime(t.notice!.at)}
                           <Icon name="right" />
                         </button>
-                        <h3>{p.question!.question}</h3>
-                        <ProjectAnswer
-                          key={p.question!.entryId}
-                          question={p.question!}
-                          busy={!!busy}
-                          onAnswer={(value) => void decide(p, value)}
+                      ))}
+                      {!reports.length && !decisions.length && (
+                        <p className="portal-empty">報告はまだありません</p>
+                      )}
+                    </section>
+                    <section className="home-module home-board">
+                      <ModuleHeading
+                        icon="board"
+                        title="最近のスレッド"
+                        onOpen={() => {
+                          setFilter("all");
+                          setBoardQuery("");
+                          openMode("board");
+                        }}
+                        action="掲示板を開く"
+                      />
+                      {current.length ? (
+                        <TopicBoard
+                          rows={[...current]
+                            .sort(
+                              (a, b) =>
+                                (b.lastPostedAt ?? b.updatedAt) -
+                                (a.lastPostedAt ?? a.updatedAt),
+                            )
+                            .slice(0, 6)}
+                          onOpen={onOpen}
                         />
-                        {p.summary ||
-                        (p.assessment &&
-                          "sources" in p.assessment &&
-                          p.assessment.sources?.length) ? (
-                          <details className="decision-context">
-                            <summary>背景</summary>
-                            {p.summary && <p>{p.summary}</p>}
-                            {p.assessment &&
-                              "sources" in p.assessment &&
-                              p.assessment.sources?.map(({ label, quote }) => (
-                                <blockquote className="work-source" key={quote}>
-                                  <strong>{label}</strong>
-                                  {quote}
-                                </blockquote>
-                              ))}
-                          </details>
-                        ) : null}
-                      </article>
-                    ))}
-                  </section>
-                )}
-                {current.length === 0 ? (
-                  <section className="work-blank">
-                    <Icon name="chat" />
-                    <h2>スレッドはまだありません</h2>
-                  </section>
-                ) : (
-                  <div className="work-columns">
-                    <section
-                      aria-labelledby="work-running-heading"
-                      className="work-column"
-                    >
-                      <h2 id="work-running-heading">
-                        <Icon name="fork" />
-                        進行中 <span>{working.length}</span>
-                      </h2>
-                      {working.length ? (
-                        working.map(card)
                       ) : (
-                        <p className="work-empty">
+                        <p className="portal-empty">スレッドはまだありません</p>
+                      )}
+                    </section>
+                  </div>
+                  <div className="home-side">
+                    <section className="home-module home-work">
+                      <ModuleHeading
+                        icon="fork"
+                        title="進行中"
+                        count={working.length}
+                        onOpen={() => {
+                          setFilter("active");
+                          setBoardQuery("");
+                          openMode("board");
+                        }}
+                      />
+                      {working.length ? (
+                        working.slice(0, 4).map(card)
+                      ) : (
+                        <p className="portal-empty">
                           進行中のスレッドはありません
                         </p>
                       )}
                       {stopped.length > 0 && (
-                        <section className="work-stopped">
-                          <h2>
+                        <div className="work-stopped">
+                          <h3>
                             要確認 <span>{stopped.length}</span>
-                          </h2>
+                          </h3>
                           {stopped.map(card)}
-                        </section>
-                      )}
-                      {drafts.length > 0 && (
-                        <section className="work-stopped">
-                          <h2>
-                            依頼前 <span>{drafts.length}</span>
-                          </h2>
-                          {drafts.map(card)}
-                        </section>
+                        </div>
                       )}
                     </section>
-                    <section
-                      aria-labelledby="work-results-heading"
-                      className="work-column"
-                    >
-                      <h2 id="work-results-heading">
-                        <Icon name="file" />
-                        成果物 <span>{groups.delivered.length}</span>
-                      </h2>
-                      {groups.delivered.length ? (
-                        groups.delivered.slice(0, 4).map(card)
-                      ) : (
-                        <p className="work-empty">まだ成果物はありません</p>
-                      )}
-                      {groups.delivered.length > 4 && (
-                        <button
-                          className="btn-text theme-primary"
-                          onClick={() => {
-                            setFilter("delivered");
-                            openMode("board");
-                          }}
+                    <section className="home-module home-files">
+                      <ModuleHeading
+                        icon="library"
+                        title="最近の納品"
+                        onOpen={() => openMode("documents")}
+                        action="成果物を開く"
+                      />
+                      {documents?.map((d) => (
+                        <article
+                          className="home-file"
+                          key={d.session + ":" + d.id}
                         >
-                          すべての成果物
-                        </button>
+                          <small>
+                            {d.file
+                              ? "採用パッチ"
+                              : d.written
+                                ? "文書"
+                                : "完了報告"}{" "}
+                            · {postTime(d.at)}
+                          </small>
+                          <button
+                            className="project-link"
+                            onClick={() => onOpen(d.session)}
+                          >
+                            {d.title}
+                          </button>
+                          <p>{d.text}</p>
+                          {d.written && (
+                            <ProjectDeliverable
+                              session={d.session}
+                              postId={d.id}
+                            />
+                          )}{" "}
+                          {d.file && (
+                            <a
+                              className="work-file"
+                              href={`/api/conversations/${d.session}/download?path=${encodeURIComponent(d.file)}`}
+                            >
+                              パッチを保存
+                            </a>
+                          )}
+                        </article>
+                      ))}
+                      {documents?.length === 0 && (
+                        <p className="portal-empty">新しい納品はありません</p>
                       )}
                     </section>
                   </div>
-                )}
-                {current.length > 0 && (
-                  <section className="workspace-recent">
-                    <h2>最近のスレッド</h2>
-                    <TopicBoard
-                      rows={[...current]
-                        .sort(
-                          (a, b) =>
-                            (b.lastPostedAt ?? b.updatedAt) -
-                            (a.lastPostedAt ?? a.updatedAt),
-                        )
-                        .slice(0, 6)}
-                      onOpen={onOpen}
-                    />
-                  </section>
-                )}
+                </div>
               </>
+            )}
+            {mode === "inbox" && (
+              <Inbox
+                initial={mailTarget}
+                threads={all}
+                open={onOpen}
+                busy={!!busy}
+                mark={mark}
+                answer={decide}
+              />
+            )}
+            {mode === "documents" && !documents && !error && (
+              <p role="status">成果物を読み込み中…</p>
+            )}
+            {mode === "documents" && documents && (
+              <Documents items={documents} open={onOpen} mark={mark} />
             )}
             {mode === "activity" && (
               <section aria-label="最近の報告">
@@ -500,33 +630,49 @@ export function ProjectDashboard({
             )}
             {mode === "board" && (
               <section aria-label="掲示板">
-                <div
-                  className="portfolio-filter"
-                  role="group"
-                  aria-label="表示するスレッド"
-                >
-                  {(
-                    [
-                      "all",
-                      "decision",
-                      "active",
-                      "delivered",
-                      "archived",
-                    ] as const
-                  ).map((value, i) => (
-                    <button
-                      key={value}
-                      aria-pressed={filter === value}
-                      onClick={() => setFilter(value)}
-                    >
-                      {
-                        ["すべて", "回答待ち", "進行中", "完了", "アーカイブ"][
-                          i
-                        ]
-                      }{" "}
-                      <span>{groups[value].length}</span>
-                    </button>
-                  ))}
+                <div className="portal-tools">
+                  <div
+                    className="portfolio-filter"
+                    role="group"
+                    aria-label="表示するスレッド"
+                  >
+                    {(
+                      [
+                        "all",
+                        "decision",
+                        "active",
+                        "delivered",
+                        "archived",
+                      ] as const
+                    ).map((value, i) => (
+                      <button
+                        key={value}
+                        aria-pressed={filter === value}
+                        onClick={() => setFilter(value)}
+                      >
+                        {
+                          [
+                            "すべて",
+                            "回答待ち",
+                            "進行中",
+                            "完了",
+                            "アーカイブ",
+                          ][i]
+                        }{" "}
+                        <span>{groups[value].length}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <label className="portal-search">
+                    <Icon name="search" />
+                    <input
+                      type="search"
+                      aria-label="掲示板を検索"
+                      placeholder="件名・報告・担当で検索"
+                      value={boardQuery}
+                      onChange={(e) => setBoardQuery(e.target.value)}
+                    />
+                  </label>
                 </div>
                 {visible.length ? (
                   <TopicBoard rows={visible} onOpen={onOpen} />

@@ -610,6 +610,35 @@ function App() {
     },
     [notify],
   );
+  const openedThread = useRef<string | null>(null);
+  const reading =
+    !dashboard &&
+    !settingsOpen &&
+    tab === "timeline" &&
+    selected === view?.conversation.id
+      ? selected
+      : null;
+  const received =
+    view?.timeline?.posts.findLast((post) => post.actor !== "user")?.id ?? 0;
+  const readThrough = view?.project?.readThrough ?? 0;
+  useEffect(() => {
+    if (!reading) {
+      openedThread.current = null;
+      return;
+    }
+    const acknowledge = () => {
+      if (document.hidden || !received || openedThread.current === reading)
+        return;
+      openedThread.current = reading;
+      if (received > readThrough)
+        void api(`/api/conversations/${reading}/read-through`, "POST", {
+          postId: received,
+        }).catch(notice);
+    };
+    acknowledge();
+    document.addEventListener("visibilitychange", acknowledge);
+    return () => document.removeEventListener("visibilitychange", acknowledge);
+  }, [reading, received, readThrough, notice]);
   const list = useCallback(async () => {
     const version = ++listVersion.current;
     const result = await api<{ conversations: Conversation[] }>(
@@ -1254,6 +1283,18 @@ function App() {
       id="app"
       className={`app-shell ${collapsed ? "sidebar-collapsed" : ""}`}
     >
+      <header className="portal-bar">
+        <div className="portal-brand">
+          <span className="portal-logo">
+            <Icon name="board" />
+          </span>
+          Agent
+        </div>
+        <WorkspaceNav
+          current={dashboard && !settingsOpen ? workspacePage : undefined}
+          onOpen={openWorkspace}
+        />
+      </header>
       {sidebar && (
         <button
           className="sidebar-backdrop"
@@ -1266,8 +1307,7 @@ function App() {
         className={`sidebar ${sidebar ? "sidebar-open" : ""}`}
       >
         <div className="workspace-name">
-          <Icon name="board" />
-          <span className="sidebar-label-text">ワークスペース</span>
+          <span className="sidebar-label-text">スレッド</span>
         </div>
         <div className="sidebar-header">
           <button
@@ -1285,10 +1325,7 @@ function App() {
             <span className="sidebar-label-text">新しいスレッド</span>
           </button>
         </div>
-        <WorkspaceNav
-          current={dashboard && !settingsOpen ? workspacePage : undefined}
-          onOpen={openWorkspace}
-        />
+
         <SessionList
           sessions={conversations.map((session) =>
             session.id === view?.conversation.id ? view.conversation : session,
@@ -1774,7 +1811,9 @@ function App() {
                 onClose={() => {
                   setMessageAction(null);
                   if (messageActionOrigin.current?.isConnected)
-                    messageActionOrigin.current.focus({ preventScroll: true });
+                    messageActionOrigin.current.focus({
+                      preventScroll: true,
+                    });
                   else
                     document
                       .getElementById("message")

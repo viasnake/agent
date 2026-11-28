@@ -1,3 +1,4 @@
+import { indexThread, type WorkspaceOverview } from "./workspace.js";
 import {
   appendPost,
   readPosts,
@@ -2693,6 +2694,51 @@ ${this.config.instructions}${this.redact(catalog)}`;
       ),
     );
     return projects.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+  async workspaceOverview(
+    documents?: "1" | "recent",
+  ): Promise<WorkspaceOverview> {
+    const harness = this.harness;
+    const result: WorkspaceOverview = { threads: [], documents: [] };
+    for (const c of await this.list()) {
+      const p = await this.threadState(c);
+      const index = await indexThread(harness, c.piId, p.lastPost?.id ?? 0);
+      result.threads.push({
+        ...projectRow(c, p),
+        notice: index.notice,
+      });
+      if (documents)
+        for (const doc of documents === "recent"
+          ? index.documents.slice(-3)
+          : index.documents)
+          result.documents.push({
+            ...doc,
+            session: c.id,
+            title: c.title,
+            archived: !!c.archived,
+          });
+    }
+    result.threads.sort(
+      (a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id),
+    );
+    result.documents.sort(
+      (a, b) =>
+        b.at - a.at || a.session.localeCompare(b.session) || b.id - a.id,
+    );
+    if (documents === "recent") result.documents = result.documents.slice(0, 3);
+    return result;
+  }
+  async readThrough(id: string, postId: number) {
+    return this.exclusive(async () => {
+      const c = await this.conversation(id);
+      return this.harness.commit(async (tx) => {
+        const p = await tx.doc(ProjectDoc, c.piId);
+        if (postId > (p.lastPost?.id ?? 0))
+          throw new AppError(400, "投稿が見つかりません");
+        p.readThrough = Math.max(p.readThrough ?? 0, postId);
+        return { readThrough: p.readThrough };
+      }, ctx);
+    });
   }
   async timeline(id: string, before?: number, limit?: number) {
     const c = await this.conversation(id),

@@ -101,6 +101,7 @@ export type Project = {
   };
   revision: number;
   lastPost?: { id: number; at: number };
+  readThrough?: number;
   lastReport?: string;
   hasTeamPosts?: boolean;
   reviewRequired?: boolean;
@@ -202,6 +203,7 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
       p.assessment ||
       p.members.length
     ),
+    readThrough: p.readThrough ?? 0,
     postCount: p.lastPost?.id ?? 0,
     lastPostedAt: p.lastPost?.at,
     lastReport: p.lastReport,

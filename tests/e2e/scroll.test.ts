@@ -43,7 +43,9 @@ async function assertShell(page: Page) {
     await page
       .locator(".conversation-header")
       .evaluate((node) => node.getBoundingClientRect().top),
-    0,
+    await page
+      .locator(".portal-bar")
+      .evaluate((node) => node.getBoundingClientRect().bottom),
   );
 }
 async function position(page: Page) {

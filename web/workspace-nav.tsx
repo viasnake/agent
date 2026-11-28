@@ -2,14 +2,18 @@ import { Icon } from "./icons.js";
 
 export const workspaceViews = {
   home: { label: "ホーム", icon: "home" },
+  inbox: { label: "受信箱", icon: "inbox" },
   board: { label: "掲示板", icon: "board" },
+  documents: { label: "成果物", icon: "library" },
   activity: { label: "更新履歴", icon: "timeline" },
 } as const;
 export type WorkspaceView = keyof typeof workspaceViews;
 
 export function workspaceView(query: URLSearchParams): WorkspaceView {
   const value = query.get("view") ?? query.get("projects");
-  return value === "board" || value === "activity" ? value : "home";
+  return value && Object.hasOwn(workspaceViews, value)
+    ? (value as WorkspaceView)
+    : "home";
 }
 export function WorkspaceNav({
   current,
@@ -23,7 +27,7 @@ export function WorkspaceNav({
       {(Object.keys(workspaceViews) as WorkspaceView[]).map((view) => (
         <button
           type="button"
-          className="btn-text theme-secondary new-conversation"
+          className="portal-tab"
           key={view}
           title={workspaceViews[view].label}
           aria-label={workspaceViews[view].label}
@@ -31,9 +35,7 @@ export function WorkspaceNav({
           onClick={() => onOpen(view)}
         >
           <Icon name={workspaceViews[view].icon} />
-          <span className="sidebar-label-text">
-            {workspaceViews[view].label}
-          </span>
+          <span className="portal-tab-label">{workspaceViews[view].label}</span>
         </button>
       ))}
     </nav>
