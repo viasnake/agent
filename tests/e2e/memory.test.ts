@@ -12,7 +12,7 @@ import { createServer } from "../../src/server.js";
 test("memory settings and inline session search preserve conflicts, sources and drafts across screen sizes", async () => {
   const f = await fixture([answer("認証の設定を確認しました")]);
   const source = await f.service.create(randomUUID(), "認証の作業");
-  const other = await f.service.create(randomUUID(), "別のセッション");
+  const other = await f.service.create(randomUUID(), "別のスレッド");
   await f.service.send(source.id, randomUUID(), "認証を確認して");
   await until(
     async () => (await f.service.conversation(source.id)).status === "idle",
@@ -45,14 +45,14 @@ test("memory settings and inline session search preserve conflicts, sources and 
   const openMemory = async () => {
     if ((page.viewportSize()?.width ?? 1280) < 768) {
       await page
-        .getByRole("button", { name: "セッション一覧を開く", exact: true })
+        .getByRole("button", { name: "スレッド一覧を開く", exact: true })
         .click();
     }
     await page.getByRole("button", { name: "設定", exact: true }).click();
     await page.getByRole("button", { name: "記憶", exact: true }).click();
   };
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await row(source.id).click();
     await page.getByText("認証の設定を確認しました", { exact: true }).waitFor();
     await page.locator("#message").fill("保存される下書き");
@@ -132,7 +132,7 @@ test("memory settings and inline session search preserve conflicts, sources and 
     await panel.getByText("訂正した記憶", { exact: true }).waitFor();
     await close();
     const search = page.getByRole("searchbox", {
-      name: "セッションを検索",
+      name: "スレッドを検索",
       exact: true,
     });
     const results = page.getByRole("region", {

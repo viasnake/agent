@@ -150,7 +150,7 @@ printf 'CSV verified'`,
     if (!request.url().startsWith(origin + "/")) external++;
   });
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page.locator("#message").waitFor();
     assert.equal(
       await page.getByText("以前の記録", { exact: true }).count(),
@@ -235,7 +235,7 @@ printf 'CSV verified'`,
       (await f.service.download(id, "outputs/clean.csv")).toString(),
       "name,total\nAlice,12\n",
     );
-    await page.getByRole("tab", { name: "会話", exact: true }).click();
+    await page.getByRole("tab", { name: "スレッド", exact: true }).click();
     await page
       .getByRole("heading", { name: "CSV の整形", exact: true })
       .waitFor();
@@ -367,7 +367,7 @@ printf 'CSV verified'`,
         path: `test-results/session-usage-mobile-${colorScheme}.png`,
       });
       await page.setViewportSize({ width: 1440, height: 1000 });
-      await page.getByRole("tab", { name: "会話", exact: true }).click();
+      await page.getByRole("tab", { name: "スレッド", exact: true }).click();
       await assertReadable(
         page.locator(
           ".session-row.selected, #state, #connection, .user-bubble, .markdown:visible, .markdown pre:visible, .markdown th, .markdown td, .run-details > summary, .output-file, .output-file small, .output-label, .composer-shortcut, .workspace button:enabled",
@@ -375,7 +375,7 @@ printf 'CSV verified'`,
       );
       await assertReadable(page.locator("#message"), "::placeholder");
       const create = page.getByRole("button", {
-        name: "新しいセッション",
+        name: "新しいスレッド",
         exact: true,
       });
       await assertReadable(create);
@@ -391,7 +391,7 @@ printf 'CSV verified'`,
       await page.locator("#conversations button").first().click();
       await page.getByRole("tab", { name: "ファイル", exact: true }).click();
       await page.getByRole("link", { name: /clean.csv/ }).waitFor();
-      await page.getByRole("tab", { name: "会話", exact: true }).click();
+      await page.getByRole("tab", { name: "スレッド", exact: true }).click();
       await page.locator("#message").fill("配色の確認");
       await assertReadable(page.locator("#send"));
       await page.locator("#send").hover();
@@ -409,7 +409,7 @@ printf 'CSV verified'`,
     await page.locator("#conversations button").first().click();
     await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /clean.csv/ }).waitFor();
-    await page.getByRole("tab", { name: "会話", exact: true }).click();
+    await page.getByRole("tab", { name: "スレッド", exact: true }).click();
     const savedRun = runDetails.first();
     const savedSummary = savedRun.locator(":scope > summary");
     await savedSummary.waitFor();
@@ -430,7 +430,7 @@ printf 'CSV verified'`,
     await page.locator("#message").press("Control+Enter");
     await page.getByRole("tab", { name: "ファイル", exact: true }).click();
     await page.getByRole("link", { name: /note.md/ }).waitFor();
-    await page.getByRole("tab", { name: "会話", exact: true }).click();
+    await page.getByRole("tab", { name: "スレッド", exact: true }).click();
     assert.equal((await f.service.list()).length, 1);
     await page.getByRole("link", { name: "文章を取得", exact: true }).waitFor();
     assert.match(
@@ -464,7 +464,7 @@ printf 'CSV verified'`,
         () => false,
       ),
     );
-    await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
+    await page.locator("#state").filter({ hasText: "進行中" }).waitFor();
     await page.locator("#live").getByText("コマンドを実行中…").waitFor();
     const activeRun = runDetails.last();
     await activeRun
@@ -537,10 +537,10 @@ printf 'CSV verified'`,
       "The composer stays inside the mobile viewport",
     );
     await page
-      .getByRole("button", { name: "セッション一覧を開く", exact: true })
+      .getByRole("button", { name: "スレッド一覧を開く", exact: true })
       .click();
     await page
-      .getByRole("navigation", { name: "セッション一覧" })
+      .getByRole("navigation", { name: "スレッド一覧" })
       .waitFor({ state: "visible" });
     await page.locator("#conversations button").first().click();
     assert.equal(await page.locator("#sidebar").isVisible(), false);
@@ -650,7 +650,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     const selectA = page.getByRole("button", { name: "会話 A", exact: true });
     const selectB = page.getByRole("button", { name: "会話 B", exact: true });
     await selectA.click();
@@ -665,10 +665,10 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       mimeType: "text/plain",
       buffer: Buffer.from("draft"),
     });
-    const chatTab = page.getByRole("tab", { name: "会話", exact: true });
+    const chatTab = page.getByRole("tab", { name: "スレッド", exact: true });
     const filesTab = page.getByRole("tab", { name: "ファイル", exact: true });
     assert.equal(await filesTab.getAttribute("aria-controls"), "files-panel");
-    assert.equal(await chatTab.getAttribute("aria-controls"), "chat-panel");
+    assert.equal(await chatTab.getAttribute("aria-controls"), "timeline-panel");
     await chatTab.focus();
     const changesTab = page.getByRole("tab", { name: "変更", exact: true });
     await chatTab.press("ArrowRight");
@@ -696,17 +696,17 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     const bText = "会話 B の応答";
     faux.setResponses([
       call("bash", { command: "exec sleep 60" }),
-      answer(`${bText}\n\n${"別のセッションで実行した結果です。".repeat(20)}`),
+      answer(`${bText}\n\n${"別のスレッドで実行した結果です。".repeat(20)}`),
     ]);
     await page.locator("#send").click();
-    await page.locator("#state").filter({ hasText: "実行中" }).waitFor();
+    await page.locator("#state").filter({ hasText: "進行中" }).waitFor();
     await page.locator("#live").getByText("コマンドを実行中…").waitFor();
     await page
       .getByRole("button", { name: "「会話 A」の操作", exact: true })
       .click();
     assert.equal(
       await page
-        .getByRole("button", { name: "セッションを削除", exact: true })
+        .getByRole("button", { name: "スレッドを削除", exact: true })
         .isDisabled(),
       true,
     );
@@ -767,7 +767,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     await page.unrouteAll({ behavior: "wait" });
     await page
       .locator("#state")
-      .getByText("応答終了", { exact: true })
+      .getByText("返信済み", { exact: true })
       .waitFor();
     assert.equal(await page.locator("#detail").count(), 0);
 
@@ -826,10 +826,10 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       .getByRole("button", { name: "「会話 A」の操作", exact: true })
       .click();
     await page
-      .getByRole("button", { name: "セッションを削除", exact: true })
+      .getByRole("button", { name: "スレッドを削除", exact: true })
       .click();
     const deletion = page.getByRole("dialog", {
-      name: "セッションを削除",
+      name: "スレッドを削除",
       exact: true,
     });
     await deletion
@@ -875,7 +875,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
       .getByRole("button", { name: "「会話 A」の操作", exact: true })
       .click();
     await page
-      .getByRole("button", { name: "セッションを削除", exact: true })
+      .getByRole("button", { name: "スレッドを削除", exact: true })
       .click();
     await deletion.getByRole("button", { name: "削除", exact: true }).click();
     await deletion.getByRole("alert").waitFor();
@@ -888,7 +888,7 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     await deletion.getByRole("button", { name: "削除", exact: true }).click();
     await page
       .locator("#title")
-      .filter({ hasText: "新しいセッション" })
+      .filter({ hasText: "新しいスレッド" })
       .waitFor();
     await selectA.waitFor({ state: "detached" });
     assert.equal((await f.service.list()).length, 1);
@@ -900,10 +900,10 @@ test("conversation navigation preserves selection, ignores stale loads and conta
     await page.reload();
     await selectB.waitFor();
     assert.equal(await selectA.count(), 0);
-    faux.setResponses([answer("新しいセッションで応答")]);
+    faux.setResponses([answer("新しいスレッドで応答")]);
     await page.locator("#message").fill("会話 A");
     await page.locator("#send").click();
-    await page.getByText("新しいセッションで応答", { exact: true }).waitFor();
+    await page.getByText("新しいスレッドで応答", { exact: true }).waitFor();
     const sessions = await f.service.list();
     assert.equal(sessions.length, 2);
     assert.ok(sessions.every((session) => session.id !== a.id));
@@ -936,13 +936,13 @@ test("sidebar scrolling stays within the session list at short desktop and mobil
   });
   const page = await browser.newPage({ reducedMotion: "reduce" });
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page.locator(".conversation-item").first().waitFor();
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 400 });
       if (width < 768)
         await page
-          .getByRole("button", { name: "セッション一覧を開く", exact: true })
+          .getByRole("button", { name: "スレッド一覧を開く", exact: true })
           .click();
       const fixed = page.locator(
         ".sidebar-header, .session-list-controls, .sidebar-footer",

@@ -19,7 +19,7 @@ async function assertShell(page: Page) {
       document.documentElement,
       document.body,
       ...document.querySelectorAll(
-        "#root, #app, .workspace, #chat-panel, .chat-thread, #sidebar",
+        "#root, #app, .workspace, #timeline-panel, .chat-thread, #sidebar",
       ),
     ].map((node) => ({
       name: node.id || node.className || node.tagName,
@@ -43,7 +43,9 @@ async function assertShell(page: Page) {
     await page
       .locator(".conversation-header")
       .evaluate((node) => node.getBoundingClientRect().top),
-    0,
+    await page
+      .locator(".portal-bar")
+      .evaluate((node) => node.getBoundingClientRect().bottom),
   );
 }
 async function position(page: Page) {
@@ -114,10 +116,10 @@ test("search, tabs, resizing and history loading retain the reading position wit
       });
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(origin);
+      await page.goto(origin + "/?new");
       if (width < 768)
         await page
-          .getByRole("button", { name: "セッション一覧を開く", exact: true })
+          .getByRole("button", { name: "スレッド一覧を開く", exact: true })
           .click();
       await page
         .getByRole("button", { name: "表示位置の確認", exact: true })
@@ -169,7 +171,7 @@ test("search, tabs, resizing and history loading retain the reading position wit
       const reading = await position(page);
       await page.getByRole("tab", { name: "ファイル", exact: true }).click();
       await settle(page);
-      await page.getByRole("tab", { name: "会話", exact: true }).click();
+      await page.getByRole("tab", { name: "スレッド", exact: true }).click();
       await settle(page);
       await assertShell(page);
       assert.equal(
@@ -179,13 +181,13 @@ test("search, tabs, resizing and history loading retain the reading position wit
       );
       assert.ok(Math.abs((await position(page)).offset - reading.offset) < 2);
       const toggle =
-        width < 768 ? "セッション一覧を開く" : "セッション一覧を閉じる";
+        width < 768 ? "スレッド一覧を開く" : "スレッド一覧を閉じる";
       await page.getByRole("button", { name: toggle, exact: true }).click();
       await settle(page);
       if (width < 768) await page.locator("#sidebar .sidebar-close").click();
       else
         await page
-          .getByRole("button", { name: "セッション一覧を開く", exact: true })
+          .getByRole("button", { name: "スレッド一覧を開く", exact: true })
           .click();
       await settle(page);
       await assertShell(page);
@@ -215,7 +217,7 @@ test("search, tabs, resizing and history loading retain the reading position wit
       );
       if (width < 768)
         await page
-          .getByRole("button", { name: "セッション一覧を開く", exact: true })
+          .getByRole("button", { name: "スレッド一覧を開く", exact: true })
           .click();
       await page.getByRole("button", { name: "設定", exact: true }).click();
       await page.getByRole("button", { name: "記憶", exact: true }).click();
@@ -275,7 +277,7 @@ test("search, tabs, resizing and history loading retain the reading position wit
       await page.reload();
       if (width < 768)
         await page
-          .getByRole("button", { name: "セッション一覧を開く", exact: true })
+          .getByRole("button", { name: "スレッド一覧を開く", exact: true })
           .click();
       await page
         .getByRole("button", { name: "表示位置の確認", exact: true })

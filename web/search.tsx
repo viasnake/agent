@@ -10,10 +10,12 @@ type Results = {
 };
 export function ConversationSearch({
   id,
+  label = "会話内を検索",
   onClose,
   onSelect,
 }: {
   id: string;
+  label?: string;
   onClose: () => void;
   onSelect: (entryId: number) => Promise<void>;
 }) {
@@ -92,7 +94,7 @@ export function ConversationSearch({
       <header>
         <h2 id={heading}>
           <Icon name="search" />
-          会話内を検索
+          {label}
         </h2>
         <button
           className="btn-text theme-secondary icon-button"
@@ -106,7 +108,7 @@ export function ConversationSearch({
       <input
         className="form-control"
         type="search"
-        aria-label="会話内を検索"
+        aria-label={label}
         value={query}
         maxLength={200}
         autoFocus

@@ -7,7 +7,7 @@ Server 26.04 with systemd. The application has a thin TypeScript HTTP service,
 Pi Durable 1.6.0, SQLite and separate control/work users. Machine provisioning,
 virtualization, disks, OS initialization and host networking belong outside this
 repository. Agent does not depend on or invoke a VM manager, including Devbox.
-The user-facing unit is a session containing a Pi conversation and its working
+The user-facing unit is a thread in a single workspace containing a Pi conversation and its working
 directory. An answered session accepts more input. Independent sessions execute concurrently. Bind model credentials, tools, limits
 and cancellation to each admitted session.
 
@@ -23,13 +23,12 @@ changes require an explicitly stopped service.
 
 Do not add a host daemon, VM manager, automatic host startup, Proxmox,
 Firecracker, distributed workers, workflow engine or plugin management system.
-Ordinary sessions have no job classifications, fixed output formats, artifact
-registration or completion gates. For a parallel Git change, the session-scoped work supervisor owns 2–6 file
+Direct answers in a thread require no classification or delivery review. For a parallel Git change, the session-scoped work supervisor owns 2–6 file
 assignments with up to two concurrent producers, their attempts
 and the immutable patch checked against the pinned base. Use the work UID for
 Git and tests. Deliver only stored bytes whose candidate passed. Keep response
 stop separate from work pause/cancel. Reopen requires explicit continuation.
-Explicit project threads have a lead, scoped concurrent specialist assignments and a portfolio dashboard. Use the admitted model and shared response budgets. Tie proposals to a directive revision, retain test evidence and accept decisions through the existing conversation choice API. Answers to pending questions retain the directive revision and specialist evidence. Keep project follow-ups inside the admitted run and its budgets. Publish reviewed written deliverables in the timeline and resolve their cited excerpts against primary records before delivery.
+All threads appear in the workspace home and board. Any thread can use a lead and scoped concurrent specialist assignments when the user requests substantive work. Bind the lead to the conversation selection, and freeze explicitly configured worker and reviewer models with their own connections at admission. Let the lead match assignments to configured worker specialties, rotate unassigned work through the pool, keep each assignment on its bound model and share the parent response budgets. Unconfigured roles use the lead model. Tie proposals to a directive revision, retain test evidence and accept decisions through the existing conversation choice API. Answers to pending questions retain the directive revision and specialist evidence. Keep project follow-ups inside the admitted run and its budgets. Publish reviewed written deliverables in the timeline and resolve their cited excerpts against primary records before delivery.
 Do not add service-specific connectors or a general workflow engine.
 A response ending is not proof that its contents are correct. Use ordinary
 CLI/API/scripts and configured MCP tools for new kinds of work.
@@ -43,7 +42,7 @@ work/conversations/. The previous state.sqlite and work/jobs/ remain untouched.
 Retired management and Markdown documents are inert stored data. Remove their
 source-derived content when rebuilding storage for session deletion.
 
-The UI uses sessions with conversation and file tabs. Tab changes keep the composer
+The UI provides one thread composer, workspace navigation, an execution history and file tabs. Tab changes keep the composer
 and live subscription mounted. Session deletion requires all execution to be idle.
 Persist a deletion intent, close the Harness, remove the entire session workspace
 through the work UID, and rebuild SQLite through public Pi Storage reads and commits.

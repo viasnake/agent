@@ -1,9 +1,10 @@
-import { ProjectTimeline } from "./project-timeline.js";
 import {
-  ProjectDashboard,
-  ProjectTeamStatus,
-  projectStatusLabels,
-} from "./projects.js";
+  WorkspaceNav,
+  workspaceView,
+  type WorkspaceView,
+} from "./workspace-nav.js";
+import { ProjectTimeline } from "./project-timeline.js";
+import { ProjectDashboard, projectStatusLabels } from "./projects.js";
 import { ParallelWork } from "./parallel-work.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.js";
 import { useReadingPosition } from "./reading-position.js";
@@ -55,9 +56,10 @@ import {
 import { Icon } from "./icons.js";
 
 type ThreadProps = {
-  projectDraft: boolean;
+  historyVisible: boolean;
   timelineVisible: boolean;
   onHistory: () => void;
+  onReports: () => void;
   onBoard: () => void;
   draftId: string | null;
   view: View | null;
@@ -101,9 +103,10 @@ function SendButton({
   );
 }
 function Chat({
-  projectDraft,
+  historyVisible,
   timelineVisible,
   onHistory,
+  onReports,
   onBoard,
   draftId,
   view,
@@ -153,6 +156,7 @@ function Chat({
     hasEarlier: !!cursor,
     onLoadEarlier: onEarlier,
   });
+  const projectHistory = historyVisible;
   const input = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
@@ -176,7 +180,11 @@ function Chat({
         <ThreadPrimitive.Root
           className={`chat-thread ${!timelineVisible && !messages.length && !loading ? "chat-empty" : ""} ${dragging ? "drop-target" : ""}`}
           onDragOver={(event) => {
-            if (!sending && event.dataTransfer.types.includes("Files")) {
+            if (
+              !projectHistory &&
+              !sending &&
+              event.dataTransfer.types.includes("Files")
+            ) {
               event.preventDefault();
               setDragging(true);
             }
@@ -189,14 +197,15 @@ function Chat({
           }}
           onDrop={(event) => {
             setDragging(false);
-            if (sending || !event.dataTransfer.files.length) return;
+            if (projectHistory || sending || !event.dataTransfer.files.length)
+              return;
             event.preventDefault();
             setAttachments(
               [...attachments, ...event.dataTransfer.files].slice(0, 20),
             );
           }}
         >
-          {view?.project && view.timeline && (
+          {view?.project?.hasTeamPosts && view.timeline && (
             <ProjectTimeline
               key={view.project.id}
               project={view.project}
@@ -215,7 +224,9 @@ function Chat({
             ref={viewport}
             className="thread-viewport"
             id="transcript"
-            aria-label="会話の履歴"
+            aria-label={
+              historyVisible ? "エージェントの実行履歴" : "スレッドの履歴"
+            }
             onScroll={(event) => {
               const top = event.currentTarget.scrollTop;
               const movingUp = top < previousScrollTop.current;
@@ -246,9 +257,7 @@ function Chat({
                   <span className="empty-icon">
                     <Icon name="agent" />
                   </span>
-                  <h2>
-                    {projectDraft ? "何を依頼しますか？" : "何を始めますか？"}
-                  </h2>
+                  <h2>何を依頼しますか？</h2>
                 </div>
               )}
               <ThreadPrimitive.Messages>
@@ -260,7 +269,7 @@ function Chat({
                   )
                 }
               </ThreadPrimitive.Messages>
-              {view?.question && (
+              {view?.question && !timelineVisible && !historyVisible && (
                 <div
                   className="conversation-notice d-grid gap-2"
                   role="group"
@@ -304,7 +313,6 @@ function Chat({
                   )}
                 </details>
               )}
-              {view?.project && <ProjectTeamStatus project={view.project} />}
               {view?.work?.map((work) => (
                 <ParallelWork
                   key={work.id}
@@ -333,7 +341,24 @@ function Chat({
             </div>
           </ThreadPrimitive.Viewport>
           {!timelineVisible && <SelectionToolbar disabled={sending} />}
-          <div className="composer-dock">
+          {projectHistory && (
+            <div className="project-history-footer">
+              <button
+                className="btn-outline theme-secondary btn-sm"
+                onClick={onReports}
+              >
+                スレッドに戻る
+              </button>
+            </div>
+          )}
+          <div
+            className={
+              timelineVisible
+                ? "composer-dock project-composer"
+                : "composer-dock"
+            }
+            hidden={projectHistory}
+          >
             {!timelineVisible && (
               <ThreadPrimitive.ScrollToBottom
                 className="scroll-bottom btn-outline theme-secondary btn-sm"
@@ -356,14 +381,10 @@ function Chat({
               <ComposerPrimitive.Input
                 id="message"
                 placeholder={
-                  timelineVisible
-                    ? "追加の指示を入力…"
-                    : projectDraft
-                      ? "依頼内容を入力…"
-                      : "メッセージを入力…"
+                  timelineVisible ? "追加の指示を入力…" : "内容を入力…"
                 }
                 className="composer-input"
-                rows={2}
+                rows={timelineVisible ? 1 : 2}
                 maxRows={8}
                 maxLength={64000}
                 disabled={sending}
@@ -488,6 +509,16 @@ function AttachmentIcon({ file }: { file: File }) {
   );
 }
 
+function threadFromUrl(query: URLSearchParams) {
+  const id = query.get("thread") ?? query.get("project");
+  return id && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)
+    ? id
+    : null;
+}
+function navigate(search: string) {
+  if (location.search !== search)
+    history.pushState(null, "", location.pathname + search);
+}
 function App() {
   const notify = useNotify();
   const [modelOptions, setModelOptions] = useState<ModelOptions>({
@@ -519,11 +550,12 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(
     new URLSearchParams(location.search).has("settings"),
   );
+  const query = new URLSearchParams(location.search);
   const [dashboard, setDashboard] = useState(
-    new URLSearchParams(location.search).has("projects"),
+    () => query.has("view") || query.has("projects") || !location.search,
   );
-  const [newProject, setNewProject] = useState(
-    new URLSearchParams(location.search).has("new-project"),
+  const [workspacePage, setWorkspacePage] = useState<WorkspaceView>(() =>
+    workspaceView(query),
   );
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -535,12 +567,8 @@ function App() {
   const [ready, setReady] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<string | null>(() => {
-    const id = new URLSearchParams(location.search).get("project");
-    return id && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)
-      ? id
-      : null;
+    return threadFromUrl(query);
   });
-  const openHomeOnArrival = useRef(!location.search && !readDraft(null));
   const selectedRef = useRef(selected);
   const selectionVersion = useRef(0);
   const [reload, setReload] = useState(0);
@@ -558,15 +586,8 @@ function App() {
   const [chosenTab, setTab] = useState<
     "default" | "timeline" | "chat" | "changes" | "files" | "usage"
   >("default");
-  const tab =
-    chosenTab === "default"
-      ? view?.project
-        ? "timeline"
-        : "chat"
-      : chosenTab === "timeline" && !view?.project
-        ? "chat"
-        : chosenTab;
-  const timelineVisible = tab === "timeline";
+  const tab = chosenTab === "default" ? "timeline" : chosenTab;
+  const timelineVisible = tab === "timeline" && !!view?.project?.hasTeamPosts;
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
   const filesVersion = useRef(0);
@@ -589,6 +610,35 @@ function App() {
     },
     [notify],
   );
+  const openedThread = useRef<string | null>(null);
+  const reading =
+    !dashboard &&
+    !settingsOpen &&
+    tab === "timeline" &&
+    selected === view?.conversation.id
+      ? selected
+      : null;
+  const received =
+    view?.timeline?.posts.findLast((post) => post.actor !== "user")?.id ?? 0;
+  const readThrough = view?.project?.readThrough ?? 0;
+  useEffect(() => {
+    if (!reading) {
+      openedThread.current = null;
+      return;
+    }
+    const acknowledge = () => {
+      if (document.hidden || !received || openedThread.current === reading)
+        return;
+      openedThread.current = reading;
+      if (received > readThrough)
+        void api(`/api/conversations/${reading}/read-through`, "POST", {
+          postId: received,
+        }).catch(notice);
+    };
+    acknowledge();
+    document.addEventListener("visibilitychange", acknowledge);
+    return () => document.removeEventListener("visibilitychange", acknowledge);
+  }, [reading, received, readThrough, notice]);
   const list = useCallback(async () => {
     const version = ++listVersion.current;
     const result = await api<{ conversations: Conversation[] }>(
@@ -596,17 +646,6 @@ function App() {
     );
     if (listVersion.current === version) {
       setConversations(result.conversations);
-      if (
-        openHomeOnArrival.current &&
-        !selectionVersion.current &&
-        !location.search &&
-        !readDraft(null) &&
-        result.conversations.some((c) => c.managedProject && !c.archived)
-      ) {
-        setDashboard(true);
-        history.replaceState(null, "", location.pathname + "?projects");
-      }
-      openHomeOnArrival.current = false;
     }
   }, []);
   const refreshFiles = useCallback(
@@ -641,30 +680,28 @@ function App() {
       ).values(),
     ]);
   }, []);
-  function select(id: string | null, project = false) {
+  function openWorkspace(page: WorkspaceView, updateUrl = true) {
+    if (updateUrl && settingsOpen && !confirmSettingsExit(settingsDirty))
+      return;
+    if (updateUrl) navigate("?view=" + page);
+    setWorkspacePage(page);
+    setDashboard(true);
+    setSettingsOpen(false);
+    setSidebar(false);
+  }
+  function select(id: string | null, updateUrl = true) {
     setDashboard(false);
-    setNewProject(!id && project);
     setSearchOpen(false);
     setSettingsOpen(false);
     setMemoryDraft(null);
-    history.replaceState(
-      null,
-      "",
-      location.pathname +
-        (id &&
-        (project || conversations.some((c) => c.id === id && c.managedProject))
-          ? "?project=" + encodeURIComponent(id)
-          : project
-            ? "?new-project"
-            : ""),
-    );
+    if (updateUrl) navigate(id ? "?thread=" + encodeURIComponent(id) : "?new");
     setSidebar(false);
     // Reselecting the visible conversation must preserve its subscription and draft.
-    if (id !== null && selectedRef.current === id) return;
-    attachmentDrafts.current.set(
-      selectedRef.current ?? (newProject ? "new-project" : "new"),
-      attachments,
-    );
+    if (id !== null && selectedRef.current === id) {
+      if (dashboard) setTab("default");
+      return;
+    }
+    attachmentDrafts.current.set(selectedRef.current ?? "new", attachments);
     selectionVersion.current++;
     setReload((value) => value + 1);
     selectedRef.current = id;
@@ -676,15 +713,36 @@ function App() {
     setFilesLoading(false);
     setFilesError("");
     setTab("default");
-    setAttachments(
-      attachmentDrafts.current.get(id ?? (project ? "new-project" : "new")) ??
-        [],
-    );
+    setAttachments(attachmentDrafts.current.get(id ?? "new") ?? []);
     setActiveEntry(null);
     setError("");
     setLoadError("");
     setThreadKey((key) => key + 1);
   }
+  useEffect(() => {
+    const currentUrl = location.href;
+    const restore = () => {
+      if (settingsOpen && !confirmSettingsExit(settingsDirty)) {
+        history.pushState(null, "", currentUrl);
+        return;
+      }
+      const query = new URLSearchParams(location.search);
+      if (query.has("settings")) {
+        setSettingsOpen(true);
+        setSidebar(false);
+      } else if (
+        !location.search ||
+        query.has("view") ||
+        query.has("projects")
+      ) {
+        openWorkspace(workspaceView(query), false);
+      } else {
+        select(threadFromUrl(query), false);
+      }
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  });
   const connect = useCallback(async () => {
     setError("");
     try {
@@ -795,7 +853,7 @@ function App() {
         if (!isCurrent()) return;
         if (error instanceof ApiError && error.status === 401) notice(error);
         else if (!snapshotReceived)
-          setLoadError("セッションを読み込めませんでした");
+          setLoadError("スレッドを読み込めませんでした");
       });
     const reconnect = () => {
       retry = setTimeout(() => {
@@ -910,7 +968,6 @@ function App() {
         if (draftAuto && !choice)
           throw new Error("Auto を利用できません。モデルを選び直してください");
         const selection = {
-          ...(newProject ? { managedProject: true } : {}),
           ...(choice
             ? { modelId: choice.connectionId, model: choice.model }
             : {}),
@@ -929,12 +986,9 @@ function App() {
         );
         id = created.id;
         setDraftAuto(false);
-        saveDraft(newProject ? "new-project" : null, "");
-        if (newProject) {
-          setNewProject(false);
-          history.replaceState(null, "", location.pathname + "?project=" + id);
-        }
-        attachmentDrafts.current.delete(newProject ? "new-project" : "new");
+        saveDraft(null, "");
+        history.replaceState(null, "", location.pathname + "?thread=" + id);
+        attachmentDrafts.current.delete("new");
         // Keep the composer mounted so a rejected/lost response can restore its draft.
         selectedRef.current = id;
         setSelected(id);
@@ -1033,7 +1087,7 @@ function App() {
       attachmentDrafts.current.delete(id);
       setConversations((items) => items.filter((item) => item.id !== id));
       await list().catch(notice);
-      notify("セッションを削除しました");
+      notify("スレッドを削除しました");
     } finally {
       setDeleting(false);
     }
@@ -1138,7 +1192,7 @@ function App() {
     setCursor(nextCursor);
     if (!loaded.some((entry) => entry.id === entryId))
       throw new Error("履歴の読み込み上限に達しました");
-    setTab("chat");
+    setTab(view?.project?.hasTeamPosts ? "chat" : "timeline");
     setActiveEntry(entryId);
     requestAnimationFrame(() => {
       if (selectedRef.current !== id || selectionVersion.current !== version)
@@ -1178,13 +1232,13 @@ function App() {
     setDashboard(false);
     if (selectedRef.current === source.sessionId && !settingsOpen) {
       if (source.entryId) await jumpTo(source.entryId);
-      setTab("chat");
+      setTab(view?.project?.hasTeamPosts ? "chat" : "timeline");
       setSidebar(false);
     } else {
       await api<View>(`/api/conversations/${source.sessionId}`);
       memoryTarget.current = source;
       setSettingsOpen(false);
-      setTab("chat");
+      setTab(view?.project?.hasTeamPosts ? "chat" : "timeline");
       setSidebar(false);
       if (selectedRef.current !== source.sessionId) select(source.sessionId);
     }
@@ -1199,13 +1253,13 @@ function App() {
         selected
       ) {
         event.preventDefault();
-        setTab("chat");
+        setTab(view?.project?.hasTeamPosts ? "chat" : "timeline");
         setSearchOpen(true);
       }
     };
     window.addEventListener("keydown", shortcuts);
     return () => window.removeEventListener("keydown", shortcuts);
-  }, [selected]);
+  }, [selected, view?.project?.hasTeamPosts]);
   if (!ready)
     return (
       <div className="connection-page">
@@ -1229,10 +1283,22 @@ function App() {
       id="app"
       className={`app-shell ${collapsed ? "sidebar-collapsed" : ""}`}
     >
+      <header className="portal-bar">
+        <div className="portal-brand">
+          <span className="portal-logo">
+            <Icon name="board" />
+          </span>
+          Agent
+        </div>
+        <WorkspaceNav
+          current={dashboard && !settingsOpen ? workspacePage : undefined}
+          onOpen={openWorkspace}
+        />
+      </header>
       {sidebar && (
         <button
           className="sidebar-backdrop"
-          aria-label="セッション一覧を閉じる"
+          aria-label="スレッド一覧を閉じる"
           onClick={() => setSidebar(false)}
         />
       )}
@@ -1240,11 +1306,14 @@ function App() {
         id="sidebar"
         className={`sidebar ${sidebar ? "sidebar-open" : ""}`}
       >
+        <div className="workspace-name">
+          <span className="sidebar-label-text">スレッド</span>
+        </div>
         <div className="sidebar-header">
           <button
             id="new-conversation"
-            aria-label="新しいセッション"
-            title="新しいセッション"
+            aria-label="新しいスレッド"
+            title="新しいスレッド"
             className="btn-text theme-secondary new-conversation"
             disabled={sending || deleting}
             onClick={() => {
@@ -1253,27 +1322,10 @@ function App() {
             }}
           >
             <Icon name="plus" />
-            <span className="sidebar-label-text">新しいセッション</span>
+            <span className="sidebar-label-text">新しいスレッド</span>
           </button>
         </div>
-        <button
-          className="new-conversation btn-text theme-secondary"
-          aria-label="プロジェクト"
-          title="プロジェクト"
-          aria-pressed={dashboard && !settingsOpen}
-          disabled={sending || deleting}
-          onClick={() => {
-            if (settingsOpen && !confirmSettingsExit(settingsDirty)) return;
-            setSettingsOpen(false);
-            if (!dashboard || settingsOpen)
-              history.replaceState(null, "", location.pathname + "?projects");
-            setDashboard(true);
-            setSidebar(false);
-          }}
-        >
-          <Icon name="sidebar" />
-          <span className="sidebar-label-text">プロジェクト</span>
-        </button>
+
         <SessionList
           sessions={conversations.map((session) =>
             session.id === view?.conversation.id ? view.conversation : session,
@@ -1323,7 +1375,7 @@ function App() {
           <button
             className="sidebar-toggle btn-text theme-secondary btn-sm icon-button"
             aria-label={
-              collapsed ? "セッション一覧を開く" : "セッション一覧を閉じる"
+              collapsed ? "スレッド一覧を開く" : "スレッド一覧を閉じる"
             }
             title={collapsed ? "サイドバーを展開" : "サイドバーを折りたたむ"}
             aria-expanded={!collapsed}
@@ -1334,7 +1386,7 @@ function App() {
           </button>
           <button
             className="sidebar-close btn-text theme-secondary btn-sm icon-button"
-            aria-label="セッション一覧を閉じる"
+            aria-label="スレッド一覧を閉じる"
             title="一覧を閉じる"
             aria-controls="sidebar"
             onClick={() => setSidebar(false)}
@@ -1358,11 +1410,10 @@ function App() {
       <div className="workspace-stack">
         {dashboard && !settingsOpen && (
           <ProjectDashboard
-            onOpen={(id) => {
-              select(id, true);
-              setTab("timeline");
-            }}
-            onNew={() => select(null, true)}
+            mode={workspacePage}
+            openMode={openWorkspace}
+            onOpen={select}
+            onNew={() => select(null)}
             onMenu={() => setSidebar(true)}
           />
         )}
@@ -1391,22 +1442,19 @@ function App() {
             <header className="conversation-header">
               <button
                 className="mobile-only btn-text theme-secondary btn-sm"
-                aria-label="セッション一覧を開く"
+                aria-label="スレッド一覧を開く"
                 aria-expanded={sidebar}
                 aria-controls="sidebar"
                 onClick={() => setSidebar(!sidebar)}
               >
                 <Icon name="menu" />
               </button>
-              <h1 id="title">
-                {view?.conversation.title ??
-                  (newProject ? "新しいプロジェクト" : "新しいセッション")}
-              </h1>
+              <h1 id="title">{view?.conversation.title ?? "新しいスレッド"}</h1>
               {view?.conversation.parentId && (
                 <button
                   className="btn-text theme-secondary btn-sm icon-button"
-                  aria-label="元のセッションを開く"
-                  title="元のセッション"
+                  aria-label="元のスレッドを開く"
+                  title="元のスレッド"
                   onClick={() => select(view.conversation.parentId!)}
                 >
                   <Icon name="fork" />
@@ -1426,10 +1474,18 @@ function App() {
                 {selected && (
                   <button
                     className="btn-text theme-secondary btn-sm icon-button"
-                    aria-label="会話内を検索"
-                    title="会話内を検索（Ctrl / ⌘ + Shift + F）"
+                    aria-label={
+                      view?.project?.hasTeamPosts
+                        ? "実行履歴を検索"
+                        : "会話内を検索"
+                    }
+                    title={
+                      (view?.project?.hasTeamPosts
+                        ? "実行履歴を検索"
+                        : "会話内を検索") + "（Ctrl / ⌘ + Shift + F）"
+                    }
                     onClick={() => {
-                      setTab("chat");
+                      setTab(view?.project?.hasTeamPosts ? "chat" : "timeline");
                       setSearchOpen(true);
                     }}
                   >
@@ -1452,25 +1508,25 @@ function App() {
                 )}
               </div>
             </header>
-            <TabsList className="session-tabs" aria-label="セッションの内容">
-              {view?.project && (
-                <TabsTrigger
-                  value="timeline"
-                  id="timeline-tab"
-                  aria-controls="timeline-panel"
-                >
-                  <Icon name="timeline" />
-                  スレッド
-                </TabsTrigger>
-              )}
+            <TabsList className="session-tabs" aria-label="スレッドの内容">
               <TabsTrigger
-                value="chat"
-                id="chat-tab"
-                aria-controls="chat-panel"
+                value="timeline"
+                id="timeline-tab"
+                aria-controls="timeline-panel"
               >
                 <Icon name="chat" />
-                会話
+                スレッド
               </TabsTrigger>
+              {view?.project?.hasTeamPosts && (
+                <TabsTrigger
+                  value="chat"
+                  id="chat-tab"
+                  aria-controls="chat-panel"
+                >
+                  <Icon name="terminal" />
+                  実行履歴
+                </TabsTrigger>
+              )}
               <TabsTrigger
                 value="changes"
                 id="changes-tab"
@@ -1609,21 +1665,28 @@ function App() {
                 </div>
               </TabsContent>
               <TabsContent
-                value={timelineVisible ? "timeline" : "chat"}
+                value={tab === "timeline" ? "timeline" : "chat"}
                 forceMount
-                id={timelineVisible ? "timeline-panel" : "chat-panel"}
-                aria-labelledby={timelineVisible ? "timeline-tab" : "chat-tab"}
-                aria-hidden={tab !== "chat" && !timelineVisible}
-                inert={tab !== "chat" && !timelineVisible}
+                id={tab === "timeline" ? "timeline-panel" : "chat-panel"}
+                aria-labelledby={
+                  tab === "timeline" ? "timeline-tab" : "chat-tab"
+                }
+                aria-hidden={tab !== "chat" && tab !== "timeline"}
+                inert={tab !== "chat" && tab !== "timeline"}
                 className="session-panel"
               >
                 {searchOpen && selected && (
                   <ConversationSearch
                     id={selected}
+                    label={
+                      view?.project?.hasTeamPosts ? "実行履歴を検索" : undefined
+                    }
                     onClose={() => {
                       setSearchOpen(false);
                       document
-                        .getElementById("message")
+                        .getElementById(
+                          view?.project?.hasTeamPosts ? "chat-tab" : "message",
+                        )
                         ?.focus({ preventScroll: true });
                     }}
                     onSelect={jumpTo}
@@ -1663,18 +1726,17 @@ function App() {
                     }}
                   >
                     <Chat
-                      draftId={selected ?? (newProject ? "new-project" : null)}
-                      projectDraft={newProject}
+                      draftId={selected}
+                      historyVisible={tab === "chat"}
                       timelineVisible={timelineVisible}
-                      onBoard={() => {
-                        history.replaceState(
-                          null,
-                          "",
-                          location.pathname + "?projects=board",
-                        );
-                        setDashboard(true);
-                      }}
+                      onBoard={() => openWorkspace("board")}
                       onHistory={() => setTab("chat")}
+                      onReports={() => {
+                        setTab("timeline");
+                        requestAnimationFrame(() =>
+                          document.getElementById("timeline-tab")?.focus(),
+                        );
+                      }}
                       key={threadKey}
                       view={view}
                       entries={entries}
@@ -1696,7 +1758,7 @@ function App() {
                       modelPicker={
                         <>
                           <ModelPicker
-                            label="セッションのモデル"
+                            label="スレッドのモデル"
                             compact
                             value={
                               view?.conversation.modelConfigId === "auto"
@@ -1749,7 +1811,9 @@ function App() {
                 onClose={() => {
                   setMessageAction(null);
                   if (messageActionOrigin.current?.isConnected)
-                    messageActionOrigin.current.focus({ preventScroll: true });
+                    messageActionOrigin.current.focus({
+                      preventScroll: true,
+                    });
                   else
                     document
                       .getElementById("message")

@@ -114,7 +114,7 @@ export class SessionMemory {
     const { sessionId, entryId } = memorySource.parse(source);
     const session = await this.service.conversation(sessionId);
     const pi = await this.service.harness.conversation(session.piId, ctx);
-    if (!pi) throw new AppError(503, "保存されたセッションがありません");
+    if (!pi) throw new AppError(503, "保存されたスレッドがありません");
     const page = await pi.entries(
       entryId
         ? { minEntryId: entryId as EntryId, maxEntryId: entryId as EntryId }
@@ -191,7 +191,7 @@ export class SessionMemory {
     if (value.source?.entryId) {
       const session = await this.service.conversation(value.source.sessionId);
       const pi = await this.service.harness.conversation(session.piId, ctx);
-      if (!pi) throw new AppError(503, "保存されたセッションがありません");
+      if (!pi) throw new AppError(503, "保存されたスレッドがありません");
       const page = await pi.entries(
         {
           minEntryId: value.source.entryId as EntryId,
@@ -220,7 +220,7 @@ export class SessionMemory {
             session.id === value.source!.sessionId && !session.deletedAt,
         )
       )
-        throw new AppError(404, "出典のセッションがありません");
+        throw new AppError(404, "出典のスレッドがありません");
       const state = await tx.doc(MemoriesDoc);
       const digest = hash(
         JSON.stringify({ text: value.text, source: value.source }),
@@ -431,7 +431,7 @@ export class SessionMemory {
     ) {
       const session = sessions[index]!;
       const pi = await this.service.harness.conversation(session.piId, ctx);
-      if (!pi) throw new AppError(503, "保存されたセッションがありません");
+      if (!pi) throw new AppError(503, "保存されたスレッドがありません");
       const page = await pi.entries(
         { order: "descending" },
         20,

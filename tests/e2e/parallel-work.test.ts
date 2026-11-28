@@ -41,7 +41,7 @@ test("pause, resume, review a failed diff, repair one file and export the checke
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
   try {
     const page = await browser.newPage({ colorScheme: "dark" });
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page
       .locator(`[data-session-id="${f.id}"] .conversation-item`)
       .click();

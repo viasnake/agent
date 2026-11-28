@@ -122,22 +122,36 @@ export function ProjectDeliverable({
       </summary>
       {open &&
         (body ? (
-          <div className="delivered-sheet">
-            <ConversationId.Provider value={session}>
-              <MarkdownText text={body} finalAnswer />
-            </ConversationId.Provider>
-            {evidence && (
-              <details className="delivered-proof">
-                <summary>検証記録</summary>
-                <p>{evidence}</p>
-              </details>
-            )}
-          </div>
+          <DeliveryBody session={session} body={body} evidence={evidence} />
         ) : (
           <p role={error ? "alert" : "status"}>
             {error || "本文を読み込み中…"}
           </p>
         ))}
     </details>
+  );
+}
+
+export function DeliveryBody({
+  session,
+  body,
+  evidence,
+}: {
+  session: string;
+  body: string;
+  evidence?: string;
+}) {
+  return (
+    <div className="delivered-sheet">
+      <ConversationId.Provider value={session}>
+        <MarkdownText text={body} finalAnswer />
+      </ConversationId.Provider>
+      {evidence && (
+        <details className="delivered-proof">
+          <summary>検証記録</summary>
+          <p>{evidence}</p>
+        </details>
+      )}
+    </div>
   );
 }

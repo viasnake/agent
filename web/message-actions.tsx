@@ -66,7 +66,7 @@ export function MessageActionDialog({
           {label}
         </h2>
         <p>
-          元の履歴を残し、新しいセッションに分岐します。作業ファイルはコピーしません。
+          元の履歴を残し、新しいスレッドに分岐します。作業ファイルはコピーしません。
         </p>
         {action.kind !== "fork" && (
           <label className="settings-check">

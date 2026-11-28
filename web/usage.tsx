@@ -377,8 +377,8 @@ export function UsageStatistics() {
       <button
         type="button"
         className="sidebar-statistics btn-text theme-secondary btn-sm"
-        aria-label="全セッションの統計"
-        title="全セッションの統計"
+        aria-label="全スレッドの統計"
+        title="全スレッドの統計"
         aria-haspopup="dialog"
         onClick={() => {
           dialog.current?.showModal();
@@ -396,7 +396,7 @@ export function UsageStatistics() {
           onClose={() => setOpen(false)}
         >
           <header className="d-flex justify-content-between align-items-center gap-3">
-            <h2 id={heading}>全セッションの統計</h2>
+            <h2 id={heading}>全スレッドの統計</h2>
             <button
               autoFocus
               className="btn-text theme-secondary btn-sm icon-button"

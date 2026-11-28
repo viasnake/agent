@@ -1,7 +1,14 @@
 const prefix = "agent-draft-";
 export function readDraft(id: string | null): string {
   try {
-    return localStorage.getItem(prefix + (id ?? "new"))?.slice(0, 64000) ?? "";
+    const key = prefix + (id ?? "new");
+    const current = localStorage.getItem(key);
+    if (current || id) return current?.slice(0, 64000) ?? "";
+    const older = localStorage.getItem(prefix + "new-project");
+    if (!older) return "";
+    localStorage.setItem(key, older);
+    localStorage.removeItem(prefix + "new-project");
+    return older.slice(0, 64000);
   } catch {
     return "";
   }

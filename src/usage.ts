@@ -182,7 +182,7 @@ export async function recordedUsage(
     ])
       record(true, a.model, a.time, a.error, a.tokens);
     const pi = await harness.conversation(id, context);
-    if (!pi) throw new AppError(503, "保存されたセッションがありません");
+    if (!pi) throw new AppError(503, "保存されたスレッドがありません");
     let cursor: Cursor | undefined;
     // A fork's own entries come after its ancestor's entries, even after compaction.
     scan: do {

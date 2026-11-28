@@ -22,6 +22,7 @@ export const teamInput = z
       .array(
         z
           .object({
+            worker: z.number().int().min(1).max(4).optional(),
             role: z.string().trim().min(1).max(80),
             task: z.string().trim().min(1).max(1800),
           })
@@ -82,6 +83,7 @@ export const memberAction = z.discriminatedUnion("action", [
     .strict(),
 ]);
 export type Member = {
+  model?: string;
   id: string;
   role: string;
   task: string;
@@ -92,8 +94,18 @@ export type Member = {
   file?: string;
 };
 export type Project = {
+  models?: {
+    lead: string;
+    reviewer: string;
+    workers?: { slot: number; model: string; specialty?: string }[];
+  };
   revision: number;
   lastPost?: { id: number; at: number };
+  readThrough?: number;
+  lastReport?: string;
+  hasTeamPosts?: boolean;
+  reviewRequired?: boolean;
+  answered?: boolean;
   brief: string;
   instruction: string;
   summary: string;
@@ -105,26 +117,27 @@ export type Project = {
   members: Member[];
   question?: PendingQuestion;
   assessment?: {
-    verdict: "checking" | "revise" | "accept";
+    verdict: "checking" | "revise" | "accept" | "unavailable";
     reason: string;
     sources?: { label: string; quote: string }[];
   };
 };
+export const emptyThread = (): Project => ({
+  revision: 0,
+  brief: "",
+  instruction: "",
+  summary: "",
+  delivered: false,
+  updatedAt: 0,
+  members: [],
+});
 export const ProjectDoc = defineDoc<Project>({
   kind: "agent.project-thread",
   version: 1,
   scope: "conversation",
   history: "latest",
   fork: "initial",
-  initial: () => ({
-    revision: 0,
-    brief: "",
-    instruction: "",
-    summary: "",
-    delivered: false,
-    updatedAt: 0,
-    members: [],
-  }),
+  initial: emptyThread,
   checkpointWhen: (_v, _ops, info) => info.deltasSinceBase >= 32,
 });
 export type MemberUsage = {
@@ -133,7 +146,13 @@ export type MemberUsage = {
   tokens: Pick<Usage, keyof Usage>;
   error: boolean;
 };
+export type DeliveryDecision = {
+  verdict: "accept" | "revise";
+  reason: string;
+  sources?: { label: string; quote: string }[];
+};
 export const ProjectEvidenceDoc = defineDoc<{
+  reviews?: (DeliveryDecision & { key: string })[];
   patches: Record<
     string,
     {
@@ -164,9 +183,13 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
           ? "working"
           : p.delivered
             ? "delivered"
-            : p.revision
-              ? "waiting"
-              : "draft";
+            : p.answered
+              ? "answered"
+              : !p.revision && (p.instruction || p.lastReport)
+                ? "history"
+                : p.revision
+                  ? "waiting"
+                  : "draft";
   return {
     id: c.id,
     title: c.title,
@@ -174,8 +197,17 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
     archived: !!c.archived,
     status,
     revision: p.revision,
+    hasTeamPosts: !!(
+      p.hasTeamPosts ||
+      c.managedProject ||
+      p.assessment ||
+      p.members.length
+    ),
+    readThrough: p.readThrough ?? 0,
     postCount: p.lastPost?.id ?? 0,
     lastPostedAt: p.lastPost?.at,
+    lastReport: p.lastReport,
+    models: p.models,
     instruction: p.instruction.slice(0, 400),
     summary: p.summary,
     nextStep: p.nextStep,
@@ -185,7 +217,7 @@ export function projectRow(c: Conversation, p: Readonly<Project>) {
     question: p.question,
     assessment:
       c.status === "interrupted" && p.assessment?.verdict === "checking"
-        ? { verdict: "revise" as const, reason: "照合中に応答が中断しました" }
+        ? { verdict: "unavailable" as const, reason: "検証が中断しました" }
         : p.assessment,
     members: p.members.map((m) => ({ ...m })),
   } as const;

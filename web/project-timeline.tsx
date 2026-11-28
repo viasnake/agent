@@ -1,3 +1,4 @@
+import { ProjectTeamStatus, projectRoles } from "./project-team.js";
 import { ProjectAnswer, ProjectDeliverable } from "./project-response.js";
 import {
   Fragment,
@@ -16,7 +17,8 @@ import type { PendingQuestion } from "../src/choices.js";
 import { api, type View } from "./api.js";
 import { Icon } from "./icons.js";
 
-const kindLabel = {
+export const kindLabel = {
+  reply: "返信",
   directive: "指示",
   assignment: "分担",
   start: "着手",
@@ -25,7 +27,8 @@ const kindLabel = {
   passed: "テスト成功",
   failed: "テスト失敗",
   artifact: "成果物",
-  review: "レビュー",
+  review: "検証開始",
+  review_error: "検証中断",
   revision: "差し戻し",
   question: "質問",
   decision: "回答",
@@ -33,11 +36,11 @@ const kindLabel = {
   interrupted: "中断",
   resume: "再開",
 };
-const actors = {
+export const actors = {
   user: "あなた",
-  lead: "責任者",
+  lead: projectRoles.lead.name,
   member: "担当",
-  reviewer: "照合担当",
+  reviewer: projectRoles.reviewer.name,
   system: "システム",
 };
 const time = new Intl.DateTimeFormat("ja-JP", {
@@ -50,7 +53,7 @@ const date = new Intl.DateTimeFormat("ja-JP", {
   day: "numeric",
   weekday: "short",
 });
-function Post({
+export function Post({
   post,
   session,
   project,
@@ -75,12 +78,17 @@ function Post({
       {time.format(post.at)}
     </time>
   );
-  if (post.kind === "start" && !project) {
+  if ((post.kind === "start" || post.kind === "review") && !project) {
     return (
-      <article className="timeline-post post-start" data-post-id={post.id}>
+      <article
+        className={"timeline-post post-notice post-" + post.kind}
+        data-post-id={post.id}
+      >
         <details className="start-notice">
           <summary>
-            <span>{name}が着手</span>
+            <span>{name}</span>
+            {post.model && <small className="post-model">{post.model}</small>}
+            <span>{post.kind === "start" ? "着手" : "レビュー開始"}</span>
             {timestamp}
             {number}
             <Icon name="chevron" />
@@ -97,29 +105,10 @@ function Post({
       }
       data-post-id={post.id}
     >
-      <div className="post-author">
-        <span className={"post-avatar actor-" + post.actor} aria-hidden="true">
-          {post.actor === "member" ? (
-            Array.from(name)[0]
-          ) : (
-            <Icon
-              name={
-                post.actor === "user"
-                  ? "chat"
-                  : post.actor === "reviewer"
-                    ? "check"
-                    : post.actor === "system"
-                      ? "settings"
-                      : "agent"
-              }
-            />
-          )}
-        </span>
-        {!project && <strong>{name}</strong>}
-      </div>
       <div className="post-main">
         <header>
-          {project && <strong>{name}</strong>}
+          <strong>{name}</strong>
+          {post.model && <span className="post-model">{post.model}</span>}
           <span className="post-kind">{kindLabel[post.kind]}</span>
           {timestamp}
           {number}
@@ -315,6 +304,11 @@ export function ProjectTimeline({
               )}
             </details>
           )}
+          <ProjectTeamStatus
+            project={project}
+            includeLead
+            showSummary={false}
+          />
           {project.status === "delivered" && (
             <div className="topic-result">
               <strong>結論</strong>
@@ -333,7 +327,7 @@ export function ProjectTimeline({
       <div
         className="timeline-viewport"
         ref={viewport}
-        aria-label="案件のタイムライン"
+        aria-label="スレッドの投稿"
         tabIndex={0}
         onScroll={(e) => {
           const el = e.currentTarget;
@@ -350,7 +344,7 @@ export function ProjectTimeline({
             <div className="timeline-empty">
               <p>投稿はまだありません</p>
               <button className="btn-text theme-secondary" onClick={onHistory}>
-                会話を開く
+                実行履歴を開く
               </button>
             </div>
           )}

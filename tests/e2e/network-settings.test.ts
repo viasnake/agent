@@ -96,7 +96,7 @@ test("network settings add, edit and delete a TCP destination, and expose stale 
       }
       await route.fulfill({ json: state });
     });
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page.getByRole("button", { name: "設定", exact: true }).click();
     await page
       .getByRole("button", { name: "ネットワーク", exact: true })

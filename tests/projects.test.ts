@@ -223,7 +223,10 @@ test("project decisions resume with existing specialist reports and dashboard st
       async () => (await service.projects())[0]?.status === "decision",
     );
     const [row] = await service.projects();
-    assert.equal((await service.projects()).length, 1);
+    assert.deepEqual(
+      (await service.projects()).map((p) => p.status),
+      ["decision", "draft"],
+    );
     assert.equal(row!.members[0]!.status, "reported");
     await service.close();
     const reopened = await fixture([], { root: f.root });
@@ -348,6 +351,10 @@ test("an unsupported release claim returns to the lead and is corrected before d
   const accepted: FauxResponseFactory = async (context) => {
     const args = JSON.parse(String(context.messages.at(-1)!.content));
     assert.equal(args.proposal.deliverable, corrected);
+    assert.equal(
+      args.previousFeedback,
+      "Beta rollback failed. Correct the release decision for Beta.",
+    );
     const [pending] = await f.service.projects();
     assert.equal(pending!.status, "working");
     assert.equal(pending!.assessment!.verdict, "checking");
@@ -360,6 +367,15 @@ test("an unsupported release claim returns to the lead and is corrected before d
     answer(
       '{"verdict":"accept","reason":"Both can ship","quotes":["Beta passed 12 checks"]}',
     ),
+    answer(
+      '{"verdict":"revise","reason":"Beta rollback failed. Correct the release decision for Beta."}',
+    ),
+    call("project_report", {
+      revision: 1,
+      stage: "working",
+      summary: "Checking the release decision.",
+    }),
+    report("Beta passed tests and both components can ship."),
     async (context) => {
       const result = context.messages.findLast((m) => m.role === "toolResult");
       assert.ok(
@@ -382,6 +398,13 @@ test("an unsupported release claim returns to the lead and is corrected before d
     },
     answer('{"verdict":"accept"'),
     accepted,
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary: "Release decision is ready",
+      deliverable: corrected,
+      evidence: "Alpha passed 12 checks; Beta rollback failed.",
+    }),
     answer("Done"),
   ]);
   await f.service.send(
@@ -394,15 +417,157 @@ test("an unsupported release claim returns to the lead and is corrected before d
   );
   const [p] = await f.service.projects();
   assert.ok(p!.deliveryPost);
-  const deliveries = (await f.service.timeline(id)).posts.filter(
-    (p) => p.kind === "delivery",
-  );
+  const posts = (await f.service.timeline(id)).posts;
+  const reviews = posts.filter((p) => p.kind === "review");
+  assert.equal(reviews.length, 2);
+  assert.match(reviews[1]!.text, /前回の指摘/);
+  assert.equal(posts.filter((p) => p.kind === "revision").length, 1);
+  const deliveries = posts.filter((p) => p.kind === "delivery");
   assert.deepEqual(
     deliveries.map((p) => p.deliverable),
     [corrected],
   );
   assert.equal(p!.assessment!.verdict, "accept");
   assert.equal(p!.status, "delivered");
+});
+
+test("new primary evidence reopens review of an unchanged proposal", async (t) => {
+  const f = await fixture();
+  t.after(() => f.service.close());
+  const { id } = await f.service.create(
+    randomUUID(),
+    "Verify count",
+    undefined,
+    undefined,
+    true,
+  );
+  const proposal = {
+    revision: 1,
+    stage: "delivered",
+    summary: "Count recorded",
+    deliverable: "The count is 12.",
+    evidence: "Observed command output.",
+  };
+  f.faux.setResponses([
+    call("project_report", proposal),
+    answer(
+      '{"verdict":"revise","reason":"The count has no supporting output."}',
+    ),
+    call("bash", { command: "printf 'verified-count=12\n'" }),
+    call("project_report", proposal),
+    (context) => {
+      const request = JSON.parse(String(context.messages.at(-1)!.content));
+      assert.equal(
+        request.previousFeedback,
+        "The count has no supporting output.",
+      );
+      assert.ok(
+        request.source.records.some(
+          (record: { tool: string; output: string }) =>
+            record.tool === "bash" &&
+            record.output.includes("verified-count=12"),
+        ),
+      );
+      return fauxAssistantMessage(
+        '{"verdict":"accept","reason":"Observed the count","quotes":["verified-count=12"]}',
+      );
+    },
+    answer("Done"),
+  ]);
+  await f.service.send(id, randomUUID(), "Verify the count.");
+  await until(
+    async () => (await f.service.conversation(id)).status !== "running",
+  );
+  const row = (await f.service.projects())[0]!;
+  assert.equal(row.status, "delivered");
+  assert.equal(
+    (await f.service.timeline(id)).posts.filter((p) => p.kind === "review")
+      .length,
+    2,
+  );
+});
+
+test("a reworded rejection alone does not extend an unfinished project", async (t) => {
+  const f = await fixture();
+  t.after(() => f.service.close());
+  const { id } = await f.service.create(
+    randomUUID(),
+    "Missing measurement",
+    undefined,
+    undefined,
+    true,
+  );
+  const submit = (summary: string) =>
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary,
+      evidence: "Estimate only",
+    });
+  f.faux.setResponses([
+    submit("The count is about twelve"),
+    answer('{"verdict":"revise","reason":"Provide a measured count."}'),
+    answer("I will recheck."),
+    submit("Estimated count: twelve"),
+    answer('{"verdict":"revise","reason":"A measurement is still missing."}'),
+    answer("I will try again."),
+  ]);
+  await f.service.send(id, randomUUID(), "Report the measured count.");
+  await until(
+    async () => (await f.service.conversation(id)).status !== "running",
+  );
+  const stopped = await f.service.conversation(id);
+  assert.equal(stopped.status, "interrupted");
+  const reminders = (await f.service.view(id)).transcript
+    .flatMap((entry) => entry.messages)
+    .filter((message) => message.content.startsWith("Agent 自動進行"));
+  assert.equal(reminders.length, 1);
+  assert.match(stopped.detail, /新しい作業結果/);
+  assert.deepEqual(
+    (await f.service.timeline(id)).posts
+      .filter((p) => p.kind === "revision")
+      .map((p) => p.text),
+    ["Provide a measured count.", "A measurement is still missing."],
+  );
+});
+
+test("unreadable review output interrupts verification without sending the work back for edits", async (t) => {
+  const f = await fixture();
+  t.after(() => f.service.close());
+  const { id } = await f.service.create(
+    randomUUID(),
+    "Verification failure",
+    undefined,
+    undefined,
+    true,
+  );
+  f.faux.setResponses([
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary: "Report",
+      evidence: "Checked the source",
+    }),
+    answer("{"),
+    answer("{"),
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary: "Report",
+      evidence: "Checked the source",
+    }),
+    answer("Verification could not finish."),
+  ]);
+  await f.service.send(id, randomUUID(), "Inspect the source");
+  await until(
+    async () => (await f.service.conversation(id)).status === "interrupted",
+  );
+  const row = (await f.service.projects())[0]!;
+  assert.equal(row.assessment?.verdict, "unavailable");
+  const kinds = (await f.service.timeline(id)).posts.map((p) => p.kind);
+  assert.equal(kinds.filter((k) => k === "review_error").length, 1);
+  assert.equal(kinds.filter((k) => k === "review").length, 1);
+  assert.ok(!kinds.includes("revision") && !kinds.includes("delivery"));
 });
 
 test("project posts survive paging, retry, steering and reopening; the portfolio excludes archived threads", async () => {
@@ -453,10 +618,10 @@ test("project posts survive paging, retry, steering and reopening; the portfolio
       [directive],
     );
     assert.equal((await service.recentProjectPosts()).length, 12);
-    await assert.rejects(service.timeline(normal.id), { statusCode: 404 });
+    assert.deepEqual((await service.timeline(normal.id)).posts, []);
     const other = await service.create(
       randomUUID(),
-      "別案件",
+      "別スレッド",
       undefined,
       undefined,
       true,
@@ -588,4 +753,128 @@ test("new specialist evidence continues an unfinished project; repeated status a
     (await f.service.timeline(stalled)).posts.at(-1)?.kind,
     "interrupted",
   );
+});
+
+test("a project freezes its worker pool and reviewer at admission and charges every model to the same run", async (t) => {
+  const f = await fixture();
+  t.after(() => f.service.close());
+  const connectionId = randomUUID();
+  const otherConnection = randomUUID();
+  const worker = { connectionId, model: "gpt-4.1-mini" };
+  const reviewer = { connectionId: otherConnection, model: "gpt-4.1" };
+  const settings = {
+    models: [
+      {
+        id: connectionId,
+        provider: "openai",
+        key: "fixture-key-one",
+        model: "faux-1",
+      },
+      { id: otherConnection, provider: "openai", key: "fixture-key-two" },
+    ],
+    defaultModel: connectionId,
+    mcp: [],
+    instructions: "",
+    limits: { modelRequests: 20, runSeconds: 60, commandSeconds: 10 },
+    projectModels: {
+      workers: [worker, { ...reviewer, specialty: "集計" }],
+      reviewer,
+    },
+  };
+  await f.service.saveSettings({ ...settings, revision: 0 });
+  const { id } = await f.service.create(
+    randomUUID(),
+    "リリース判定",
+    connectionId,
+    "faux-1",
+    true,
+  );
+  const seen: [string, string][] = [];
+  const report: FauxResponseFactory = (context, _options, _state, model) => {
+    const input = JSON.parse(String(context.messages.at(-1)!.content));
+    seen.push([input.role, model.id]);
+    return fauxAssistantMessage(
+      JSON.stringify({
+        action: "report",
+        summary: input.task + "を確認しました。",
+      }),
+    );
+  };
+  f.faux.setResponses([
+    async (_context, _options, _state, model) => {
+      assert.equal(model.id, "faux-1");
+      await f.service.saveSettings({
+        ...settings,
+        revision: 1,
+        projectModels: null,
+      });
+      return fauxAssistantMessage(
+        fauxToolCall("project_team", {
+          revision: 1,
+          assignments: [
+            { role: "調査", task: "保存処理" },
+            { role: "再現テスト", task: "再送時の件数" },
+          ],
+        }),
+        { stopReason: "toolUse" },
+      );
+    },
+    report,
+    report,
+    call("project_team", {
+      revision: 1,
+      assignments: [{ role: "集計", task: "合計件数", worker: 2 }],
+    }),
+    report,
+    call("project_report", {
+      revision: 1,
+      stage: "delivered",
+      summary: "12件の成功を確認しました。",
+      deliverable: "12件成功。",
+      evidence: "依頼文の試験結果",
+    }),
+    (_context, _options, _state, model) => {
+      seen.push(["レビュー", model.id]);
+      return fauxAssistantMessage(
+        '{"verdict":"accept","reason":"元の記録と一致","quotes":["12件成功"]}',
+      );
+    },
+    answer("完了"),
+  ]);
+  await f.service.send(id, randomUUID(), "結果をまとめてください。12件成功。");
+  await until(
+    async () => (await f.service.conversation(id)).status !== "running",
+  );
+  assert.deepEqual(
+    new Map(seen),
+    new Map([
+      ["調査", worker.model],
+      ["再現テスト", reviewer.model],
+      ["集計", reviewer.model],
+      ["レビュー", reviewer.model],
+    ]),
+  );
+  assert.equal((await f.service.conversation(id)).requests, 8);
+  const [project] = await f.service.projects();
+  assert.equal(project!.status, "delivered");
+  assert.equal(project!.models?.workers?.[1]?.specialty, "集計");
+  const posts = (await f.service.timeline(id)).posts;
+  assert.equal(posts.find((p) => p.kind === "review")?.model, reviewer.model);
+  assert.ok(
+    posts
+      .filter((p) => p.actor === "member")
+      .every((p) => p.model === new Map(seen).get(p.name!)),
+  );
+  assert.equal(posts.at(-1)?.model, "faux-1");
+  await f.service.saveSettings({
+    ...settings,
+    revision: 2,
+    projectModels: { workers: [{ connectionId, model: "missing-model" }] },
+  });
+  await assert.rejects(
+    f.service.send(id, randomUUID(), "次の依頼"),
+    /スレッドのモデル設定/,
+  );
+  assert.equal((await f.service.projects())[0]?.revision, 1);
+  assert.equal((await f.service.timeline(id)).posts.length, posts.length);
 });

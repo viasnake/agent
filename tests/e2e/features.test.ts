@@ -16,8 +16,8 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       "保存済みの応答\n\n```javascript\nconst greeting = '<script>unsafe()</script>';\n```\n",
     ),
   ]);
-  const a = await f.service.create(randomUUID(), "セッション A");
-  const b = await f.service.create(randomUUID(), "セッション B");
+  const a = await f.service.create(randomUUID(), "スレッド A");
+  const b = await f.service.create(randomUUID(), "スレッド B");
   await f.service.send(a.id, randomUUID(), "最初の検索ワード");
   await until(
     async () => (await f.service.conversation(a.id)).status === "idle",
@@ -52,7 +52,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
   const row = (id: string) => page.locator(`[data-session-id="${id}"]`);
   const more = (id: string) => row(id).locator(".session-more").click();
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await row(a.id).locator(".conversation-item").click();
     await page.getByText("保存済みの応答", { exact: true }).waitFor();
     assert.equal(
@@ -216,7 +216,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       ["1", "1"],
     );
 
-    const statistics = page.getByRole("button", { name: "全セッションの統計" });
+    const statistics = page.getByRole("button", { name: "全スレッドの統計" });
     const usageRequest = page.waitForRequest(
       (request) => new URL(request.url()).pathname === "/api/statistics/usage",
     );
@@ -225,7 +225,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       new URL((await usageRequest).url()).searchParams.get("timezone"),
       "Asia/Tokyo",
     );
-    const dialog = page.getByRole("dialog", { name: "全セッションの統計" });
+    const dialog = page.getByRole("dialog", { name: "全スレッドの統計" });
     const daily = dialog.getByRole("table", { name: "日別の使用量" });
     const today = await dialog.getByLabel("終了日").inputValue();
     const day = daily.getByRole("row", { name: new RegExp(today) });
@@ -329,7 +329,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       true,
     );
 
-    await page.getByRole("tab", { name: "会話", exact: true }).click();
+    await page.getByRole("tab", { name: "スレッド", exact: true }).click();
     assert.equal(await composer!.evaluate((node) => node.isConnected), true);
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
     assert.equal(await page.locator(".attachment-chip").count(), 1);
@@ -344,7 +344,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       await page.locator(".usage-summary dd").last().textContent(),
       "$0.000000",
     );
-    await page.getByRole("tab", { name: "会話", exact: true }).click();
+    await page.getByRole("tab", { name: "スレッド", exact: true }).click();
     await page.locator("#message").fill("B の下書き");
     await row(a.id).locator(".conversation-item").click();
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
@@ -355,7 +355,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
     const sidebarFooter = page.locator(".sidebar-footer");
     const collapse = sidebarFooter.getByRole("button", {
-      name: "セッション一覧を閉じる",
+      name: "スレッド一覧を閉じる",
       exact: true,
     });
     const settingsButton = sidebarFooter.getByRole("button", {
@@ -384,14 +384,14 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     await settingsButton.click();
     await page.getByRole("heading", { name: "設定", exact: true }).waitFor();
     await page
-      .getByRole("button", { name: "セッション一覧を開く", exact: true })
+      .getByRole("button", { name: "スレッド一覧を開く", exact: true })
       .click();
     assert.equal((await page.locator("#sidebar").boundingBox())!.width, 272);
     await returnToSession(page);
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
 
-    const filter = page.getByRole("searchbox", { name: "セッションを検索" });
-    await filter.fill("セッション B");
+    const filter = page.getByRole("searchbox", { name: "スレッドを検索" });
+    await filter.fill("スレッド B");
     assert.equal(await row(a.id).count(), 0);
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
     await more(b.id);
@@ -400,14 +400,14 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       name: "名前を変更",
       exact: true,
     });
-    await rename.getByLabel("セッション名").fill("作業メモ");
+    await rename.getByLabel("スレッド名").fill("作業メモ");
     await rename.getByRole("button", { name: "保存", exact: true }).click();
     await rename.waitFor({ state: "hidden" });
     await filter.fill("");
     await row(b.id)
       .getByRole("button", { name: "作業メモ", exact: true })
       .waitFor();
-    assert.equal(await page.locator("#title").textContent(), "セッション A");
+    assert.equal(await page.locator("#title").textContent(), "スレッド A");
     await more(b.id);
     await page.getByRole("button", { name: "ピン留め", exact: true }).click();
     await page
@@ -424,19 +424,19 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       .getByRole("button", { name: "アーカイブから戻す", exact: true })
       .click();
     await page
-      .getByRole("button", { name: "通常のセッションを表示", exact: true })
+      .getByRole("button", { name: "通常のスレッドを表示", exact: true })
       .click();
     await more(b.id);
     await page
-      .getByRole("button", { name: "セッションを削除", exact: true })
+      .getByRole("button", { name: "スレッドを削除", exact: true })
       .click();
     await page
-      .getByRole("dialog", { name: "セッションを削除", exact: true })
+      .getByRole("dialog", { name: "スレッドを削除", exact: true })
       .getByRole("button", { name: "削除", exact: true })
       .click();
     await row(b.id).waitFor({ state: "detached" });
     assert.equal(await page.locator("#message").inputValue(), "A の下書き");
-    assert.equal(await page.locator("#title").textContent(), "セッション A");
+    assert.equal(await page.locator("#title").textContent(), "スレッド A");
 
     const pi = await f.service.piConversation(a.id);
     for (let index = 0; index < 45; index++)
@@ -660,7 +660,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     // Returning to a new-session draft retains its files; an accepted send clears
     // that draft so the next new session cannot inherit old attachments.
     await page.locator("#new-conversation").click();
-    await page.locator("#message").fill("新規セッションの添付");
+    await page.locator("#message").fill("新規スレッドの添付");
     await page.locator("#attachments").setInputFiles({
       name: "new.txt",
       mimeType: "text/plain",
@@ -670,7 +670,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
     await page.locator("#new-conversation").click();
     assert.equal(
       await page.locator("#message").inputValue(),
-      "新規セッションの添付",
+      "新規スレッドの添付",
     );
     assert.equal(await page.locator(".attachment-chip").count(), 1);
     f.faux.setResponses([answer("新規の添付を受信")]);
@@ -728,7 +728,7 @@ test("session actions, drafts, history search and explicit edit/regenerate/fork 
       });
       await page.setViewportSize({ width: 390, height: 844 });
       await page
-        .getByRole("button", { name: "セッション一覧を開く", exact: true })
+        .getByRole("button", { name: "スレッド一覧を開く", exact: true })
         .click();
       await more(a.id);
       await assertSidebarAlignment();

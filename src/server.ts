@@ -494,6 +494,19 @@ export async function createServer(
       ),
     ),
   );
+  app.get("/api/workspace", async (request) => {
+    const q = z
+      .object({ documents: z.enum(["1", "recent"]).optional() })
+      .parse(request.query);
+    return safe(await service.workspaceOverview(q.documents));
+  });
+  app.post("/api/conversations/:id/read-through", async (request) => {
+    const { postId } = z
+      .object({ postId: z.number().int().positive().safe() })
+      .strict()
+      .parse(request.body);
+    return service.readThrough(identifier.parse(request.params).id, postId);
+  });
   app.get("/api/project-dashboard/activity", async () =>
     safe({ posts: await service.recentProjectPosts() }),
   );

@@ -47,7 +47,7 @@ test("Skills settings import folders, edit and delete with validation in light, 
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   try {
-    await page.goto(origin);
+    await page.goto(origin + "/?new");
     await page
       .locator(`[data-session-id="${session.id}"] .conversation-item`)
       .click();

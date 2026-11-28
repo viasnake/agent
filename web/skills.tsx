@@ -163,7 +163,7 @@ export function Skills({
       )}
       {view?.busy && (
         <p role="status">
-          変更するには実行中のセッションやターミナルを停止してください
+          変更するには実行中のスレッドやターミナルを停止してください
         </p>
       )}
       {view?.errors.map((message) => (
